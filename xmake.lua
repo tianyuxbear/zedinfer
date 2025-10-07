@@ -15,6 +15,7 @@ add_rules("plugin.compile_commands.autoupdate", {outputdir = "build"})
 
 -- 全局添加 include 目录到头文件搜索路径
 add_includedirs("include")
+add_includedirs("third_party/include")
 
 
 if not is_plat("windows") then
@@ -32,3 +33,10 @@ end
 -- -Wall: 启用大部分警告
 -- -Wextra: 启用额外的合理警告
 add_cxxflags("-Wall", "-Wextra")
+
+add_requires("icu4c")
+
+target("tokenizer")
+    set_kind("static") 
+    add_packages("icu4c")
+    add_files("src/frontend/tokenizer/*.cpp")
