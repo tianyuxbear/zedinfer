@@ -41,4 +41,8 @@ target("tokenizer")
     add_packages("icu4c")
     add_files("src/frontend/tokenizer/*.cpp")
 
+target("loader")
+    set_kind("static") 
+    add_files("src/frontend/loader/*.cpp")
+
 includes("xmake/test.lua")
