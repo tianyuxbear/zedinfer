@@ -85,8 +85,8 @@ SafeTensorFile &SafeTensorFile::operator=(SafeTensorFile &&other) noexcept {
     return *this;
 }
 
-neollmDataType_t SafeTensorFile::parse_dtype(const std::string &dtype_str) {
-    static const std::unordered_map<std::string, neollmDataType_t> dtype_map = {
+NeollmDataType_t SafeTensorFile::parse_dtype(const std::string &dtype_str) {
+    static const std::unordered_map<std::string, NeollmDataType_t> dtype_map = {
         {"BYTE", NEOLLM_DTYPE_BYTE},
         {"BOOL", NEOLLM_DTYPE_BOOL},
         {"I8", NEOLLM_DTYPE_I8},
@@ -97,11 +97,10 @@ neollmDataType_t SafeTensorFile::parse_dtype(const std::string &dtype_str) {
         {"U16", NEOLLM_DTYPE_U16},
         {"U32", NEOLLM_DTYPE_U32},
         {"U64", NEOLLM_DTYPE_U64},
-        {"F8", NEOLLM_DTYPE_F8},
         {"F16", NEOLLM_DTYPE_F16},
-        {"BF16", NEOLLM_DTYPE_BF16},
         {"F32", NEOLLM_DTYPE_F32},
-        {"F64", NEOLLM_DTYPE_F64}};
+        {"F64", NEOLLM_DTYPE_F64},
+        {"BF16", NEOLLM_DTYPE_BF16}};
 
     auto it = dtype_map.find(dtype_str);
     if (it != dtype_map.end()) {

@@ -15,42 +15,50 @@
 #define __NEOLLM__C
 #endif
 
-// Device Types
-typedef enum {
-    NEOLLM_DEVICE_CPU = 0,
-    NEOLLM_DEVICE_NVIDIA = 1,
-    NEOLLM_DEVICE_TYPE_COUNT
-} neollmDeviceType_t;
+/**
+ * @brief Stream handle for device-specific asynchronous execution.
+ */
+typedef void *NeollmStream_t;
 
-// Data Types
+/**
+ * @brief Device types.
+ */
 typedef enum {
-    NEOLLM_DTYPE_INVALID = 0,
-    NEOLLM_DTYPE_BYTE = 1,
-    NEOLLM_DTYPE_BOOL = 2,
-    NEOLLM_DTYPE_I8 = 3,
-    NEOLLM_DTYPE_I16 = 4,
-    NEOLLM_DTYPE_I32 = 5,
-    NEOLLM_DTYPE_I64 = 6,
-    NEOLLM_DTYPE_U8 = 7,
-    NEOLLM_DTYPE_U16 = 8,
-    NEOLLM_DTYPE_U32 = 9,
-    NEOLLM_DTYPE_U64 = 10,
-    NEOLLM_DTYPE_F8 = 11,
-    NEOLLM_DTYPE_F16 = 12,
-    NEOLLM_DTYPE_BF16 = 13,
-    NEOLLM_DTYPE_F32 = 14,
-    NEOLLM_DTYPE_F64 = 15,
-} neollmDataType_t;
+    NEOLLM_DEVICE_CPU = 0,    ///< CPU
+    NEOLLM_DEVICE_NVIDIA = 1, ///< NVIDIA CUDA
+    NEOLLM_DEVICE_TYPE_COUNT  ///< Number of device types
+} NeollmDeviceType_t;
 
-// Runtime Types: Stream
-typedef void *neollmStream_t;
-
-// Memory Copy Directions
+/**
+ * @brief Supported data types.
+ */
 typedef enum {
-    NEOLLM_MEMCPY_H2H = 0,
-    NEOLLM_MEMCPY_H2D = 1,
-    NEOLLM_MEMCPY_D2H = 2,
-    NEOLLM_MEMCPY_D2D = 3,
-} neollmMemcpyKind_t;
+    NEOLLM_DTYPE_BYTE = 0,  ///< 8-bit byte
+    NEOLLM_DTYPE_BOOL = 1,  ///< Boolean
+    NEOLLM_DTYPE_I8 = 2,    ///< int8
+    NEOLLM_DTYPE_I16 = 3,   ///< int16
+    NEOLLM_DTYPE_I32 = 4,   ///< int32
+    NEOLLM_DTYPE_I64 = 5,   ///< int64
+    NEOLLM_DTYPE_U8 = 6,    ///< uint8
+    NEOLLM_DTYPE_U16 = 7,   ///< uint16
+    NEOLLM_DTYPE_U32 = 8,   ///< uint32
+    NEOLLM_DTYPE_U64 = 9,   ///< uint64
+    NEOLLM_DTYPE_F16 = 10,  ///< float16
+    NEOLLM_DTYPE_F32 = 11,  ///< float32
+    NEOLLM_DTYPE_F64 = 12,  ///< float64
+    NEOLLM_DTYPE_BF16 = 13, ///< bfloat16
+    NEOLLM_DTYPE_COUNT      ///< Number of data types
+} NeollmDataType_t;
+
+/**
+ * @brief Memory copy directions.
+ */
+typedef enum {
+    NEOLLM_MEMCPY_H2H = 0,    ///< Host to Host
+    NEOLLM_MEMCPY_H2D = 1,    ///< Host to Device
+    NEOLLM_MEMCPY_D2H = 2,    ///< Device to Host
+    NEOLLM_MEMCPY_D2D = 3,    ///< Device to Device
+    NEOLLM_MEMCPY_DEFAULT = 4 ///< Auto-detect
+} NeollmMemcpyKind_t;
 
 #endif // __NEOLLM_H__
