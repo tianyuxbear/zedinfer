@@ -18,7 +18,7 @@ struct CustomBFloat16 {
 typedef struct CustomBFloat16 bf16_t;
 
 namespace utils {
-inline size_t dsize(neollmDataType_t dtype) {
+inline size_t dsize(NeollmDataType_t dtype) {
     switch (dtype) {
     case NEOLLM_DTYPE_BYTE:
         return sizeof(unsigned char);
@@ -40,23 +40,20 @@ inline size_t dsize(neollmDataType_t dtype) {
         return sizeof(uint32_t);
     case NEOLLM_DTYPE_U64:
         return sizeof(uint64_t);
-    case NEOLLM_DTYPE_F8:
-        return 1;
     case NEOLLM_DTYPE_F16:
-        return 2;
-    case NEOLLM_DTYPE_BF16:
         return 2;
     case NEOLLM_DTYPE_F32:
         return sizeof(float);
     case NEOLLM_DTYPE_F64:
         return sizeof(double);
-    case NEOLLM_DTYPE_INVALID:
+    case NEOLLM_DTYPE_BF16:
+        return 2;
     default:
         throw std::invalid_argument("Unsupported or invalid data type.");
     }
 }
 
-inline const char *dtype_to_str(neollmDataType_t dtype) {
+inline const char *dtype_to_str(NeollmDataType_t dtype) {
     switch (dtype) {
     case NEOLLM_DTYPE_BYTE:
         return "byte";
@@ -78,17 +75,14 @@ inline const char *dtype_to_str(neollmDataType_t dtype) {
         return "uint32";
     case NEOLLM_DTYPE_U64:
         return "uint64";
-    case NEOLLM_DTYPE_F8:
-        return "float8";
     case NEOLLM_DTYPE_F16:
         return "float16";
-    case NEOLLM_DTYPE_BF16:
-        return "bfloat16";
     case NEOLLM_DTYPE_F32:
         return "float32";
     case NEOLLM_DTYPE_F64:
         return "float64";
-    case NEOLLM_DTYPE_INVALID:
+    case NEOLLM_DTYPE_BF16:
+        return "bfloat16";
     default:
         throw std::invalid_argument("Unsupported or invalid data type.");
     }

@@ -27,7 +27,7 @@ private:
     int fd;
 #endif
 
-    neollmDataType_t parse_dtype(const std::string &dtype_str);
+    NeollmDataType_t parse_dtype(const std::string &dtype_str);
     void load_metadata(); // Parses header and populates `tensors`
     void open_mmap();     // Maps file into memory
     void close_mmap();    // Unmaps file and releases resources

@@ -10,7 +10,7 @@ namespace neollm::loader {
 
 struct TensorInfo {
     std::string name;
-    neollmDataType_t dtype;
+    NeollmDataType_t dtype;
     std::vector<size_t> shape;
     size_t data_offset; // Offset of tensor data within the file
     size_t num_bytes;   // Size of tensor data in bytes
