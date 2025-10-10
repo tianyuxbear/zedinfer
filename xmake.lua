@@ -45,4 +45,8 @@ target("loader")
     set_kind("static") 
     add_files("src/frontend/loader/*.cpp")
 
+target("core")
+    set_kind("static") 
+    add_files("src/backend/core/**.cpp")
+
 includes("xmake/test.lua")
