@@ -32,6 +32,9 @@ public:
     // Returns the currently active Runtime.
     Runtime &runtime();
 
+    // Clears all runtimes and resets internal state (e.g., for test isolation).
+    void reset();
+
     friend Context &context();
 };
 

@@ -43,6 +43,11 @@ Runtime &Context::runtime() {
     return *current_runtime_;
 }
 
+void Context::reset() {
+    runtime_map_.clear();
+    current_runtime_ = nullptr;
+}
+
 // Returns the thread-local Context instance.
 Context &context() {
     thread_local Context thread_context;
