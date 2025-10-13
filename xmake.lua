@@ -36,13 +36,18 @@ add_cxxflags("-Wall", "-Wextra")
 
 add_requires("icu4c")
 
+target("utils")
+    set_kind("static")
+    add_files("src/utils/*.cpp")
+
 target("tokenizer")
     set_kind("static") 
     add_packages("icu4c")
     add_files("src/frontend/tokenizer/*.cpp")
 
 target("loader")
-    set_kind("static") 
+    set_kind("static")
+    add_deps("utils") 
     add_files("src/frontend/loader/*.cpp")
 
 target("core")

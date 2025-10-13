@@ -11,7 +11,6 @@ target("test-loader")
     set_kind("binary")
     add_deps("loader")
     add_files("../test/loader/*.cpp")
-    add_files("../src/utils/types.cpp")
     add_packages("gtest")
     add_syslinks("gtest_main") 
 
