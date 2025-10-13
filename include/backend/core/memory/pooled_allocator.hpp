@@ -32,7 +32,15 @@ public:
     ~PooledAllocator() override {
         // Ensure proper device context before releasing the memory pool.
         if (memory_pool_) {
-            core::context().setDevice(device_type_, device_id_);
+            /*
+             * During context destruction, the runtime is automatically released,
+             * which in turn triggers the destruction of the allocator. At this point,
+             * the context is already in the process of being torn down, so it is no
+             * longer safe to use context.setDevice() to switch the device context.
+             * To ensure the correct device is active when releasing the memory pool,
+             * we directly invoke the underlying API to set the device.
+             */
+            api_->set_device(device_id_);
             memory_pool_.reset();
         }
     }
