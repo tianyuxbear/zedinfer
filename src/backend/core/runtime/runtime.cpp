@@ -22,7 +22,7 @@ Runtime::Runtime(NeollmDeviceType_t device_type, int device_id)
     }
 
     stream_ = api_->create_stream();
-    if (stream_ == nullptr) {
+    if (device_type_ != NEOLLM_DEVICE_CPU && stream_ == nullptr) {
         throw std::runtime_error("Failed to create stream");
     }
 
