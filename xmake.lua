@@ -38,6 +38,9 @@ add_requires("icu4c")
 
 target("utils")
     set_kind("static")
+    if is_plat("linux")and is_arch("x86_64") then
+        add_cxflags("-march=native")
+    end
     add_files("src/utils/*.cpp")
 
 target("tokenizer")
