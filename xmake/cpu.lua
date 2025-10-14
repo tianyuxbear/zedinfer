@@ -1,0 +1,5 @@
+target("device-cpu")
+    set_kind("static")
+    add_files("../src/backend/device/cpu/*.cpp")
+    on_install(function (target) end)
+target_end()

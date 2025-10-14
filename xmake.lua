@@ -36,6 +36,21 @@ add_cxxflags("-Wall", "-Wextra")
 
 add_requires("icu4c")
 
+-- CPU --
+includes("xmake/cpu.lua")
+
+-- NVIDIA --
+option("nv-gpu")
+    set_default(false)
+    set_showmenu(true)
+    set_description("Whether to compile implementations for Nvidia GPU")
+option_end()
+
+if has_config("nv-gpu") then
+    add_defines("ENABLE_NVIDIA_API")
+    includes("xmake/nvidia.lua")
+end
+
 target("utils")
     set_kind("static")
     if is_plat("linux")and is_arch("x86_64") then
@@ -60,5 +75,13 @@ target("core")
     set_kind("static")
     add_files("src/backend/core/**.cpp")
     on_install(function (target) end)
+
+target("device")
+    set_kind("static")
+    add_deps("utils")
+    add_deps("device-cpu")
+    add_files("src/backend/device/*.cpp")
+    on_install(function (target) end)
+target_end()
 
 includes("xmake/test.lua")
