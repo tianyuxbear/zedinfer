@@ -42,19 +42,23 @@ target("utils")
         add_cxflags("-march=native")
     end
     add_files("src/utils/*.cpp")
+    on_install(function (target) end)
 
 target("tokenizer")
     set_kind("static")
     add_packages("icu4c")
     add_files("src/frontend/tokenizer/*.cpp")
+    on_install(function (target) end)
 
 target("loader")
     set_kind("static")
     add_deps("utils")
     add_files("src/frontend/loader/*.cpp")
+    on_install(function (target) end)
 
 target("core")
     set_kind("static")
     add_files("src/backend/core/**.cpp")
+    on_install(function (target) end)
 
 includes("xmake/test.lua")
