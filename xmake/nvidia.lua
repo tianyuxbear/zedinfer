@@ -1,0 +1,5 @@
+target("device-nvidia")
+    set_kind("static")
+    add_files("../src/backend/device/nvidia/*.cu")
+    on_install(function (target) end)
+target_end()
