@@ -2,8 +2,8 @@
 #include "backend/core/runtime/runtime.hpp"
 
 namespace neollm::core {
-Storage::Storage(std::byte *memory, size_t size, Runtime &runtime, bool is_host)
-    : memory_(memory), size_(size), runtime_(runtime), is_host_(is_host) {}
+Storage::Storage(std::byte *memory, size_t size, Runtime &runtime, bool is_host, bool is_mmap)
+    : memory_(memory), size_(size), runtime_(runtime), is_host_(is_host), is_mmap_(is_mmap) {}
 
 Storage::~Storage() {
     runtime_.freeStorage(this);
@@ -35,5 +35,9 @@ int Storage::deviceId() const {
 
 bool Storage::isHost() const {
     return is_host_;
+}
+
+bool Storage::isMmap() const {
+    return is_mmap_;
 }
 } // namespace neollm::core
