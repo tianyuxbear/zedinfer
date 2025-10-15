@@ -95,4 +95,11 @@ target("tensor")
     on_install(function (target) end)
 target_end()
 
+target("ops")
+    set_kind("static")
+    add_deps("ops-cpu")
+    add_files("src/backend/ops/*/*.cpp")
+    on_install(function (target) end)
+target_end()
+
 includes("xmake/test.lua")
