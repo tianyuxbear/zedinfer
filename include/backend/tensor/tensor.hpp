@@ -26,7 +26,7 @@ public:
         const std::vector<size_t> &shape,
         NeollmDataType_t dtype,
         NeollmDeviceType_t device_type = NEOLLM_DEVICE_CPU,
-        int device_id = 0);
+        int device_id = 0, bool is_mmap = false, std::byte *mmap_ptr = nullptr);
     ~Tensor() = default;
     // Info
     std::byte *data();

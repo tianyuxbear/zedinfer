@@ -64,7 +64,14 @@ storage_t Runtime::allocateHostStorage(size_t size) {
     return std::shared_ptr<Storage>(new Storage((std::byte *)api_->malloc_host(size), size, *this, true));
 }
 
+storage_t Runtime::allocateMmapStorage(std::byte *data_ptr, size_t size) {
+    return std::shared_ptr<Storage>(new Storage(data_ptr, size, *this, true, true));
+}
+
 void Runtime::freeStorage(Storage *storage) {
+    if (storage->isMmap()) {
+        return;
+    }
     if (storage->isHost()) {
         api_->free_host(storage->memory());
     } else {

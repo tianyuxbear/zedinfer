@@ -11,8 +11,9 @@ private:
     size_t size_;
     Runtime &runtime_;
     bool is_host_;
+    bool is_mmap_;
 
-    Storage(std::byte *memory, size_t size, Runtime &runtime, bool is_host);
+    Storage(std::byte *memory, size_t size, Runtime &runtime, bool is_host, bool is_mmap = false);
 
 public:
     friend class Runtime;
@@ -23,6 +24,7 @@ public:
     NeollmDeviceType_t deviceType() const;
     int deviceId() const;
     bool isHost() const;
+    bool isMmap() const;
 };
 
 } // namespace neollm::core

@@ -19,7 +19,7 @@ Tensor::Tensor(TensorMeta meta, core::storage_t storage, size_t offset)
 tensor_t Tensor::create(const std::vector<size_t> &shape,
                         NeollmDataType_t dtype,
                         NeollmDeviceType_t device_type,
-                        int device) {
+                        int device_id, bool is_mmap, std::byte *mmap_ptr) {
     size_t ndim_ = shape.size();
     std::vector<ptrdiff_t> strides(ndim_);
     size_t stride = 1;
@@ -31,11 +31,18 @@ tensor_t Tensor::create(const std::vector<size_t> &shape,
     size_t total_elems = stride;
     size_t dtype_size = utils::dsize(dtype);
 
+    if (is_mmap) {
+        ASSERT(device_type == NEOLLM_DEVICE_CPU, "mmap-backed tensors must reside on CPU");
+        ASSERT(device_id == 0, "device_id must be 0 for CPU tensors");
+        auto storage = core::context().runtime().allocateMmapStorage(mmap_ptr, total_elems * dtype_size);
+        return std::shared_ptr<Tensor>(new Tensor(meta, storage));
+    }
+
     if (device_type == NEOLLM_DEVICE_CPU && core::context().runtime().deviceType() != NEOLLM_DEVICE_CPU) {
         auto storage = core::context().runtime().allocateHostStorage(total_elems * dtype_size);
         return std::shared_ptr<Tensor>(new Tensor(meta, storage));
     } else {
-        core::context().setDevice(device_type, device);
+        core::context().setDevice(device_type, device_id);
         auto storage = core::context().runtime().allocateDeviceStorage(total_elems * dtype_size);
         return std::shared_ptr<Tensor>(new Tensor(meta, storage));
     }
