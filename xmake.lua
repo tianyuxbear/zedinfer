@@ -102,4 +102,10 @@ target("ops")
     on_install(function (target) end)
 target_end()
 
+target("models")
+    set_kind("static")
+    add_deps("loader")
+    add_files("src/models/*.cpp")
+    on_install(function (target) end)
+
 includes("xmake/test.lua")
