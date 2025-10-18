@@ -10,7 +10,7 @@ class GraphBuilder {
 public:
     virtual ~GraphBuilder() = default;
 
-    virtual compute_graph_t build(const model::Model *model);
+    virtual compute_graph_t build(const model::Model *model) = 0;
 };
 
 // Graph builder implementation for Qwen2 architecture
