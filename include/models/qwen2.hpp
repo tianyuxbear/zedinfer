@@ -16,7 +16,9 @@ struct Qwen2Config : public ModelConfig {
 // Concrete implementation of the Qwen2 model.
 class Qwen2Model : public Model {
 public:
-    Qwen2Model(Qwen2Config &config, std::unique_ptr<ModelWeights> weights) : config_(config), weights_(std::move(weights)) {};
+    Qwen2Model(Qwen2Config &config, std::unique_ptr<ModelWeights> weights) : config_(config), weights_(std::move(weights)) {
+        num_params_ = calculate_num_parameters();
+    };
 
     const Qwen2Config &config() const override {
         return config_;
@@ -31,8 +33,8 @@ public:
     std::string get_output_weight_name() const override;
     std::vector<std::string> get_layer_weight_names(int layer_idx) const override;
 
-    std::string model_type() const override;
-    size_t num_parameters() const override;
+    std::string model_type() const override { return "qwen2"; };
+    size_t num_parameters() const override { return num_params_; };
 
 private:
     size_t calculate_num_parameters() const;
