@@ -43,8 +43,8 @@ public:
     // 核心接口（纯虚函数）
     virtual tensor_t get_k_cache(int layer_idx) = 0;
     virtual tensor_t get_v_cache(int layer_idx) = 0;
-    virtual tensor_t get_k_cache_slice(int layer_idx, int past_len) = 0;
-    virtual tensor_t get_v_cache_slice(int layer_idx, int past_len) = 0;
+    virtual tensor_t get_k_cache_slice(int layer_idx, int total_len) = 0;
+    virtual tensor_t get_v_cache_slice(int layer_idx, int total_len) = 0;
     virtual tensor_t get_k_cache_write_slice(int layer_idx, int past_len, int seq_len) = 0;
     virtual tensor_t get_v_cache_write_slice(int layer_idx, int past_len, int seq_len) = 0;
 

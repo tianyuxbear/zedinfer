@@ -10,6 +10,10 @@ set_encodings("utf-8")
 -- 全局编译模式
 add_rules("mode.debug", "mode.release")
 
+if is_mode("debug") then
+    add_defines("DEBUG")
+end
+
 -- 自动生成 compile_commands.json 文件到 build 目录
 add_rules("plugin.compile_commands.autoupdate", {outputdir = "build"})
 

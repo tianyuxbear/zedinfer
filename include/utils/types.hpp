@@ -88,6 +88,53 @@ inline const char *dtype_to_str(NeollmDataType_t dtype) {
     }
 }
 
+inline NeollmDataType_t str_to_dtype(std::string_view str) {
+    if (str == "byte") {
+        return NEOLLM_DTYPE_BYTE;
+    }
+    if (str == "bool") {
+        return NEOLLM_DTYPE_BOOL;
+    }
+    if (str == "int8") {
+        return NEOLLM_DTYPE_I8;
+    }
+    if (str == "int16") {
+        return NEOLLM_DTYPE_I16;
+    }
+    if (str == "int32") {
+        return NEOLLM_DTYPE_I32;
+    }
+    if (str == "int64") {
+        return NEOLLM_DTYPE_I64;
+    }
+    if (str == "uint8") {
+        return NEOLLM_DTYPE_U8;
+    }
+    if (str == "uint16") {
+        return NEOLLM_DTYPE_U16;
+    }
+    if (str == "uint32") {
+        return NEOLLM_DTYPE_U32;
+    }
+    if (str == "uint64") {
+        return NEOLLM_DTYPE_U64;
+    }
+    if (str == "float16") {
+        return NEOLLM_DTYPE_F16;
+    }
+    if (str == "float32") {
+        return NEOLLM_DTYPE_F32;
+    }
+    if (str == "float64") {
+        return NEOLLM_DTYPE_F64;
+    }
+    if (str == "bfloat16") {
+        return NEOLLM_DTYPE_BF16;
+    }
+
+    throw std::invalid_argument("Unsupported or invalid data type string: " + std::string(str));
+}
+
 float _f16_to_f32(fp16_t val);
 fp16_t _f32_to_f16(float val);
 

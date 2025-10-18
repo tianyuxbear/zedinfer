@@ -1,5 +1,6 @@
 #pragma once
 
+#include "frontend/loader/interface.hpp"
 #include "models/base.hpp"
 #include <memory>
 #include <nlohmann/json.hpp>
@@ -16,6 +17,8 @@ public:
     static std::unique_ptr<Model> parse(const std::string &model_path);
 
 private:
+    static std::unique_ptr<loader::IModelLoader> loader;
+
     // Populates ModelConfig from parsed JSON.
     static void load_base_config(ModelConfig &config, const json &j);
     // Loads and parses config.json into a ModelConfig.
