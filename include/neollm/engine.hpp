@@ -52,12 +52,12 @@ struct GenerationStats {
     double decode_time_ms = 0.0;
     double total_time_ms = 0.0;
 
-    double tokens_per_second() const {
-        return total_time_ms > 0 ? (generated_tokens * 1000.0 / total_time_ms) : 0.0;
-    }
-
     double prefill_tokens_per_second() const {
         return prefill_time_ms > 0 ? (prompt_tokens * 1000.0 / prefill_time_ms) : 0.0;
+    }
+
+    double decode_tokens_per_second() const {
+        return decode_time_ms > 0 ? (generated_tokens * 1000.0 / decode_time_ms) : 0.0;
     }
 
     std::string summary() const;
@@ -73,13 +73,11 @@ public:
      * @param model_path Path to model directory (containing config.json, weights, tokenizer)
      * @param device_type Device type (CPU/CUDA)
      * @param device_id Device ID (default: 0)
-     * @param dtype Data type for computation (default: BF16)
      */
     static std::shared_ptr<InferenceEngine> create(
         const std::string &model_path,
         NeollmDeviceType_t device_type = NEOLLM_DEVICE_CPU,
-        int device_id = 0,
-        NeollmDataType_t dtype = NEOLLM_DTYPE_BF16);
+        int device_id = 0);
 
     /**
      * Chat completion with message history
@@ -142,7 +140,7 @@ private:
         graph::compute_graph_t graph,
         kvcache::kvcache_t kv_cache,
         std::unique_ptr<graph::GraphExecutor> executor,
-        const GenerationConfig &default_config);
+        const GenerationConfig &gen_config = GenerationConfig());
 
     // Core components
     std::unique_ptr<model::Model> model_;
@@ -152,7 +150,7 @@ private:
     std::unique_ptr<graph::GraphExecutor> executor_;
 
     // Configuration
-    GenerationConfig default_config_;
+    GenerationConfig gen_config_;
     NeollmDeviceType_t device_type_;
     int device_id_;
     NeollmDataType_t dtype_;
@@ -183,34 +181,12 @@ public:
         return *this;
     }
 
-    InferenceEngineBuilder &set_dtype(NeollmDataType_t dtype) {
-        dtype_ = dtype;
-        return *this;
-    }
-
-    InferenceEngineBuilder &set_kv_cache_config(const kvcache::DynamicKVCacheConfig &config) {
-        kv_cache_config_ = config;
-        use_custom_kv_config_ = true;
-        return *this;
-    }
-
-    InferenceEngineBuilder &set_generation_config(const GenerationConfig &config) {
-        gen_config_ = config;
-        return *this;
-    }
-
     std::unique_ptr<InferenceEngine> build();
 
 private:
     std::string model_path_;
     NeollmDeviceType_t device_type_ = NEOLLM_DEVICE_CPU;
     int device_id_ = 0;
-    NeollmDataType_t dtype_ = NEOLLM_DTYPE_BF16;
-
-    kvcache::DynamicKVCacheConfig kv_cache_config_;
-    bool use_custom_kv_config_ = false;
-
-    GenerationConfig gen_config_;
 
     // Friend class to access InferenceEngine's private constructor
     friend class InferenceEngine;

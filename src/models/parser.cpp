@@ -11,6 +11,8 @@ using json = nlohmann::json;
 
 namespace neollm::model {
 
+std::unique_ptr<loader::IModelLoader> ModelParser::loader;
+
 // Parse model config and weights, then instantiate the corresponding model.
 std::unique_ptr<Model> ModelParser::parse(const std::string &model_path) {
     // Load model configuration
@@ -82,7 +84,7 @@ std::unique_ptr<ModelConfig> ModelParser::load_config(const std::string &config_
 
 // Load model weights using memory-mapped SafeTensors.
 std::unique_ptr<ModelWeights> ModelParser::load_weights(const std::string &model_path) {
-    auto loader = neollm::loader::SafeTensorsLoader::create(model_path);
+    loader = neollm::loader::SafeTensorsLoader::create(model_path);
     auto weights = std::make_unique<ModelWeights>();
 
     for (const auto &raw_name : loader->get_all_tensor_names()) {

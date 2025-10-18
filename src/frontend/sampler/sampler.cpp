@@ -1,5 +1,6 @@
 #include "frontend/sampler/sampler.hpp"
 #include "backend/ops/ops.hpp"
+#include "neollm.h"
 #include <algorithm>
 #include <cmath>
 #include <sstream>
@@ -62,10 +63,10 @@ int ArgmaxSampler::sample(tensor_t logits) {
     tensor_t last_logits = getLastLogits(logits);
 
     // Create output tensors for argmax operation
-    tensor_t max_idx = Tensor::create({1}, NEOLLM_DTYPE_I32,
+    tensor_t max_idx = Tensor::create({1}, NEOLLM_DTYPE_I64,
                                       last_logits->deviceType(),
                                       last_logits->deviceId());
-    tensor_t max_val = Tensor::create({1}, NEOLLM_DTYPE_F32,
+    tensor_t max_val = Tensor::create({1}, NEOLLM_DTYPE_BF16,
                                       last_logits->deviceType(),
                                       last_logits->deviceId());
 

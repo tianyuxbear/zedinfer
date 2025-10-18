@@ -3,6 +3,7 @@
 #include "frontend/tokenizer/hf_tokenizer.hpp"
 #include "graph/builder.hpp"
 #include "models/parser.hpp"
+#include "utils/types.hpp"
 #include <iostream>
 #include <sstream>
 
@@ -49,7 +50,7 @@ std::string GenerationStats::summary() const {
         << "Prefill time: " << prefill_time_ms << " ms "
         << "(" << prefill_tokens_per_second() << " tokens/s)\n"
         << "Decode time: " << decode_time_ms << " ms "
-        << "(" << tokens_per_second() << " tokens/s)\n"
+        << "(" << decode_tokens_per_second() << " tokens/s)\n"
         << "Total time: " << total_time_ms << " ms\n"
         << "============================";
     return oss.str();
@@ -65,13 +66,13 @@ InferenceEngine::InferenceEngine(
     graph::compute_graph_t graph,
     kvcache::kvcache_t kv_cache,
     std::unique_ptr<graph::GraphExecutor> executor,
-    const GenerationConfig &default_config)
+    const GenerationConfig &gen_config)
     : model_(std::move(model)),
       tokenizer_(std::move(tokenizer)),
       graph_(graph),
       kv_cache_(kv_cache),
       executor_(std::move(executor)),
-      default_config_(default_config) {
+      gen_config_(gen_config) {
 
     device_type_ = kv_cache_->config().device_type;
     device_id_ = kv_cache_->config().device_id;
@@ -81,13 +82,11 @@ InferenceEngine::InferenceEngine(
 std::shared_ptr<InferenceEngine> InferenceEngine::create(
     const std::string &model_path,
     NeollmDeviceType_t device_type,
-    int device_id,
-    NeollmDataType_t dtype) {
+    int device_id) {
 
     return InferenceEngineBuilder()
         .set_model_path(model_path)
         .set_device(device_type, device_id)
-        .set_dtype(dtype)
         .build();
 }
 
@@ -307,7 +306,6 @@ std::unique_ptr<InferenceEngine> InferenceEngineBuilder::build() {
     }
 
     std::cout << "[Builder] Model loaded: " << model->model_type() << std::endl;
-    std::cout << "[Builder] Parameters: " << model->num_parameters() << std::endl;
 
     // Load tokenizer
     auto tokenizer = tokenizer::HFTokenizer::create(model_path_ + "/tokenizer.json");
@@ -320,21 +318,15 @@ std::unique_ptr<InferenceEngine> InferenceEngineBuilder::build() {
 
     // Setup KV cache config
     kvcache::DynamicKVCacheConfig kv_config;
-    if (use_custom_kv_config_) {
-        kv_config = kv_cache_config_;
-    } else {
-        // Use model config
-        const auto &model_config = model->config();
-        kv_config.num_layers = model_config.num_hidden_layers;
-        kv_config.num_kv_heads = model_config.num_key_value_heads;
-        kv_config.head_dim = model_config.hidden_size / model_config.num_attention_heads;
-        kv_config.initial_capacity = 256;
-        kv_config.model_max_seq_len = std::min(8192, model_config.max_position_embeddings);
-    }
-
+    const auto &model_config = model->config();
+    kv_config.num_layers = model_config.num_hidden_layers;
+    kv_config.num_kv_heads = model_config.num_key_value_heads;
+    kv_config.head_dim = model_config.hidden_size / model_config.num_attention_heads;
+    kv_config.initial_capacity = 256;
+    kv_config.model_max_seq_len = std::min(8192ul, model_config.max_position_embeddings);
     kv_config.device_type = device_type_;
     kv_config.device_id = device_id_;
-    kv_config.dtype = dtype_;
+    kv_config.dtype = utils::str_to_dtype(model_config.torch_dtype);
 
     // Create KV cache
     auto kv_cache = kvcache::DynamicKVCacheManager::create_dynamic_kvcache(kv_config);
@@ -355,7 +347,6 @@ std::unique_ptr<InferenceEngine> InferenceEngineBuilder::build() {
     }
 
     auto graph = builder->build(model.get());
-    delete builder;
 
     std::cout << "[Builder] Computation graph built" << std::endl;
 
@@ -371,8 +362,7 @@ std::unique_ptr<InferenceEngine> InferenceEngineBuilder::build() {
             std::move(tokenizer),
             graph,
             kv_cache,
-            std::move(executor),
-            gen_config_));
+            std::move(executor)));
 
     std::cout << "[Builder] Inference engine ready!" << std::endl;
 

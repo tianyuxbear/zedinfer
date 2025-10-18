@@ -24,7 +24,7 @@ compute_graph_t Qwen2GraphBuilder::build(const model::Model *model) {
     // Build transformer layers
     auto hidden_states = embedding_node;
 
-    for (int i = 0; i < config.num_hidden_layers; ++i) {
+    for (size_t i = 0; i < config.num_hidden_layers; ++i) {
         // Create KV cache input nodes for each layer
         auto k_cache_name = "layer_" + std::to_string(i) + "_k_cache";
         auto v_cache_name = "layer_" + std::to_string(i) + "_v_cache";

@@ -148,22 +148,20 @@ tensor_t DynamicKVCacheManager::get_v_cache(int layer_idx) {
     return v_caches_[layer_idx];
 }
 
-tensor_t DynamicKVCacheManager::get_k_cache_slice(int layer_idx, int past_len) {
+tensor_t DynamicKVCacheManager::get_k_cache_slice(int layer_idx, int total_len) {
     validate_layer_idx(layer_idx);
-    validate_length_params(past_len, 0);
 
-    ASSERT(past_len != 0, "past_len must be greater than 0 to slice KV cache");
+    ASSERT(total_len != 0, "total_len must be greater than 0 to slice KV cache");
 
-    return k_caches_[layer_idx]->slice(0, 0, past_len);
+    return k_caches_[layer_idx]->slice(0, 0, total_len);
 }
 
-tensor_t DynamicKVCacheManager::get_v_cache_slice(int layer_idx, int past_len) {
+tensor_t DynamicKVCacheManager::get_v_cache_slice(int layer_idx, int total_len) {
     validate_layer_idx(layer_idx);
-    validate_length_params(past_len, 0);
 
-    ASSERT(past_len != 0, "past_len must be greater than 0 to slice KV cache");
+    ASSERT(total_len != 0, "total_len must be greater than 0 to slice KV cache");
 
-    return v_caches_[layer_idx]->slice(0, 0, past_len);
+    return v_caches_[layer_idx]->slice(0, 0, total_len);
 }
 
 tensor_t DynamicKVCacheManager::get_k_cache_write_slice(

@@ -119,13 +119,13 @@ void PositionIDsCache::initialize_cache() {
     // Create [0, 1, 2, ..., max_seq_len-1]
     cache_ = Tensor::create(
         {static_cast<size_t>(max_seq_len_)},
-        NEOLLM_DTYPE_I32,
+        NEOLLM_DTYPE_I64,
         config_.device_type,
         config_.device_id,
         false,
         nullptr);
 
-    std::vector<int> positions(max_seq_len_);
+    std::vector<int64_t> positions(max_seq_len_);
     for (int i = 0; i < max_seq_len_; ++i) {
         positions[i] = i;
     }
@@ -359,8 +359,9 @@ void GraphExecutor::execute_node(
     case OpType::SELF_ATTENTION: {
         shape = {static_cast<size_t>(seq_len), node->get_param<size_t>("nhead"), node->get_param<size_t>("head_dim")};
         output = activation_pool_->acquire(shape);
-        float scale = 1.0f / std::sqrt(node->get_param<float>("head_dim"));
+        float scale = 1.0f / std::sqrt(static_cast<float>(node->get_param<size_t>("head_dim")));
         ops::self_attention(output, inputs[0], inputs[1], inputs[2], scale);
+        output = output->view({static_cast<size_t>(seq_len), node->get_param<size_t>("nhead") * node->get_param<size_t>("head_dim")});
         break;
     }
 

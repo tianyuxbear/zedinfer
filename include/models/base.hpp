@@ -15,17 +15,17 @@ struct ModelConfig {
     std::string hidden_act;                 // Activation function used in hidden layers
     std::string torch_dtype;                // Data type used in original PyTorch weights
 
-    int bos_token_id; // Beginning-of-sequence token ID
-    int eos_token_id; // End-of-sequence token ID
+    size_t bos_token_id; // Beginning-of-sequence token ID
+    size_t eos_token_id; // End-of-sequence token size_t
 
-    int hidden_size;             // Dimensionality of hidden states
-    int intermediate_size;       // Size of feed-forward network
-    int vocab_size;              // Size of vocabulary
-    int max_position_embeddings; // Maximum sequence length supported
-
-    int num_hidden_layers;   // Number of transformer layers
-    int num_attention_heads; // Number of attention heads
-    int num_key_value_heads; // Number of key/value heads (for GQA)
+    size_t hidden_size;             // Dimensionality of hidden states
+    size_t intermediate_size;       // Size of feed-forward network
+    size_t vocab_size;              // Size of vocabulary
+    size_t max_position_embeddings; // Maximum sequence length supportsize_t
+    
+    size_t num_hidden_layers;   // Number of transformer layers
+    size_t num_attention_heads; // Number of attention heads
+    size_t num_key_value_heads; // Number of key/value heads (for GQA)
 
     float rms_norm_eps;       // Epsilon for RMS normalization
     float rope_theta;         // Base for rotary position embeddings
