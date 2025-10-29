@@ -2,7 +2,7 @@
 #include "frontend/sampler/sampler.hpp"
 #include "frontend/tokenizer/hf_tokenizer.hpp"
 #include "graph/builder.hpp"
-#include "models/parser.hpp"
+#include "neollm.h"
 #include "utils/types.hpp"
 #include <iostream>
 #include <sstream>
@@ -300,7 +300,7 @@ std::unique_ptr<InferenceEngine> InferenceEngineBuilder::build() {
     std::cout << "[Builder] Loading model from: " << model_path_ << std::endl;
 
     // Load model
-    auto model = model::ModelParser::parse(model_path_);
+    auto model = model::Model::parse(model_path_, NEOLLM_DEVICE_CPU);
     if (!model) {
         throw std::runtime_error("Failed to parse model");
     }

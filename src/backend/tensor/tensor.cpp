@@ -583,4 +583,42 @@ tensor_t Tensor::to(NeollmDeviceType_t device_type, int device_id) const {
 
     return new_tensor;
 }
+
+tensor_t Tensor::to(NeollmDataType_t data_type) const {
+    ASSERT(data_type == NEOLLM_DTYPE_F32 && dtype() != data_type && deviceType() == NEOLLM_DEVICE_CPU,
+           "Only support data type transfer from f16/bf16 to f32 on CPU");
+    // Compute total byte size of data to copy
+    const size_t total_bytes = numel() * utils::dsize(data_type);
+
+    // Allocate new storage on the target device
+    core::storage_t new_storage{nullptr};
+
+    // Allocate destination storage on the correct device:
+    // - If target is CPU but current runtime is GPU -> allocate host memory explicitly
+    // - Otherwise, set device context and allocate device memory
+    if (core::context().runtime().deviceType() != NEOLLM_DEVICE_CPU) {
+        // Force allocation in host memory when copying to CPU from non-CPU runtime
+        new_storage = core::context().runtime().allocateHostStorage(total_bytes);
+    } else {
+        // Ensure kernel launches execute on the tensor's native device
+        core::context().setDevice(NEOLLM_DEVICE_CPU, 0);
+        new_storage = core::context().runtime().allocateDeviceStorage(total_bytes);
+    }
+
+    // Construct new tensor metadata (identical shape, strides, dtype)
+    TensorMeta new_meta{data_type, _meta.shape, _meta.strides};
+
+    // Create new tensor wrapper around the new storage
+    tensor_t new_tensor = std::shared_ptr<Tensor>(new Tensor(new_meta, new_storage, 0));
+
+    if (dtype() == NEOLLM_DTYPE_BF16) {
+        utils::bf16_to_fp32_batch(reinterpret_cast<float *>(new_tensor->data()), reinterpret_cast<const bf16_t *>(data()), numel());
+    } else if (dtype() == NEOLLM_DTYPE_F16) {
+        utils::fp16_to_fp32_batch_f16c(reinterpret_cast<float *>(new_tensor->data()), reinterpret_cast<const fp16_t *>(data()), numel());
+    } else {
+        ASSERT(false, "Only support data type transfer from f16/bf16 to f32 on CPU");
+    }
+
+    return new_tensor;
+}
 } // namespace neollm

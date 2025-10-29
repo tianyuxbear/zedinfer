@@ -59,6 +59,7 @@ public:
     tensor_t contiguous() const;
     tensor_t reshape(const std::vector<size_t> &shape) const;
     tensor_t to(NeollmDeviceType_t device_type, int device_id = -1) const;
+    tensor_t to(NeollmDataType_t data_type) const;
 };
 
 } // namespace neollm

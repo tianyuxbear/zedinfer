@@ -16,6 +16,8 @@ int main() {
 
     GenerationConfig gen_config;
     gen_config.max_new_tokens = 128;
+    gen_config.verbose = true;
+    gen_config.print_stats = true;
 
     std::string prompt = "Who are you?";
 
@@ -26,6 +28,4 @@ int main() {
 
     std::cout << "output: \n"
               << output << std::endl;
-
-    std::cout << "\nsummary: " << engine->last_stats().summary() << std::endl;
 }

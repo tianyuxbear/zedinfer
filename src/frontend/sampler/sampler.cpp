@@ -66,7 +66,7 @@ int ArgmaxSampler::sample(tensor_t logits) {
     tensor_t max_idx = Tensor::create({1}, NEOLLM_DTYPE_I64,
                                       last_logits->deviceType(),
                                       last_logits->deviceId());
-    tensor_t max_val = Tensor::create({1}, NEOLLM_DTYPE_BF16,
+    tensor_t max_val = Tensor::create({1}, NEOLLM_DTYPE_F32,
                                       last_logits->deviceType(),
                                       last_logits->deviceId());
 
