@@ -1,12 +1,17 @@
 #pragma once
 
 #include "backend/tensor/tensor.hpp"
+#include "frontend/loader/interface.hpp"
+#include "neollm.h"
+#include <nlohmann/json.hpp>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 namespace neollm::model {
+
+using json = nlohmann::json;
 
 // Configuration parameters for a neural language model.
 struct ModelConfig {
@@ -22,7 +27,7 @@ struct ModelConfig {
     size_t intermediate_size;       // Size of feed-forward network
     size_t vocab_size;              // Size of vocabulary
     size_t max_position_embeddings; // Maximum sequence length supportsize_t
-    
+
     size_t num_hidden_layers;   // Number of transformer layers
     size_t num_attention_heads; // Number of attention heads
     size_t num_key_value_heads; // Number of key/value heads (for GQA)
@@ -76,6 +81,24 @@ public:
     // Model metadata
     virtual std::string model_type() const = 0;
     virtual size_t num_parameters() const = 0;
+
+private:
+    std::string model_path_;
+
+public:
+    // Parses model directory and returns a concrete Model instance.
+    static std::unique_ptr<Model> parse(const std::string &model_path, NeollmDeviceType_t target_device);
+
+    // Populates ModelConfig from parsed JSON.
+    static void load_base_config(ModelConfig &config, const json &j);
+    // Loads and parses config.json into a ModelConfig.
+    static std::unique_ptr<ModelConfig> load_config(const std::string &config_path);
+
+    // Loads model weights from files in the given path.
+    static std::unique_ptr<ModelWeights> load_weights(const std::string &model_path, NeollmDeviceType_t target_device);
+
+    // Normalizes raw weight names (e.g., strips "model." prefix).
+    static std::string map_weight_name(const std::string &raw_name);
 };
 
 } // namespace neollm::model

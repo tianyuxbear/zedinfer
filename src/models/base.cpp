@@ -1,6 +1,6 @@
-#include "models/parser.hpp"
 #include "frontend/loader/safetensors.hpp"
 #include "models/qwen2.hpp"
+#include "neollm.h"
 
 #include <filesystem>
 #include <fstream>
@@ -11,16 +11,18 @@ using json = nlohmann::json;
 
 namespace neollm::model {
 
-std::unique_ptr<loader::IModelLoader> ModelParser::loader;
-
 // Parse model config and weights, then instantiate the corresponding model.
-std::unique_ptr<Model> ModelParser::parse(const std::string &model_path) {
+std::unique_ptr<Model> Model::parse(const std::string &model_path, NeollmDeviceType_t target_device) {
     // Load model configuration
     std::string config_path = (fs::path(model_path) / "config.json").string();
     auto config = load_config(config_path);
 
     // Load model weights from SafeTensors files
-    auto weights = load_weights(model_path);
+    auto weights = load_weights(model_path, target_device);
+
+    if (target_device == NEOLLM_DEVICE_CPU) {
+        config->torch_dtype = "float32";
+    }
 
     // Construct and return the model instance
     if (config->model_type == "qwen2") {
@@ -35,7 +37,7 @@ std::unique_ptr<Model> ModelParser::parse(const std::string &model_path) {
 }
 
 // Populate common config fields from JSON.
-void ModelParser::load_base_config(ModelConfig &config, const json &j) {
+void Model::load_base_config(ModelConfig &config, const json &j) {
     config.model_type = j.value("model_type", "unknown");
     config.hidden_act = j.value("hidden_act", "silu");
     config.torch_dtype = j.value("torch_dtype", "bfloat16");
@@ -59,7 +61,7 @@ void ModelParser::load_base_config(ModelConfig &config, const json &j) {
 }
 
 // Load and parse config.json into a model-specific config object.
-std::unique_ptr<ModelConfig> ModelParser::load_config(const std::string &config_path) {
+std::unique_ptr<ModelConfig> Model::load_config(const std::string &config_path) {
     std::ifstream f(config_path);
     if (!f.is_open()) {
         throw std::runtime_error("Failed to open config file: " + config_path);
@@ -83,8 +85,8 @@ std::unique_ptr<ModelConfig> ModelParser::load_config(const std::string &config_
 }
 
 // Load model weights using memory-mapped SafeTensors.
-std::unique_ptr<ModelWeights> ModelParser::load_weights(const std::string &model_path) {
-    loader = neollm::loader::SafeTensorsLoader::create(model_path);
+std::unique_ptr<ModelWeights> Model::load_weights(const std::string &model_path, NeollmDeviceType_t target_device) {
+    auto loader = neollm::loader::SafeTensorsLoader::create(model_path);
     auto weights = std::make_unique<ModelWeights>();
 
     for (const auto &raw_name : loader->get_all_tensor_names()) {
@@ -109,6 +111,12 @@ std::unique_ptr<ModelWeights> ModelParser::load_weights(const std::string &model
             true, // is_mmap
             const_cast<std::byte *>(static_cast<const std::byte *>(data_ptr)));
 
+        if (target_device == NEOLLM_DEVICE_CPU) {
+            tensor = tensor->to(NEOLLM_DTYPE_F32);
+        } else {
+            tensor = tensor->to(target_device, 0);
+        }
+
         weights->add_tensor(mapped_name, tensor);
     }
 
@@ -116,7 +124,7 @@ std::unique_ptr<ModelWeights> ModelParser::load_weights(const std::string &model
 }
 
 // Normalize weight names by stripping common prefixes (e.g., "model.").
-std::string ModelParser::map_weight_name(const std::string &raw_name) {
+std::string Model::map_weight_name(const std::string &raw_name) {
     if (raw_name.substr(0, 6) == "model.") {
         return raw_name.substr(6);
     }
