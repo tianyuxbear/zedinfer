@@ -60,6 +60,11 @@ target("utils")
     if is_plat("linux")and is_arch("x86_64") then
         add_cxflags("-march=native")
     end
+        -- optimization and CPU-specific flags
+    add_cxflags("-march=native", "-fopenmp", {force = true})
+
+    -- link flags: keep -fopenmp for the linker as well
+    add_ldflags("-fopenmp", {force = true})
     add_files("src/utils/*.cpp")
     on_install(function (target) end)
 

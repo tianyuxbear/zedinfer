@@ -2,6 +2,7 @@
 
 #include <cstring>
 #include <emmintrin.h>
+#include <omp.h>
 
 namespace neollm::utils {
 
@@ -164,10 +165,15 @@ void fp32_to_fp16_batch_f16c(fp16_t *dst, const float *src, size_t count) {
 // Convert a batch of BF16 values to FP32 using AVX-512 instructions
 // Processes 16 elements at a time for optimal performance
 void bf16_to_fp32_batch_avx512(float *dst, const bf16_t *src, size_t count) {
-    size_t i = 0;
+    const size_t vec_size = 16;
+    const size_t vec_count = count / vec_size;
+    // const size_t remainder = count % vec_size;
 
-    // Process elements in groups of 16 using AVX-512
-    for (; i + 15 < count; i += 16) {
+// 并行处理完整的16元素块
+#pragma omp parallel for schedule(static)
+    for (size_t block = 0; block < vec_count; ++block) {
+        size_t i = block * vec_size;
+
         // Load 16 BF16 values into a 256-bit register
         __m256i bf16_vec = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(src + i));
 
@@ -180,9 +186,9 @@ void bf16_to_fp32_batch_avx512(float *dst, const bf16_t *src, size_t count) {
         _mm512_storeu_ps(dst + i, fp32_vec);
     }
 
-    // Handle remaining elements
+    // 单线程处理剩余元素（通常很少）
+    size_t i = vec_count * vec_size;
     for (; i < count; ++i) {
-        // Single element conversion
         dst[i] = _bf16_to_f32(src[i]);
     }
 }
