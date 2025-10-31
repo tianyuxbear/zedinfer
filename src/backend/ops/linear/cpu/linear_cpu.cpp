@@ -1,5 +1,7 @@
 #include "backend/ops/linear/cpu/linear_cpu.hpp"
 #include "backend/ops/linear/cpu/matmul.hpp"
+#include "backend/ops/linear/cpu/vecmul.hpp"
+
 #include "utils/check.hpp"
 #include "utils/types.hpp"
 
@@ -22,9 +24,12 @@ void linear_(T *out, const T *in, const T *weight, const T *bias,
             for (size_t i = 0; i < M; ++i) {
                 std::memcpy(out + i * N, bias, N * sizeof(T));
             }
-            matmul(in, weight, out, M, N, K);
         } else {
             memset(out, 0, M * N * sizeof(T));
+        }
+        if (M == 1) {
+            vecmul(in, weight, out, N, K);
+        } else {
             matmul(in, weight, out, M, N, K);
         }
 
@@ -33,68 +38,48 @@ void linear_(T *out, const T *in, const T *weight, const T *bias,
         std::vector<float> weight_fp32(N * K);
         std::vector<float> out_fp32(M * N, {});
 
-        // for (size_t i = 0; i < M * K; ++i) {
-        //     in_fp32[i] = neollm::utils::cast<float>(in[i]);
-        // }
-        // for (size_t i = 0; i < N * K; ++i) {
-        //     weight_fp32[i] = neollm::utils::cast<float>(weight[i]);
-        // }
         neollm::utils::fp16_to_fp32_batch_f16c(in_fp32.data(), in, M * K);
         neollm::utils::fp16_to_fp32_batch_f16c(weight_fp32.data(), weight, N * K);
 
         if (bias) {
             std::vector<float> bias_fp32(N);
-            // for (size_t j = 0; j < N; ++j) {
-            //     bias_fp32[j] = neollm::utils::cast<float>(bias[j]);
-            // }
             neollm::utils::fp16_to_fp32_batch_f16c(bias_fp32.data(), bias, N);
 
             for (size_t i = 0; i < M; ++i) {
                 std::memcpy(out_fp32.data() + i * N, bias_fp32.data(), N * sizeof(float));
             }
+        }
 
-            matmul(in_fp32.data(), weight_fp32.data(), out_fp32.data(), M, N, K);
+        if (M == 1) {
+            vecmul(in_fp32.data(), weight_fp32.data(), out_fp32.data(), N, K);
         } else {
             matmul(in_fp32.data(), weight_fp32.data(), out_fp32.data(), M, N, K);
         }
 
-        // for (size_t i = 0; i < M * N; ++i) {
-        //     out[i] = neollm::utils::cast<T>(out_fp32[i]);
-        // }
         neollm::utils::fp32_to_fp16_batch_f16c(out, out_fp32.data(), M * N);
     } else if constexpr (std::is_same_v<T, neollm::bf16_t>) {
         std::vector<float> in_fp32(M * K);
         std::vector<float> weight_fp32(N * K);
         std::vector<float> out_fp32(M * N, {});
 
-        // for (size_t i = 0; i < M * K; ++i) {
-        //     in_fp32[i] = neollm::utils::cast<float>(in[i]);
-        // }
-        // for (size_t i = 0; i < N * K; ++i) {
-        //     weight_fp32[i] = neollm::utils::cast<float>(weight[i]);
-        // }
         neollm::utils::bf16_to_fp32_batch(in_fp32.data(), in, M * K);
         neollm::utils::bf16_to_fp32_batch(weight_fp32.data(), weight, N * K);
 
         if (bias) {
             std::vector<float> bias_fp32(N);
-            // for (size_t j = 0; j < N; ++j) {
-            //     bias_fp32[j] = neollm::utils::cast<float>(bias[j]);
-            // }
             neollm::utils::bf16_to_fp32_batch(bias_fp32.data(), bias, N);
 
             for (size_t i = 0; i < M; ++i) {
                 std::memcpy(out_fp32.data() + i * N, bias_fp32.data(), N * sizeof(float));
             }
+        }
 
-            matmul(in_fp32.data(), weight_fp32.data(), out_fp32.data(), M, N, K);
+        if (M == 1) {
+            vecmul(in_fp32.data(), weight_fp32.data(), out_fp32.data(), N, K);
         } else {
             matmul(in_fp32.data(), weight_fp32.data(), out_fp32.data(), M, N, K);
         }
 
-        // for (size_t i = 0; i < M * N; ++i) {
-        //     out[i] = neollm::utils::cast<T>(out_fp32[i]);
-        // }
         neollm::utils::fp32_to_bf16_batch(out, out_fp32.data(), M * N);
     }
 }
