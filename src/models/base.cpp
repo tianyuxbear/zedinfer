@@ -9,6 +9,30 @@
 namespace fs = std::filesystem;
 using json = nlohmann::json;
 
+#include <fstream>
+#include <iostream>
+#include <string>
+
+void dump_numa_maps_cpp(int max_lines = 20) {
+    std::ifstream file("/proc/self/numa_maps");
+    if (!file.is_open()) {
+        std::cerr << "Failed to open /proc/self/numa_maps" << std::endl;
+        return;
+    }
+
+    std::string line;
+    int count = 0;
+    std::cout << "\n===== NUMA maps (top " << max_lines << " anon regions) =====\n";
+    while (std::getline(file, line)) {
+        if (line.find("anon") != std::string::npos) {
+            std::cout << line << std::endl;
+            if (++count >= max_lines) {
+                break;
+            }
+        }
+    }
+}
+
 namespace neollm::model {
 
 // Parse model config and weights, then instantiate the corresponding model.
@@ -131,6 +155,8 @@ std::unique_ptr<ModelWeights> Model::load_weights(const std::string &model_path,
     auto convert_end = std::chrono::high_resolution_clock::now();
     auto convert_time = std::chrono::duration<double>(convert_end - convert_start).count();
     printf("⏱️  Conversion time: %.4fs (%zu tensors)\n", convert_time, converted_count);
+
+    dump_numa_maps_cpp();
 
     return weights;
 }
