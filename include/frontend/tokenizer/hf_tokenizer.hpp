@@ -1,6 +1,7 @@
 #pragma once
 
 #include "base.hpp"
+
 #include <unicode/regex.h>
 #include <unordered_map>
 

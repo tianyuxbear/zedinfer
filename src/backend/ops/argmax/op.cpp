@@ -1,6 +1,6 @@
-#include "backend/ops/argmax/op.hpp"
 #include "backend/core/context/context.hpp"
 #include "backend/ops/argmax/cpu/argmax_cpu.hpp"
+#include "backend/ops/ops.hpp"
 #include "utils/check.hpp"
 
 namespace neollm::ops {

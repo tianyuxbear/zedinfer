@@ -1,6 +1,7 @@
 #pragma once
 
 #include "neollm.h"
+
 #include <functional>
 #include <numeric>
 #include <string>

@@ -1,7 +1,6 @@
 #include "backend/ops/linear/cpu/linear_cpu.hpp"
 #include "backend/ops/linear/cpu/matmul.hpp"
 #include "backend/ops/linear/cpu/vecmul.hpp"
-
 #include "utils/check.hpp"
 #include "utils/types.hpp"
 

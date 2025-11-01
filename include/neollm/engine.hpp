@@ -1,12 +1,11 @@
 #pragma once
 
+#include "frontend/models/base.hpp"
 #include "frontend/sampler/sampler.hpp"
 #include "frontend/tokenizer/base.hpp"
-#include "graph/executor.hpp"
-#include "kvcache/dynamic.hpp"
-#include "models/base.hpp"
-#include <functional>
+#include "neollm/executor.hpp"
 
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -74,7 +73,7 @@ public:
      * @param device_type Device type (CPU/CUDA)
      * @param device_id Device ID (default: 0)
      */
-    static std::shared_ptr<InferenceEngine> create(
+    static std::unique_ptr<InferenceEngine> create(
         const std::string &model_path,
         NeollmDeviceType_t device_type = NEOLLM_DEVICE_CPU,
         int device_id = 0);
@@ -107,7 +106,7 @@ public:
      */
     std::vector<int> generate_tokens(
         const std::vector<int> &input_ids,
-        const GenerationConfig &config = GenerationConfig());
+        const GenerationConfig &config = GenerationConfig(), int past_len = 0);
 
     /**
      * Reset KV cache and internal state

@@ -54,11 +54,11 @@ typedef enum {
  * @brief Memory copy directions.
  */
 typedef enum {
-    NEOLLM_MEMCPY_H2H = 0,    ///< Host to Host
-    NEOLLM_MEMCPY_H2D = 1,    ///< Host to Device
-    NEOLLM_MEMCPY_D2H = 2,    ///< Device to Host
-    NEOLLM_MEMCPY_D2D = 3,    ///< Device to Device
-    NEOLLM_MEMCPY_DEFAULT = 4 ///< Auto-detect
+    NEOLLM_MEMCPY_H2H = 0,  ///< Host to Host
+    NEOLLM_MEMCPY_H2D = 1,  ///< Host to Device
+    NEOLLM_MEMCPY_D2H = 2,  ///< Device to Host
+    NEOLLM_MEMCPY_D2D = 3,  ///< Device to Device
+    NEOLLM_MEMCPY_COUNT = 4 ///< Number of memory copy directions
 } NeollmMemcpyKind_t;
 
 #endif // __NEOLLM_H__

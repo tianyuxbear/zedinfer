@@ -1,7 +1,7 @@
 #include "backend/tensor/tensor.hpp"
 #include "backend/core/context/context.hpp"
-#include "backend/core/storage/storage.hpp"
-#include "backend/ops/rearrange/op.hpp"
+#include "backend/core/storage/storage.hpp" // IWYU pragma: keep
+#include "backend/ops/ops.hpp"
 #include "neollm.h"
 #include "utils/check.hpp"
 #include "utils/types.hpp"

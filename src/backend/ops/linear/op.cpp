@@ -1,7 +1,7 @@
-#include "backend/ops/linear/op.hpp"
 #include "backend/core/context/context.hpp"
 #include "backend/core/core.hpp"
 #include "backend/ops/linear/cpu/linear_cpu.hpp"
+#include "backend/ops/ops.hpp"
 #include "utils/check.hpp"
 
 #include <cstddef>
