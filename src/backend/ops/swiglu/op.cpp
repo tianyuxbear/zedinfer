@@ -1,6 +1,6 @@
-#include "backend/ops/swiglu/op.hpp"
 #include "backend/core/context/context.hpp"
 #include "backend/core/core.hpp"
+#include "backend/ops/ops.hpp"
 #include "backend/ops/swiglu/cpu/swiglu_cpu.hpp"
 #include "utils/check.hpp"
 

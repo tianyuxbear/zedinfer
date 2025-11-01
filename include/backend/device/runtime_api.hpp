@@ -1,6 +1,7 @@
 #pragma once
 
 #include "neollm.h"
+
 #include <stddef.h>
 
 // Device management

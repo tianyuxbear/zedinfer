@@ -1,10 +1,13 @@
 #include "neollm/engine.hpp"
+#include "backend/kvcache/dynamic.hpp"
+#include "frontend/graph/builder.hpp"
 #include "frontend/sampler/sampler.hpp"
 #include "frontend/tokenizer/hf_tokenizer.hpp"
-#include "graph/builder.hpp"
 #include "neollm.h"
 #include "utils/types.hpp"
+
 #include <iostream>
+#include <memory>
 #include <sstream>
 
 namespace neollm {
@@ -79,7 +82,7 @@ InferenceEngine::InferenceEngine(
     dtype_ = kv_cache_->config().dtype;
 }
 
-std::shared_ptr<InferenceEngine> InferenceEngine::create(
+std::unique_ptr<InferenceEngine> InferenceEngine::create(
     const std::string &model_path,
     NeollmDeviceType_t device_type,
     int device_id) {
@@ -129,7 +132,7 @@ std::string InferenceEngine::generate(
     }
 
     // Generate tokens
-    auto output_ids = generate_tokens(input_ids, config);
+    auto output_ids = generate_tokens(input_ids, config, 0);
 
     // Decode output
     std::string output = tokenizer_->decode(output_ids);
@@ -147,7 +150,7 @@ std::string InferenceEngine::generate(
 
 std::vector<int> InferenceEngine::generate_tokens(
     const std::vector<int> &input_ids,
-    const GenerationConfig &config) {
+    const GenerationConfig &config, int past_len) {
 
     // Reset stats
     last_stats_ = GenerationStats();
@@ -157,7 +160,7 @@ std::vector<int> InferenceEngine::generate_tokens(
     auto sampler = create_sampler(config);
 
     // Reset KV cache
-    reset();
+    // reset();
 
     std::vector<int> generated_ids;
     generated_ids.reserve(config.max_new_tokens);
@@ -165,7 +168,7 @@ std::vector<int> InferenceEngine::generate_tokens(
     // Prefill phase
     auto prefill_start = std::chrono::high_resolution_clock::now();
 
-    tensor_t logits = executor_->forward(input_ids, 0);
+    tensor_t logits = executor_->forward(input_ids, past_len);
     int next_token = sampler->sample(logits);
 
     auto prefill_end = std::chrono::high_resolution_clock::now();
@@ -188,7 +191,8 @@ std::vector<int> InferenceEngine::generate_tokens(
     }
 
     // Decode phase
-    int past_len = input_ids.size();
+    // int past_len = kv_cache_->current_length();
+    past_len += input_ids.size();
     for (int i = 1; i < config.max_new_tokens; ++i) {
         auto step_start = std::chrono::high_resolution_clock::now();
 
@@ -210,9 +214,9 @@ std::vector<int> InferenceEngine::generate_tokens(
             config.stream_callback(token_text);
         }
 
-        if (config.verbose && (i % 10 == 0)) {
-            std::cout << "[Inference] Generated " << i << " tokens..." << std::endl;
-        }
+        // if (config.verbose && (i % 10 == 0)) {
+        //     std::cout << "[Inference] Generated " << i << " tokens..." << std::endl;
+        // }
 
         if (should_stop(next_token, config)) {
             break;
@@ -322,8 +326,8 @@ std::unique_ptr<InferenceEngine> InferenceEngineBuilder::build() {
     kv_config.num_layers = model_config.num_hidden_layers;
     kv_config.num_kv_heads = model_config.num_key_value_heads;
     kv_config.head_dim = model_config.hidden_size / model_config.num_attention_heads;
-    kv_config.initial_capacity = 256;
-    kv_config.model_max_seq_len = std::min(8192ul, model_config.max_position_embeddings);
+    kv_config.initial_capacity = 16384;
+    kv_config.model_max_seq_len = std::min(16384ul, model_config.max_position_embeddings);
     kv_config.device_type = device_type_;
     kv_config.device_id = device_id_;
     kv_config.dtype = utils::str_to_dtype(model_config.torch_dtype);

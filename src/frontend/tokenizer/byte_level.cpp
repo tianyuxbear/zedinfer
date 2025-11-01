@@ -1,4 +1,5 @@
 #include "frontend/tokenizer/byte_level.hpp"
+
 #include <algorithm>
 #include <iostream>
 #include <vector>

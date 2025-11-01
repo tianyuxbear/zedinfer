@@ -1,4 +1,5 @@
 #pragma once
+
 // c = a * B^T, all row-major
 // c: [1, N]
 // a: [1, K]

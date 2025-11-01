@@ -1,0 +1,13 @@
+target("ping")
+    set_kind("binary")
+    add_deps("neollm")
+    add_files("../examples/ping.cpp")
+    on_install(function (target) end)
+target_end()
+
+target("chat")
+    set_kind("binary")
+    add_deps("neollm")
+    add_files("../examples/chat.cpp")
+    on_install(function (target) end)
+target_end()

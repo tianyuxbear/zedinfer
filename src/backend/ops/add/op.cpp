@@ -1,7 +1,7 @@
-#include "backend/ops/add/op.hpp"
 #include "backend/core/context/context.hpp"
 #include "backend/core/core.hpp"
 #include "backend/ops/add/cpu/add_cpu.hpp"
+#include "backend/ops/ops.hpp"
 #include "utils/check.hpp"
 
 namespace neollm::ops {

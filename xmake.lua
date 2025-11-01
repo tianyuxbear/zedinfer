@@ -1,49 +1,40 @@
--- 设置项目名称
+-- Project configuration
 set_project("neollm")
-
--- 设置C++标准
 set_languages("c++17")
-
--- 设置源文件编码
 set_encodings("utf-8")
 
--- 全局编译模式
+-- Build modes
 add_rules("mode.debug", "mode.release")
 
 if is_mode("debug") then
     add_defines("DEBUG")
 end
 
--- 自动生成 compile_commands.json 文件到 build 目录
+-- Generate compile_commands.json for Clangd support
 add_rules("plugin.compile_commands.autoupdate", {outputdir = "build"})
 
--- 全局添加 include 目录到头文件搜索路径
+-- Include directories
 add_includedirs("include")
 add_includedirs("third_party/include")
 
-
+-- Platform-specific flags
 if not is_plat("windows") then
-    -- -fPIC: 生成位置无关代码，用于动态库
-    -- -Wno-unknown-pragmas: 忽略未知的 #pragma 指令警告
     add_cxflags("-fPIC", "-Wno-unknown-pragmas")
 end
 
--- Windows平台特殊设置
 if is_plat("windows") then
     add_cxxflags("/utf-8")
 end
 
--- 启用所有常规警告 + 额外警告
--- -Wall: 启用大部分警告
--- -Wextra: 启用额外的合理警告
+-- Enable compiler warnings
 add_cxxflags("-Wall", "-Wextra")
 
 add_requires("icu4c")
 
--- CPU --
-includes("xmake/cpu.lua")
+-- Device implementations
+includes("xmake/device/cpu.lua")
 
--- NVIDIA --
+-- NVIDIA GPU support (optional)
 option("nv-gpu")
     set_default(false)
     set_showmenu(true)
@@ -52,89 +43,53 @@ option_end()
 
 if has_config("nv-gpu") then
     add_defines("ENABLE_NVIDIA_API")
-    includes("xmake/nvidia.lua")
+    includes("xmake/device/nvidia.lua")
 end
 
+-- Test and example modules
+includes("xmake/tests.lua")
+includes("xmake/examples.lua")
+
+-- Frontend and backend modules
+includes("xmake/frontend.lua")
+includes("xmake/backend.lua")
+
+-- Utility library with CPU optimizations
 target("utils")
     set_kind("static")
-    if is_plat("linux")and is_arch("x86_64") then
-        add_cxflags("-march=native")
-    end
-        -- optimization and CPU-specific flags
     add_cxflags("-march=native", "-fopenmp", {force = true})
-
-    -- link flags: keep -fopenmp for the linker as well
     add_ldflags("-fopenmp", {force = true})
     add_files("src/utils/*.cpp")
     on_install(function (target) end)
 
-target("tokenizer")
-    set_kind("static")
-    add_packages("icu4c")
-    add_files("src/frontend/tokenizer/*.cpp")
-    on_install(function (target) end)
-
-target("loader")
-    set_kind("static")
-    add_deps("utils")
-    add_files("src/frontend/loader/*.cpp")
-    on_install(function (target) end)
-
-target("core")
-    set_kind("static")
-    add_files("src/backend/core/**.cpp")
-    on_install(function (target) end)
-
-target("device")
-    set_kind("static")
-    add_deps("utils")
-    add_deps("device-cpu")
-    add_files("src/backend/device/*.cpp")
-    on_install(function (target) end)
-target_end()
-
-target("tensor")
-    set_kind("static")
-    add_deps("utils")
-    add_deps("core")
-    add_deps("device")
-    add_files("src/backend/tensor/*.cpp")
-    add_files("src/backend/ops/rearrange/*.cpp")
-    add_files("src/backend/ops/rearrange/cpu/*.cpp")
-    on_install(function (target) end)
-target_end()
-
-target("ops")
-    set_kind("static")
-    add_deps("ops-cpu")
-    add_files("src/backend/ops/*/*.cpp")
-    on_install(function (target) end)
-target_end()
-
-target("models")
-    set_kind("static")
-    add_deps("loader")
-    add_files("src/models/*.cpp")
-    on_install(function (target) end)
-
-target("graph")
-    set_kind("static")
-    add_deps("ops")
-    add_deps("models")
-    add_files("src/graph/*.cpp", "src/kvcache/*.cpp")
-    on_install(function (target) end)
-
-target("sampler")
-    set_kind("static")
-    add_files("src/frontend/sampler/*.cpp")
-    on_install(function (target) end) 
-
-target("engine")
+-- Frontend library
+target("frontend")
     set_kind("static")
     add_deps("tokenizer")
     add_deps("sampler")
+    add_deps("loader")
+    add_deps("models")
     add_deps("graph")
-    add_files("src/neollm/engine.cpp")
     on_install(function (target) end)
+target_end()
 
-includes("xmake/test.lua")
+-- Backend library
+target("backend")
+    set_kind("static")
+    add_deps("core")
+    add_deps("device")
+    add_deps("tensor")
+    add_deps("ops")
+    add_deps("kvcache")
+    on_install(function (target) end)
+target_end()
+
+-- Main library
+target("neollm")
+    set_kind("static")
+    add_deps("utils")
+    add_deps("frontend")
+    add_deps("backend")
+    add_files("src/neollm/*.cpp")
+    on_install(function (target) end)
+target_end()

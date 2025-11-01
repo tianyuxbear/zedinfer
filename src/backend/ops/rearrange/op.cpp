@@ -1,6 +1,6 @@
-#include "backend/ops/rearrange/op.hpp"
 #include "backend/core/context/context.hpp"
 #include "backend/core/core.hpp"
+#include "backend/ops/ops.hpp"
 #include "backend/ops/rearrange/cpu/rearrange_cpu.hpp"
 #include "utils/check.hpp"
 

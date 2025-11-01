@@ -1,6 +1,6 @@
-#include "backend/ops/rms_norm/op.hpp"
 #include "backend/core/context/context.hpp"
 #include "backend/core/core.hpp"
+#include "backend/ops/ops.hpp"
 #include "backend/ops/rms_norm/cpu/rms_norm_cpu.hpp"
 #include "utils/check.hpp"
 

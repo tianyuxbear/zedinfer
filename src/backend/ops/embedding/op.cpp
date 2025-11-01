@@ -1,6 +1,6 @@
-#include "backend/ops/embedding/op.hpp"
 #include "backend/core/context/context.hpp"
 #include "backend/ops/embedding/cpu/embedding_cpu.hpp"
+#include "backend/ops/ops.hpp"
 
 #include "utils/check.hpp"
 
