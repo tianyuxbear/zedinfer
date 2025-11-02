@@ -19,5 +19,6 @@ public:
         is_first_turn = true;
     }
     void chat(const std::string &user_input);
+    void reset();
 };
 } // namespace neollm

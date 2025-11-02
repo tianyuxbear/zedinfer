@@ -1,155 +1,20 @@
 #include "neollm/executor.hpp"
 #include "backend/ops/ops.hpp"
 #include "neollm.h"
+#include "neollm/activation.hpp"
 #include "utils/types.hpp"
 
 #include <cmath>
-#include <iomanip>
 #include <iostream>
-#include <map>
+#include <memory>
+#include <plog/Log.h>
+#include <sstream>
 
-namespace neollm::graph {
+namespace neollm {
 
-// ==================== ActivationPool ====================
-
-ActivationPool::ActivationPool(const ExecutorConfig &config)
-    : config_(config) {
-    pool_.reserve(128);
-}
-
-tensor_t ActivationPool::acquire(
-    const std::vector<size_t> &shape) {
-
-    // Find available tensor with matching shape
-    for (auto &slot : pool_) {
-        if (!slot.in_use && slot.shape == shape) {
-            slot.in_use = true;
-            return slot.tensor;
-        }
-    }
-
-    // Allocate new tensor if none available
-    auto tensor = Tensor::create(
-        shape,
-        config_.dtype,
-        config_.device_type,
-        config_.device_id,
-        false,
-        nullptr);
-
-    TensorSlot slot;
-    slot.tensor = tensor;
-    slot.shape = shape;
-    slot.in_use = true;
-
-    pool_.push_back(slot);
-
-    return tensor;
-}
-
-void ActivationPool::release(tensor_t tensor) {
-    for (auto &slot : pool_) {
-        if (slot.tensor == tensor) {
-            slot.in_use = false;
-            return;
-        }
-    }
-}
-
-void ActivationPool::release_all() {
-    for (auto &slot : pool_) {
-        slot.in_use = false;
-    }
-}
-
-size_t ActivationPool::tensors_in_use() const {
-    size_t count = 0;
-    for (const auto &slot : pool_) {
-        if (slot.in_use) {
-            count++;
-        }
-    }
-    return count;
-}
-
-size_t ActivationPool::total_memory() const {
-    size_t total = 0;
-    for (const auto &slot : pool_) {
-        total += slot.tensor->numel() * utils::dsize(config_.dtype);
-    }
-    return total;
-}
-
-void ActivationPool::print_stats() const {
-    std::cout << "\n=== Activation Pool Statistics ===" << std::endl;
-    std::cout << "  Total tensors: " << pool_.size() << std::endl;
-    std::cout << "  Tensors in use: " << tensors_in_use() << std::endl;
-    std::cout << "  Total memory: " << std::fixed << std::setprecision(2)
-              << (total_memory() / 1024.0 / 1024.0) << " MB" << std::endl;
-
-    // Shape distribution
-    std::map<std::vector<size_t>, int> shape_counts;
-    for (const auto &slot : pool_) {
-        shape_counts[slot.shape]++;
-    }
-
-    if (!shape_counts.empty()) {
-        std::cout << "  Shape distribution:" << std::endl;
-        for (const auto &[shape, count] : shape_counts) {
-            std::cout << "    [";
-            for (size_t i = 0; i < shape.size(); ++i) {
-                std::cout << shape[i];
-                if (i < shape.size() - 1) {
-                    std::cout << ", ";
-                }
-            }
-            std::cout << "]: " << count << " tensors" << std::endl;
-        }
-    }
-}
-
-// ==================== PositionIDsCache ====================
-
-PositionIDsCache::PositionIDsCache(int max_seq_len, const ExecutorConfig &config)
-    : max_seq_len_(max_seq_len), config_(config) {
-
-    initialize_cache();
-}
-
-void PositionIDsCache::initialize_cache() {
-    // Create [0, 1, 2, ..., max_seq_len-1]
-    cache_ = Tensor::create(
-        {static_cast<size_t>(max_seq_len_)},
-        NEOLLM_DTYPE_I64,
-        config_.device_type,
-        config_.device_id,
-        false,
-        nullptr);
-
-    std::vector<int64_t> positions(max_seq_len_);
-    for (int i = 0; i < max_seq_len_; ++i) {
-        positions[i] = i;
-    }
-
-    cache_->load(positions.data());
-}
-
-tensor_t PositionIDsCache::get_slice(int start_pos, int seq_len) {
-    if (start_pos < 0 || seq_len < 0) {
-        throw std::invalid_argument("start_pos and seq_len must be non-negative");
-    }
-
-    if (start_pos + seq_len > max_seq_len_) {
-        throw std::out_of_range(
-            "Position range exceeds cache size: " + std::to_string(start_pos + seq_len) + " > " + std::to_string(max_seq_len_));
-    }
-
-    // Zero-copy slice
-    return cache_->slice(0, start_pos, start_pos + seq_len);
-}
+using namespace graph;
 
 // ==================== GraphExecutor ====================
-
 GraphExecutor::GraphExecutor(
     compute_graph_t graph,
     kvcache::kvcache_t kv_cache,
@@ -157,41 +22,37 @@ GraphExecutor::GraphExecutor(
     : graph_(graph),
       kv_cache_(kv_cache),
       config_(config) {
+    // Allocate arena memory for prefill-phase activations.
+    const size_t per_token_bytes = graph_->get_per_token_activation_numel() * utils::dsize(config_.data_type);
+    const size_t capacity = per_token_bytes * config_.max_prefill_len;
+    prefill_arena_ = std::make_unique<PrefillArena>(config_, capacity);
 
-    // Initialize activation pool
-    activation_pool_ = std::make_unique<ActivationPool>(config_);
+    // Initialize tensor pool for decode-phase activations.
+    decode_pool_ = std::make_unique<DecodePool>(config_);
 
-    // Initialize position_ids cache with generous default
-    int pos_cache_len = 8192;
-    position_ids_cache_ = std::make_unique<PositionIDsCache>(pos_cache_len, config_);
-
-    std::cout << "[GraphExecutor] Initialized:" << std::endl;
-    std::cout << "  Device: " << (config_.device_type == NEOLLM_DEVICE_CPU ? "CPU" : "GPU")
-              << " (ID: " << config_.device_id << ")" << std::endl;
-    std::cout << "  Dtype: ";
-    switch (config_.dtype) {
-    case NEOLLM_DTYPE_BF16:
-        std::cout << "BF16";
-        break;
-    case NEOLLM_DTYPE_F16:
-        std::cout << "FP16";
-        break;
-    case NEOLLM_DTYPE_F32:
-        std::cout << "FP32";
-        break;
-    default:
-        std::cout << "Unknown";
-    }
-    std::cout << std::endl;
-    std::cout << "  Activation pool: ON" << std::endl;
-    std::cout << "  Position IDs cache: ON (max_len=" << pos_cache_len << ")" << std::endl;
+    // Pre-allocate reusable position ID tensor.
+    position_ids_cache_ = std::make_unique<PositionIDsCache>(config_);
 }
 
 std::unique_ptr<GraphExecutor> GraphExecutor::create(
     compute_graph_t graph,
-    kvcache::kvcache_t kv_cache) {
-    auto config = ExecutorConfig::from_kvcache_config(kv_cache->config());
-    // Static member can access private constructor
+    kvcache::kvcache_t kv_cache,
+    ExecutorConfig config) {
+    // Validate input arguments to ensure safe construction.
+    if (!graph) {
+        throw std::invalid_argument("Graph must not be null.");
+    }
+    if (!kv_cache) {
+        throw std::invalid_argument("KV cache must not be null.");
+    }
+    if (config.max_prefill_len <= 0) {
+        throw std::invalid_argument("max_prefill_len must be positive.");
+    }
+    if (config.max_seq_len <= 0) {
+        throw std::invalid_argument("max_seq_len must be positive.");
+    }
+
+    // Construct GraphExecutor safely with validated inputs.
     return std::unique_ptr<GraphExecutor>(
         new GraphExecutor(graph, kv_cache, config));
 }
@@ -257,7 +118,8 @@ tensor_t GraphExecutor::forward(
     }
 
     // ==================== 5. Release activations ====================
-    activation_pool_->release_all();
+    prefill_arena_->reset();
+    decode_pool_->reset();
 
     // ==================== 6. Update KV cache length ====================
     kv_cache_->update_seq_len(seq_len);
@@ -276,6 +138,13 @@ void GraphExecutor::execute_node(
     std::unordered_map<graph_node_t, tensor_t> &activations,
     int past_len,
     int seq_len) {
+
+    ActivationAllocator *activation_allocator;
+    if (seq_len == 1) {
+        activation_allocator = decode_pool_.get();
+    } else {
+        activation_allocator = prefill_arena_.get();
+    }
 
     // Collect input tensors
     std::vector<tensor_t> inputs;
@@ -296,13 +165,13 @@ void GraphExecutor::execute_node(
     switch (node->op_type()) {
     case OpType::ADD: {
         shape = inputs[0]->shape();
-        output = activation_pool_->acquire(shape);
+        output = activation_allocator->acquire(shape);
         ops::add(output, inputs[0], inputs[1]);
         break;
     }
     case OpType::EMBEDDING: {
         shape = {static_cast<size_t>(seq_len), node->get_param<size_t>("hidden_size")};
-        output = activation_pool_->acquire(shape);
+        output = activation_allocator->acquire(shape);
         auto weight = node->weight();
         ops::embedding(output, inputs[0], weight);
         break;
@@ -323,7 +192,7 @@ void GraphExecutor::execute_node(
             } else if (node_name.find("gate_proj") != std::string::npos || node_name.find("up_proj") != std::string::npos) {
                 shape = {static_cast<size_t>(seq_len), node->get_param<size_t>("intermediate_size")};
             }
-            output = activation_pool_->acquire(shape);
+            output = activation_allocator->acquire(shape);
         }
         auto weight = node->weight();
         auto bias = node->bias();
@@ -333,7 +202,7 @@ void GraphExecutor::execute_node(
 
     case OpType::RMS_NORM: {
         shape = {static_cast<size_t>(seq_len), node->get_param<size_t>("hidden_size")};
-        output = activation_pool_->acquire(shape);
+        output = activation_allocator->acquire(shape);
         auto weight = node->weight();
         float eps = node->get_param<float>("eps");
         ops::rms_norm(output, inputs[0], weight, eps);
@@ -349,7 +218,7 @@ void GraphExecutor::execute_node(
             output = kv_cache_->get_k_cache_write_slice(layer_idx, past_len, seq_len);
         } else {
             shape = {static_cast<size_t>(seq_len), node->get_param<size_t>("nhead"), node->get_param<size_t>("head_dim")};
-            output = activation_pool_->acquire(shape);
+            output = activation_allocator->acquire(shape);
         }
 
         float theta = node->get_param<float>("theta");
@@ -359,7 +228,7 @@ void GraphExecutor::execute_node(
 
     case OpType::SELF_ATTENTION: {
         shape = {static_cast<size_t>(seq_len), node->get_param<size_t>("nhead"), node->get_param<size_t>("head_dim")};
-        output = activation_pool_->acquire(shape);
+        output = activation_allocator->acquire(shape);
         float scale = 1.0f / std::sqrt(static_cast<float>(node->get_param<size_t>("head_dim")));
         ops::self_attention(output, inputs[0], inputs[1], inputs[2], scale);
         output = output->view({static_cast<size_t>(seq_len), node->get_param<size_t>("nhead") * node->get_param<size_t>("head_dim")});
@@ -368,7 +237,7 @@ void GraphExecutor::execute_node(
 
     case OpType::SWIGLU: {
         shape = {static_cast<size_t>(seq_len), node->get_param<size_t>("intermediate_size")};
-        output = activation_pool_->acquire(shape);
+        output = activation_allocator->acquire(shape);
         ops::swiglu(output, inputs[0], inputs[1]);
         break;
     }
@@ -395,30 +264,35 @@ int GraphExecutor::extract_layer_idx(const std::string &node_name) {
 }
 
 void GraphExecutor::print_stats() const {
-    std::cout << "\n=== GraphExecutor Statistics ===" << std::endl;
-    std::cout << "  Device: " << (config_.device_type == NEOLLM_DEVICE_CPU ? "CPU" : "GPU")
-              << " (ID: " << config_.device_id << ")" << std::endl;
-    std::cout << "  Default dtype: ";
-    switch (config_.dtype) {
+    std::ostringstream oss;
+
+    oss << "\n=== GraphExecutor Statistics ===\n";
+    oss << "  Device: " << (config_.device_type == NEOLLM_DEVICE_CPU ? "CPU" : "GPU")
+        << " (ID: " << config_.device_id << ")" << std::endl;
+    oss << "  Default dtype: ";
+    switch (config_.data_type) {
     case NEOLLM_DTYPE_BF16:
-        std::cout << "BF16";
+        oss << "BF16";
         break;
     case NEOLLM_DTYPE_F16:
-        std::cout << "FP16";
+        oss << "FP16";
         break;
     case NEOLLM_DTYPE_F32:
-        std::cout << "FP32";
+        oss << "FP32";
         break;
     default:
-        std::cout << "Unknown";
+        oss << "Unknown";
     }
-    std::cout << std::endl;
+    oss << std::endl;
+
+    LOGI << oss.str();
 
     // Pool statistics
-    activation_pool_->print_stats();
+    LOGI << prefill_arena_->get_stats();
+    LOGI << decode_pool_->get_stats();
 
-    // Cache statistics
-    kv_cache_->print_stats();
+    // KV Cache statistics
+    LOGI << kv_cache_->get_stats();
 }
 
-} // namespace neollm::graph
+} // namespace neollm

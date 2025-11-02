@@ -4,10 +4,13 @@
 #include "frontend/sampler/sampler.hpp"
 #include "frontend/tokenizer/hf_tokenizer.hpp"
 #include "neollm.h"
+#include "neollm/activation.hpp"
+#include "utils/logger.hpp"
 #include "utils/types.hpp"
 
 #include <iostream>
 #include <memory>
+#include <plog/Log.h>
 #include <sstream>
 
 namespace neollm {
@@ -68,7 +71,7 @@ InferenceEngine::InferenceEngine(
     std::unique_ptr<tokenizer::Tokenizer> tokenizer,
     graph::compute_graph_t graph,
     kvcache::kvcache_t kv_cache,
-    std::unique_ptr<graph::GraphExecutor> executor,
+    std::unique_ptr<GraphExecutor> executor,
     const GenerationConfig &gen_config)
     : model_(std::move(model)),
       tokenizer_(std::move(tokenizer)),
@@ -105,44 +108,53 @@ std::string InferenceEngine::chat(
 
     std::string formatted_prompt = hf_tokenizer->apply_chat_template(messages, true);
 
-    if (config.verbose) {
-        std::cout << "[Chat] Formatted prompt:\n"
-                  << formatted_prompt << std::endl;
-    }
-
     return generate(formatted_prompt, config);
 }
 
 std::string InferenceEngine::generate(
     const std::string &prompt,
-    const GenerationConfig &config) {
+    const GenerationConfig &config, int past_len) {
 
     config.validate();
 
     if (config.verbose) {
-        std::cout << "\n[Inference] Encoding prompt..." << std::endl;
+        if (config.gen_mode == GenerationMode::PING) {
+            LOG_INFO_(BOTH) << "\n=== [Inference] Prompt: ===\n"
+                            << prompt;
+        } else {
+            LOGI << "\n=== [Inference] Prompt: ===\n"
+                 << prompt;
+        }
+        LOGI << "[Inference] Encoding prompt...";
     }
 
     // Encode prompt
     auto input_ids = tokenizer_->encode(prompt);
 
     if (config.verbose) {
-        std::cout << "[Inference] Prompt tokens: " << input_ids.size() << std::endl;
-        std::cout << "[Inference] Generating..." << std::endl;
+        LOGI << "[Inference] Prompt token count: " << input_ids.size();
+        LOGI << "[Inference] Generating...";
     }
 
     // Generate tokens
-    auto output_ids = generate_tokens(input_ids, config, 0);
+    auto output_ids = generate_tokens(input_ids, config, past_len);
 
     // Decode output
     std::string output = tokenizer_->decode(output_ids);
 
     if (config.verbose) {
-        std::cout << "[Inference] Generation complete!" << std::endl;
+        LOGI << "[Inference] Generation complete!";
+        if (config.gen_mode == GenerationMode::PING) {
+            LOG_INFO_(BOTH) << "\n=== [Inference] Generated text: ===\n"
+                            << output;
+        } else {
+            LOGI << "\n=== [Inference] Generated text: ===\n"
+                 << output;
+        }
     }
 
     if (config.print_stats) {
-        std::cout << last_stats_.summary() << std::endl;
+        LOGI << last_stats_.summary() << std::endl;
     }
 
     return output;
@@ -158,9 +170,6 @@ std::vector<int> InferenceEngine::generate_tokens(
 
     // Create sampler
     auto sampler = create_sampler(config);
-
-    // Reset KV cache
-    // reset();
 
     std::vector<int> generated_ids;
     generated_ids.reserve(config.max_new_tokens);
@@ -191,7 +200,6 @@ std::vector<int> InferenceEngine::generate_tokens(
     }
 
     // Decode phase
-    // int past_len = kv_cache_->current_length();
     past_len += input_ids.size();
     for (int i = 1; i < config.max_new_tokens; ++i) {
         auto step_start = std::chrono::high_resolution_clock::now();
@@ -213,10 +221,6 @@ std::vector<int> InferenceEngine::generate_tokens(
             std::string token_text = tokenizer_->decode({next_token});
             config.stream_callback(token_text);
         }
-
-        // if (config.verbose && (i % 10 == 0)) {
-        //     std::cout << "[Inference] Generated " << i << " tokens..." << std::endl;
-        // }
 
         if (should_stop(next_token, config)) {
             break;
@@ -301,7 +305,7 @@ std::unique_ptr<InferenceEngine> InferenceEngineBuilder::build() {
         throw std::invalid_argument("Model path not set");
     }
 
-    std::cout << "[Builder] Loading model from: " << model_path_ << std::endl;
+    LOGI << "[Builder] Loading model from: " << model_path_;
 
     // Load model
     auto model = model::Model::parse(model_path_, NEOLLM_DEVICE_CPU);
@@ -309,16 +313,13 @@ std::unique_ptr<InferenceEngine> InferenceEngineBuilder::build() {
         throw std::runtime_error("Failed to parse model");
     }
 
-    std::cout << "[Builder] Model loaded: " << model->model_type() << std::endl;
+    LOGI << "[Builder] Model loaded: " << model->model_type();
 
     // Load tokenizer
     auto tokenizer = tokenizer::HFTokenizer::create(model_path_ + "/tokenizer.json");
     if (!tokenizer) {
         throw std::runtime_error("Failed to load tokenizer");
     }
-
-    std::cout << "[Builder] Tokenizer loaded, vocab size: "
-              << tokenizer->get_vocab_size() << std::endl;
 
     // Setup KV cache config
     kvcache::DynamicKVCacheConfig kv_config;
@@ -335,13 +336,12 @@ std::unique_ptr<InferenceEngine> InferenceEngineBuilder::build() {
     // Create KV cache
     auto kv_cache = kvcache::DynamicKVCacheManager::create_dynamic_kvcache(kv_config);
 
-    std::cout << "[Builder] KV Cache initialized: "
-              << "capacity=" << kv_cache->allocated_capacity()
-              << ", memory=" << kv_cache->memory_usage() / (1024.0 * 1024.0) << "MB"
-              << std::endl;
+    LOGI << "[Builder] KV Cache initialized: "
+         << "capacity=" << kv_cache->allocated_capacity()
+         << ", memory=" << kv_cache->memory_usage() / (1024.0 * 1024.0) << "MB";
 
     // Build computation graph
-    std::cout << "[Builder] Building computation graph..." << std::endl;
+    LOGI << "[Builder] Building computation graph...";
 
     graph::GraphBuilder *builder = nullptr;
     if (model->model_type() == "qwen2") {
@@ -352,12 +352,18 @@ std::unique_ptr<InferenceEngine> InferenceEngineBuilder::build() {
 
     auto graph = builder->build(model.get());
 
-    std::cout << "[Builder] Computation graph built" << std::endl;
+    LOGI << "[Builder] Computation graph built";
 
     // Create executor
-    auto executor = graph::GraphExecutor::create(graph, kv_cache);
+    ExecutorConfig exec_config;
+    exec_config.device_type = device_type_;
+    exec_config.device_id = device_id_;
+    exec_config.data_type = kv_config.dtype;
+    exec_config.max_prefill_len = 128;
+    exec_config.max_seq_len = kv_config.model_max_seq_len;
+    auto executor = GraphExecutor::create(graph, kv_cache, exec_config);
 
-    std::cout << "[Builder] Graph executor created" << std::endl;
+    LOGI << "[Builder] Graph executor created";
 
     // Create engine using unique_ptr and new
     auto engine = std::unique_ptr<InferenceEngine>(
@@ -368,7 +374,7 @@ std::unique_ptr<InferenceEngine> InferenceEngineBuilder::build() {
             kv_cache,
             std::move(executor)));
 
-    std::cout << "[Builder] Inference engine ready!" << std::endl;
+    LOGI << "[Builder] Inference engine ready!";
 
     return engine;
 }

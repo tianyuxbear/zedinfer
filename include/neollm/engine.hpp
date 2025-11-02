@@ -12,12 +12,19 @@
 
 namespace neollm {
 
+enum class GenerationMode {
+    PING,
+    CHAT
+};
+
 /**
  * Generation configuration parameters
  */
 struct GenerationConfig {
     int max_new_tokens = 512;
     int max_seq_len = 2048;
+
+    GenerationMode gen_mode = GenerationMode::PING;
 
     // Sampling parameters
     sampler::SamplerParams sampler_params;
@@ -96,7 +103,7 @@ public:
      */
     std::string generate(
         const std::string &prompt,
-        const GenerationConfig &config = GenerationConfig());
+        const GenerationConfig &config = GenerationConfig(), int past_len = 0);
 
     /**
      * Generate tokens from token IDs (low-level API)
@@ -138,7 +145,7 @@ private:
         std::unique_ptr<tokenizer::Tokenizer> tokenizer,
         graph::compute_graph_t graph,
         kvcache::kvcache_t kv_cache,
-        std::unique_ptr<graph::GraphExecutor> executor,
+        std::unique_ptr<GraphExecutor> executor,
         const GenerationConfig &gen_config = GenerationConfig());
 
     // Core components
@@ -146,7 +153,7 @@ private:
     std::unique_ptr<tokenizer::Tokenizer> tokenizer_;
     graph::compute_graph_t graph_;
     kvcache::kvcache_t kv_cache_;
-    std::unique_ptr<graph::GraphExecutor> executor_;
+    std::unique_ptr<GraphExecutor> executor_;
 
     // Configuration
     GenerationConfig gen_config_;

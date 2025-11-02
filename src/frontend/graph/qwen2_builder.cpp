@@ -1,10 +1,13 @@
 #include "frontend/graph/builder.hpp"
 #include "frontend/graph/graph.hpp"
+#include <cstddef>
 
 namespace neollm::graph {
 
 compute_graph_t Qwen2GraphBuilder::build(const model::Model *model) {
     auto graph = std::make_shared<ComputeGraph>();
+    size_t per_token_activation_numel = 0;
+
     const auto &config = model->config();
 
     // Create input nodes
@@ -20,6 +23,7 @@ compute_graph_t Qwen2GraphBuilder::build(const model::Model *model) {
     embedding_node->set_weight(model->weights().get_tensor(
         model->get_embedding_weight_name()));
     embedding_node->set_param("hidden_size", config.hidden_size);
+    per_token_activation_numel += config.hidden_size;
 
     // Build transformer layers
     auto hidden_states = embedding_node;
@@ -36,7 +40,8 @@ compute_graph_t Qwen2GraphBuilder::build(const model::Model *model) {
         graph->set_input(v_cache_name, v_cache_node);
 
         hidden_states = build_transformer_layer(
-            graph, hidden_states, model, i, k_cache_node, v_cache_node, position_ids);
+            graph, hidden_states, model, i, k_cache_node, v_cache_node, position_ids, per_token_activation_numel);
+
     }
 
     // Final normalization layer
@@ -46,6 +51,7 @@ compute_graph_t Qwen2GraphBuilder::build(const model::Model *model) {
         model->get_output_norm_weight_name()));
     norm_node->set_param("hidden_size", config.hidden_size);
     norm_node->set_param("eps", config.rms_norm_eps);
+    per_token_activation_numel += config.hidden_size;
 
     // Language model head (vocabulary projection)
     auto lm_head = graph->add_node(OpType::LINEAR, "lm_head");
@@ -54,8 +60,11 @@ compute_graph_t Qwen2GraphBuilder::build(const model::Model *model) {
         model->get_output_weight_name()));
     lm_head->set_bias(nullptr);
     lm_head->set_param("vocab_size", config.vocab_size);
+    per_token_activation_numel += config.vocab_size;
 
     graph->set_output("logits", lm_head);
+
+    graph->set_per_token_activation_numel(per_token_activation_numel);
 
     return graph;
 }
@@ -67,7 +76,7 @@ graph_node_t Qwen2GraphBuilder::build_transformer_layer(
     int layer_idx,
     graph_node_t k_cache,
     graph_node_t v_cache,
-    graph_node_t position_ids) {
+    graph_node_t position_ids, size_t &numel) {
 
     const auto &config = model->config();
     auto layer_weights = model->get_layer_weight_names(layer_idx);
@@ -79,10 +88,11 @@ graph_node_t Qwen2GraphBuilder::build_transformer_layer(
     input_norm->set_weight(model->weights().get_tensor(layer_weights[10]));
     input_norm->set_param("hidden_size", config.hidden_size);
     input_norm->set_param("eps", config.rms_norm_eps);
+    numel += config.hidden_size;
 
     // Multi-head self-attention
     auto attn_output = build_attention(
-        graph, input_norm, model, layer_idx, k_cache, v_cache, position_ids);
+        graph, input_norm, model, layer_idx, k_cache, v_cache, position_ids, numel);
 
     // First residual connection (attention output)
     auto residual_1 = graph->add_node(OpType::ADD,
@@ -90,6 +100,7 @@ graph_node_t Qwen2GraphBuilder::build_transformer_layer(
     residual_1->add_input(input);
     residual_1->add_input(attn_output);
     residual_1->set_param("hidden_size", config.hidden_size);
+    numel += config.hidden_size;
 
     // Pre-MLP normalization
     auto post_attn_norm = graph->add_node(OpType::RMS_NORM,
@@ -98,9 +109,10 @@ graph_node_t Qwen2GraphBuilder::build_transformer_layer(
     post_attn_norm->set_weight(model->weights().get_tensor(layer_weights[11]));
     post_attn_norm->set_param("hidden_size", config.hidden_size);
     post_attn_norm->set_param("eps", config.rms_norm_eps);
+    numel += config.hidden_size;
 
     // Feed-forward network
-    auto mlp_output = build_mlp(graph, post_attn_norm, model, layer_idx);
+    auto mlp_output = build_mlp(graph, post_attn_norm, model, layer_idx, numel);
 
     // Second residual connection (MLP output)
     auto residual_2 = graph->add_node(OpType::ADD,
@@ -108,6 +120,7 @@ graph_node_t Qwen2GraphBuilder::build_transformer_layer(
     residual_2->add_input(residual_1);
     residual_2->add_input(mlp_output);
     residual_2->set_param("hidden_size", config.hidden_size);
+    numel += config.hidden_size;
 
     return residual_2;
 }
@@ -119,7 +132,8 @@ graph_node_t Qwen2GraphBuilder::build_attention(
     int layer_idx,
     graph_node_t k_cache,
     graph_node_t v_cache,
-    graph_node_t position_ids) {
+    graph_node_t position_ids,
+    size_t &numel) {
 
     const auto &config = model->config();
     const auto &weights = model->weights();
@@ -132,20 +146,23 @@ graph_node_t Qwen2GraphBuilder::build_attention(
     q_proj->set_weight(weights.get_tensor(weight_names[0]));
     q_proj->set_bias(weights.get_tensor(weight_names[1]));
     q_proj->set_param("hidden_size", config.hidden_size);
+    numel += config.hidden_size;
 
     // Key projection (for GQA, uses fewer heads)
     auto k_proj = graph->add_node(OpType::LINEAR, prefix + "k_proj");
     k_proj->add_input(hidden_states);
     k_proj->set_weight(weights.get_tensor(weight_names[2]));
     k_proj->set_bias(weights.get_tensor(weight_names[3]));
-    k_proj->set_param("hidden_dim", config.hidden_size / config.num_attention_heads * config.num_key_value_heads);
+    auto hidden_dim = config.hidden_size / config.num_attention_heads * config.num_key_value_heads;
+    k_proj->set_param("hidden_dim", hidden_dim);
+    numel += hidden_dim;
 
     // Value projection (for GQA, uses fewer heads)
     auto v_proj = graph->add_node(OpType::LINEAR, prefix + "v_proj");
     v_proj->add_input(hidden_states);
     v_proj->set_weight(weights.get_tensor(weight_names[4]));
     v_proj->set_bias(weights.get_tensor(weight_names[5]));
-    v_proj->set_param("hidden_dim", config.hidden_size / config.num_attention_heads * config.num_key_value_heads);
+    v_proj->set_param("hidden_dim", hidden_dim);
 
     // Apply rotary position encoding to queries
     auto q_rope = graph->add_node(OpType::ROPE, prefix + "q_rope");
@@ -153,7 +170,9 @@ graph_node_t Qwen2GraphBuilder::build_attention(
     q_rope->add_input(position_ids);
     q_rope->set_param("theta", config.rope_theta);
     q_rope->set_param("nhead", config.num_attention_heads);
-    q_rope->set_param("head_dim", config.hidden_size / config.num_attention_heads);
+    auto head_dim = config.hidden_size / config.num_attention_heads;
+    q_rope->set_param("head_dim", head_dim);
+    numel += config.num_attention_heads * head_dim;
 
     // Apply rotary position encoding to keys
     auto k_rope = graph->add_node(OpType::ROPE, prefix + "k_rope");
@@ -161,7 +180,7 @@ graph_node_t Qwen2GraphBuilder::build_attention(
     k_rope->add_input(position_ids);
     k_rope->set_param("theta", config.rope_theta);
     k_rope->set_param("nkvhead", config.num_key_value_heads);
-    k_rope->set_param("head_dim", config.hidden_size / config.num_attention_heads);
+    k_rope->set_param("head_dim", head_dim);
 
     // Grouped query attention computation with KV cache
     auto attn_node = graph->add_node(OpType::SELF_ATTENTION, prefix + "self_attn");
@@ -169,7 +188,8 @@ graph_node_t Qwen2GraphBuilder::build_attention(
     attn_node->add_input(k_cache);
     attn_node->add_input(v_cache);
     attn_node->set_param("nhead", config.num_attention_heads);
-    attn_node->set_param("head_dim", config.hidden_size / config.num_attention_heads);
+    attn_node->set_param("head_dim", head_dim);
+    numel += config.num_attention_heads * head_dim;
 
     // Output projection
     auto o_proj = graph->add_node(OpType::LINEAR, prefix + "o_proj");
@@ -177,6 +197,7 @@ graph_node_t Qwen2GraphBuilder::build_attention(
     o_proj->set_weight(weights.get_tensor(weight_names[6]));
     o_proj->set_bias(nullptr);
     o_proj->set_param("hidden_size", config.hidden_size);
+    numel += config.hidden_size;
 
     return o_proj;
 }
@@ -185,7 +206,7 @@ graph_node_t Qwen2GraphBuilder::build_mlp(
     compute_graph_t graph,
     graph_node_t hidden_states,
     const model::Model *model,
-    int layer_idx) {
+    int layer_idx, size_t &numel) {
 
     const auto &config = model->config();
     const auto &weights = model->weights();
@@ -199,6 +220,7 @@ graph_node_t Qwen2GraphBuilder::build_mlp(
     gate_proj->set_bias(nullptr);
     gate_proj->set_param("hidden_size", config.hidden_size);
     gate_proj->set_param("intermediate_size", config.intermediate_size);
+    numel += config.intermediate_size;
 
     // Up projection for SwiGLU
     auto up_proj = graph->add_node(OpType::LINEAR, prefix + "up_proj");
@@ -207,12 +229,14 @@ graph_node_t Qwen2GraphBuilder::build_mlp(
     up_proj->set_bias(nullptr);
     up_proj->set_param("hidden_size", config.hidden_size);
     up_proj->set_param("intermediate_size", config.intermediate_size);
+    numel += config.intermediate_size;
 
     // SwiGLU activation: SiLU(gate) * up
     auto swiglu_node = graph->add_node(OpType::SWIGLU, prefix + "swiglu");
     swiglu_node->add_input(gate_proj);
     swiglu_node->add_input(up_proj);
     swiglu_node->set_param("intermediate_size", config.intermediate_size);
+    numel += config.intermediate_size;
 
     // Down projection back to hidden size
     auto down_proj = graph->add_node(OpType::LINEAR, prefix + "down_proj");
@@ -221,6 +245,7 @@ graph_node_t Qwen2GraphBuilder::build_mlp(
     down_proj->set_bias(nullptr);
     down_proj->set_param("hidden_size", config.hidden_size);
     down_proj->set_param("intermediate_size", config.intermediate_size);
+    numel += config.hidden_size;
 
     return down_proj;
 }

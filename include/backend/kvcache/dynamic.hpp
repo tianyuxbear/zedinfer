@@ -49,7 +49,7 @@ public:
     void reset() override;
     size_t memory_usage() const override;
     float utilization() const override;
-    void print_stats() const override;
+    std::string get_stats() const override;
 
     // 动态特有接口
     int growth_count() const { return growth_count_; }

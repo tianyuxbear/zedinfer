@@ -29,7 +29,7 @@ end
 -- Enable compiler warnings
 add_cxxflags("-Wall", "-Wextra")
 
-add_requires("icu4c")
+add_requires("icu4c", "readline")
 
 -- Device implementations
 includes("xmake/device/cpu.lua")

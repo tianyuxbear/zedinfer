@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstring>
 #include <iostream>
+#include <sstream>
 
 namespace neollm::kvcache {
 
@@ -33,10 +34,12 @@ DynamicKVCacheManager::DynamicKVCacheManager(const DynamicKVCacheConfig &config)
     dynamic_config_.validate();
     allocate_cache(dynamic_config_.initial_capacity);
 
+#ifdef DEBUG
     std::cout << "[DynamicKVCache] Initialized:" << std::endl;
     std::cout << "  Initial capacity: " << allocated_capacity_ << " tokens" << std::endl;
     std::cout << "  Model max length: " << dynamic_config_.model_max_seq_len << std::endl;
     std::cout << "  Memory: " << (memory_usage() / 1024.0 / 1024.0) << " MB" << std::endl;
+#endif
 }
 
 void DynamicKVCacheManager::allocate_cache(int capacity) {
@@ -258,14 +261,18 @@ double DynamicKVCacheManager::average_growth_time_ms() const {
     return growth_count_ > 0 ? total_growth_time_ms_ / growth_count_ : 0.0;
 }
 
-void DynamicKVCacheManager::print_stats() const {
-    KVCacheManager::print_stats();
+std::string DynamicKVCacheManager::get_stats() const {
+    std::ostringstream oss;
 
-    std::cout << "  --- Dynamic Stats ---" << std::endl;
-    std::cout << "  Growth count: " << growth_count_ << std::endl;
+    oss << KVCacheManager::get_stats();
+
+    oss << "  --- Dynamic Stats ---" << std::endl;
+    oss << "  Growth count: " << growth_count_ << std::endl;
     if (growth_count_ > 0) {
-        std::cout << "  Avg growth time: " << average_growth_time_ms() << " ms" << std::endl;
+        oss << "  Avg growth time: " << average_growth_time_ms() << " ms" << std::endl;
     }
+
+    return oss.str();
 }
 
 } // namespace neollm::kvcache

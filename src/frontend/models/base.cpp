@@ -4,14 +4,13 @@
 
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <nlohmann/json.hpp>
+#include <plog/Log.h>
+#include <string>
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
-
-#include <fstream>
-#include <iostream>
-#include <string>
 
 void dump_numa_maps_cpp(int max_lines = 20) {
     std::ifstream file("/proc/self/numa_maps");
@@ -111,10 +110,12 @@ std::unique_ptr<ModelConfig> Model::load_config(const std::string &config_path) 
 // Load model weights using memory-mapped SafeTensors.
 std::unique_ptr<ModelWeights> Model::load_weights(const std::string &model_path, NeollmDeviceType_t target_device) {
     auto load_start = std::chrono::high_resolution_clock::now();
+
     auto loader = neollm::loader::SafeTensorsLoader::create(model_path);
+
     auto mmap_end = std::chrono::high_resolution_clock::now();
     auto mmap_time = std::chrono::duration<double>(mmap_end - load_start).count();
-    printf("⏱️  Mmap time: %.4fs\n", mmap_time);
+    LOGI.printf("⏱️  Mmap time: %.4fs", mmap_time);
 
     auto weights = std::make_unique<ModelWeights>();
 
@@ -154,9 +155,11 @@ std::unique_ptr<ModelWeights> Model::load_weights(const std::string &model_path,
     }
     auto convert_end = std::chrono::high_resolution_clock::now();
     auto convert_time = std::chrono::duration<double>(convert_end - convert_start).count();
-    printf("⏱️  Conversion time: %.4fs (%zu tensors)\n", convert_time, converted_count);
+    LOGI.printf("⏱️  Conversion time: %.4fs (%zu tensors)", convert_time, converted_count);
 
+#ifdef DEBUG
     dump_numa_maps_cpp();
+#endif
 
     return weights;
 }
