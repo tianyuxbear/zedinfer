@@ -4,6 +4,7 @@
 
 #include <any>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -90,6 +91,9 @@ public:
     graph_node_t get_input(const std::string &name) const;
     graph_node_t get_output(const std::string &name) const;
 
+    void set_per_token_activation_numel(size_t numel);
+    size_t get_per_token_activation_numel();
+
     // Get nodes in topological order
     std::vector<graph_node_t> get_execution_order() const;
 
@@ -101,8 +105,10 @@ public:
 
 private:
     std::vector<graph_node_t> nodes_;
+    mutable std::optional<std::vector<graph_node_t>> cached_execution_order_;
     std::unordered_map<std::string, graph_node_t> inputs_;
     std::unordered_map<std::string, graph_node_t> outputs_;
+    size_t per_token_activation_numel;
 
     // Topological sort implementation
     void topological_sort(std::vector<graph_node_t> &sorted) const;

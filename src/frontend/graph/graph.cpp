@@ -5,7 +5,6 @@
 #include <queue>
 
 namespace neollm::graph {
-
 graph_node_t ComputeGraph::add_node(OpType op, const std::string &name) {
     auto node = std::make_shared<GraphNode>(op, name);
     nodes_.push_back(node);
@@ -36,10 +35,21 @@ graph_node_t ComputeGraph::get_output(const std::string &name) const {
     return nullptr;
 }
 
+void ComputeGraph::set_per_token_activation_numel(size_t numel) {
+    per_token_activation_numel = numel;
+}
+
+size_t ComputeGraph::get_per_token_activation_numel() {
+    return per_token_activation_numel;
+}
+
 std::vector<graph_node_t> ComputeGraph::get_execution_order() const {
-    std::vector<graph_node_t> sorted;
-    topological_sort(sorted);
-    return sorted;
+    if (!cached_execution_order_.has_value()) {
+        std::vector<graph_node_t> order;
+        topological_sort(order);
+        cached_execution_order_ = std::move(order);
+    }
+    return *cached_execution_order_;
 }
 
 void ComputeGraph::topological_sort(std::vector<graph_node_t> &sorted) const {

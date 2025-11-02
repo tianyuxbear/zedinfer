@@ -1,4 +1,4 @@
-add_requires("gtest")
+add_requires("gtest", { configs = { main = true } })
 
 target("test-tokenizer")
     set_kind("binary")

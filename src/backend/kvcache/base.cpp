@@ -2,6 +2,7 @@
 #include "utils/types.hpp"
 #include <iomanip>
 #include <iostream>
+#include <sstream>
 
 namespace neollm::kvcache {
 
@@ -49,17 +50,21 @@ void KVCacheManager::reset() {
     current_length_ = 0;
 }
 
-void KVCacheManager::print_stats() const {
-    std::cout << "\n=== KV Cache Statistics ===" << std::endl;
-    std::cout << "  Num layers: " << config_.num_layers << std::endl;
-    std::cout << "  Num KV heads: " << config_.num_kv_heads << std::endl;
-    std::cout << "  Head dim: " << config_.head_dim << std::endl;
-    std::cout << "  Current length: " << current_length_ << " tokens" << std::endl;
-    std::cout << "  Allocated capacity: " << allocated_capacity() << " tokens" << std::endl;
-    std::cout << "  Utilization: " << std::fixed << std::setprecision(1)
-              << (utilization() * 100.0f) << "%" << std::endl;
-    std::cout << "  Memory usage: " << std::fixed << std::setprecision(2)
-              << (memory_usage() / 1024.0 / 1024.0) << " MB" << std::endl;
+std::string KVCacheManager::get_stats() const {
+    std::ostringstream oss;
+
+    oss << "\n=== KV Cache Statistics ===\n";
+    oss << "  Num layers: " << config_.num_layers << std::endl;
+    oss << "  Num KV heads: " << config_.num_kv_heads << std::endl;
+    oss << "  Head dim: " << config_.head_dim << std::endl;
+    oss << "  Current length: " << current_length_ << " tokens" << std::endl;
+    oss << "  Allocated capacity: " << allocated_capacity() << " tokens" << std::endl;
+    oss << "  Utilization: " << std::fixed << std::setprecision(2)
+        << (utilization() * 100.0f) << "%" << std::endl;
+    oss << "  Memory usage: " << std::fixed << std::setprecision(2)
+        << (memory_usage() / 1024.0 / 1024.0) << " MB" << std::endl;
+
+    return oss.str();
 }
 
 void KVCacheManager::validate_layer_idx(int layer_idx) const {

@@ -55,7 +55,7 @@ public:
     // 统计信息
     virtual size_t memory_usage() const = 0;
     virtual float utilization() const = 0;
-    virtual void print_stats() const;
+    virtual std::string get_stats() const;
 
 protected:
     KVCacheConfig config_;
