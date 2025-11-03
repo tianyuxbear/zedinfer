@@ -4,6 +4,7 @@
 #include "backend/kvcache/base.hpp"
 #include "backend/tensor/tensor.hpp"
 #include "frontend/graph/graph.hpp"
+#include "frontend/graph/shape.hpp"
 #include "neollm/activation.hpp"
 
 #include <memory>
@@ -51,9 +52,11 @@ private:
     // Helper methods
     void execute_node(
         graph::graph_node_t node,
-        std::unordered_map<graph::graph_node_t, tensor_t> &activations,
-        int past_len,
-        int seq_len);
+        std::unordered_map<graph::graph_node_t, tensor_t> &activations, graph::ExecutionContext &ctx);
+
+    void execute_op(graph::graph_node_t node,
+                    const std::vector<tensor_t> &inputs,
+                    tensor_t output);
 
     int extract_layer_idx(const std::string &node_name);
 };
