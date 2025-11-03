@@ -32,6 +32,8 @@ GraphExecutor::GraphExecutor(
 
     // Pre-allocate reusable position ID tensor.
     position_ids_cache_ = std::make_unique<PositionIDsCache>(config_);
+
+    graph->optimize();
 }
 
 std::unique_ptr<GraphExecutor> GraphExecutor::create(
@@ -109,12 +111,15 @@ tensor_t GraphExecutor::forward(
     // ==================== 4. Execute graph ====================
     auto execution_order = graph_->get_execution_order();
 
+    // Prepare execution context
+    ExecutionContext ctx{1, seq_len, past_len};
+
     for (auto &node : execution_order) {
         if (activations.find(node) != activations.end()) {
             continue; // Skip input nodes
         }
 
-        execute_node(node, activations, past_len, seq_len);
+        execute_node(node, activations, ctx);
     }
 
     // ==================== 5. Release activations ====================
@@ -136,11 +141,11 @@ tensor_t GraphExecutor::forward(
 void GraphExecutor::execute_node(
     graph_node_t node,
     std::unordered_map<graph_node_t, tensor_t> &activations,
-    int past_len,
-    int seq_len) {
+    ExecutionContext &ctx) {
 
+    // Select activation allocator based on phase
     ActivationAllocator *activation_allocator;
-    if (seq_len == 1) {
+    if (ctx.seq_len == 1) {
         activation_allocator = decode_pool_.get();
     } else {
         activation_allocator = prefill_arena_.get();
@@ -161,93 +166,90 @@ void GraphExecutor::execute_node(
     std::vector<size_t> shape;
     std::string node_name = node->name();
 
-    // Dispatch by OpType
-    switch (node->op_type()) {
-    case OpType::ADD: {
-        shape = inputs[0]->shape();
+    // Handle special case: write directly to KV cache
+    bool is_v_proj = node_name.find("v_proj") != std::string::npos;
+    bool is_k_rope = node_name.find("k_rope") != std::string::npos;
+    bool write_to_kv_cache = is_k_rope || is_v_proj;
+
+    if (write_to_kv_cache) {
+        int layer_idx = extract_layer_idx(node_name);
+
+        output = is_v_proj
+                   ? kv_cache_->get_v_cache_write_slice(layer_idx, ctx.past_len, ctx.seq_len)
+                   : kv_cache_->get_k_cache_write_slice(layer_idx, ctx.past_len, ctx.seq_len);
+
+        // Resolve shape from template and reshape
+        shape = node->get_output_shape_template().resolve(ctx);
+        output = output->view(shape);
+    } else {
+        // Resolve shape from cached template
+        shape = node->get_output_shape_template().resolve(ctx);
         output = activation_allocator->acquire(shape);
-        ops::add(output, inputs[0], inputs[1]);
-        break;
-    }
-    case OpType::EMBEDDING: {
-        shape = {static_cast<size_t>(seq_len), node->get_param<size_t>("hidden_size")};
-        output = activation_allocator->acquire(shape);
-        auto weight = node->weight();
-        ops::embedding(output, inputs[0], weight);
-        break;
-    }
-    case OpType::LINEAR: {
-        bool is_v_proj = node_name.find("v_proj") != std::string::npos;
-        if (is_v_proj) {
-            output = kv_cache_->get_v_cache_write_slice(extract_layer_idx(node_name), past_len, seq_len);
-            shape = {static_cast<size_t>(seq_len), node->get_param<size_t>("hidden_dim")};
-            output = output->view(shape);
-        } else {
-            if (node_name == "lm_head") {
-                shape = {static_cast<size_t>(seq_len), node->get_param<size_t>("vocab_size")};
-            } else if (node_name.find("q_proj") != std::string::npos || node_name.find("o_proj") != std::string::npos || node_name.find("down_proj") != std::string::npos) {
-                shape = {static_cast<size_t>(seq_len), node->get_param<size_t>("hidden_size")};
-            } else if (node_name.find("k_proj") != std::string::npos) {
-                shape = {static_cast<size_t>(seq_len), node->get_param<size_t>("hidden_dim")};
-            } else if (node_name.find("gate_proj") != std::string::npos || node_name.find("up_proj") != std::string::npos) {
-                shape = {static_cast<size_t>(seq_len), node->get_param<size_t>("intermediate_size")};
-            }
-            output = activation_allocator->acquire(shape);
-        }
-        auto weight = node->weight();
-        auto bias = node->bias();
-        ops::linear(output, inputs[0], weight, bias);
-        break;
     }
 
+    // Reshape ROPE input to match expected 3D format
+    bool is_rope = node_name.find("rope") != std::string::npos;
+    if (is_rope) {
+        inputs[0] = inputs[0]->view(shape);
+    }
+
+    // Execute operator
+    execute_op(node, inputs, output);
+
+    // Flatten SELF_ATTENTION output
+    if (node->op_type() == OpType::SELF_ATTENTION) {
+        size_t nhead = node->get_param<size_t>("nhead");
+        size_t head_dim = node->get_param<size_t>("head_dim");
+        output = output->view({static_cast<size_t>(ctx.seq_len), nhead * head_dim});
+    }
+
+    activations[node] = output;
+}
+
+void GraphExecutor::execute_op(
+    graph_node_t node,
+    const std::vector<tensor_t> &inputs,
+    tensor_t output) {
+
+    switch (node->op_type()) {
+    case OpType::ADD:
+        ops::add(output, inputs[0], inputs[1]);
+        break;
+
+    case OpType::EMBEDDING:
+        ops::embedding(output, inputs[0], node->weight());
+        break;
+
+    case OpType::LINEAR:
+        ops::linear(output, inputs[0], node->weight(), node->bias());
+        break;
+
     case OpType::RMS_NORM: {
-        shape = {static_cast<size_t>(seq_len), node->get_param<size_t>("hidden_size")};
-        output = activation_allocator->acquire(shape);
-        auto weight = node->weight();
         float eps = node->get_param<float>("eps");
-        ops::rms_norm(output, inputs[0], weight, eps);
+        ops::rms_norm(output, inputs[0], node->weight(), eps);
         break;
     }
 
     case OpType::ROPE: {
-        // Check if K's RoPE (write directly to KV cache)
-        bool is_k_rope = (node_name.find("k_rope") != std::string::npos);
-        if (is_k_rope) {
-            shape = {static_cast<size_t>(seq_len), node->get_param<size_t>("nkvhead"), node->get_param<size_t>("head_dim")};
-            int layer_idx = extract_layer_idx(node_name);
-            output = kv_cache_->get_k_cache_write_slice(layer_idx, past_len, seq_len);
-        } else {
-            shape = {static_cast<size_t>(seq_len), node->get_param<size_t>("nhead"), node->get_param<size_t>("head_dim")};
-            output = activation_allocator->acquire(shape);
-        }
-
         float theta = node->get_param<float>("theta");
-        ops::rope(output, inputs[0]->view(shape), inputs[1], theta);
+        ops::rope(output, inputs[0], inputs[1], theta);
         break;
     }
 
     case OpType::SELF_ATTENTION: {
-        shape = {static_cast<size_t>(seq_len), node->get_param<size_t>("nhead"), node->get_param<size_t>("head_dim")};
-        output = activation_allocator->acquire(shape);
         float scale = 1.0f / std::sqrt(static_cast<float>(node->get_param<size_t>("head_dim")));
         ops::self_attention(output, inputs[0], inputs[1], inputs[2], scale);
-        output = output->view({static_cast<size_t>(seq_len), node->get_param<size_t>("nhead") * node->get_param<size_t>("head_dim")});
         break;
     }
 
-    case OpType::SWIGLU: {
-        shape = {static_cast<size_t>(seq_len), node->get_param<size_t>("intermediate_size")};
-        output = activation_allocator->acquire(shape);
+    case OpType::SWIGLU:
         ops::swiglu(output, inputs[0], inputs[1]);
         break;
-    }
 
     default:
         throw std::runtime_error(
             "Unsupported op type: " + std::to_string(static_cast<int>(node->op_type())));
     }
-
-    activations[node] = output;
 }
 
 int GraphExecutor::extract_layer_idx(const std::string &node_name) {

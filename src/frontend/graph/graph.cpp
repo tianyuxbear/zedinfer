@@ -2,6 +2,7 @@
 #include "utils/check.hpp"
 
 #include <iostream>
+#include <plog/Log.h>
 #include <queue>
 
 namespace neollm::graph {
@@ -100,12 +101,173 @@ void ComputeGraph::topological_sort(std::vector<graph_node_t> &sorted) const {
     }
 }
 
+void ComputeGraph::infer_shapes() {
+    if (shapes_inferred_) {
+        return; // Skip if already inferred
+    }
+
+    auto execution_order = get_execution_order();
+
+    for (auto &node : execution_order) {
+        infer_node_shape(node);
+    }
+
+    shapes_inferred_ = true;
+    LOGI << "Shape inference completed for " << nodes_.size() << " nodes";
+}
+
+void ComputeGraph::validate_shapes() {
+    if (!shapes_inferred_) {
+        throw std::runtime_error("Shapes must be inferred before validation");
+    }
+
+    for (const auto &node : nodes_) {
+        if (node->op_type() == OpType::INPUT) {
+            continue; // INPUT nodes resolved at runtime
+        }
+
+        if (!node->has_output_shape_template()) {
+            throw std::runtime_error(
+                "Node missing shape template: " + node->name());
+        }
+
+        if (!node->get_output_shape_template().validate()) {
+            throw std::runtime_error(
+                "Invalid shape template for node: " + node->name());
+        }
+    }
+
+    LOGI << "Shape validation passed";
+}
+
+void ComputeGraph::infer_node_shape(graph_node_t node) {
+    ShapeTemplate output_shape;
+
+    switch (node->op_type()) {
+    case OpType::INPUT: {
+        // Runtime-provided, no inference needed
+        break;
+    }
+
+    case OpType::EMBEDDING: {
+        // Output: [seq_len, hidden_size]
+        size_t hidden_size = node->get_param<size_t>("hidden_size");
+        output_shape.dims = {
+            ShapeDim::SeqLen(),
+            ShapeDim::Fixed(hidden_size)};
+        break;
+    }
+
+    case OpType::LINEAR: {
+        auto name = node->name();
+
+        if (name == "lm_head") {
+            // [seq_len, vocab_size]
+            size_t vocab_size = node->get_param<size_t>("vocab_size");
+            output_shape.dims = {
+                ShapeDim::SeqLen(),
+                ShapeDim::Fixed(vocab_size)};
+        } else if (name.find("q_proj") != std::string::npos || name.find("o_proj") != std::string::npos || name.find("down_proj") != std::string::npos) {
+            // [seq_len, hidden_size]
+            size_t hidden_size = node->get_param<size_t>("hidden_size");
+            output_shape.dims = {
+                ShapeDim::SeqLen(),
+                ShapeDim::Fixed(hidden_size)};
+        } else if (name.find("k_proj") != std::string::npos || name.find("v_proj") != std::string::npos) {
+            // [seq_len, hidden_dim] for GQA
+            size_t hidden_dim = node->get_param<size_t>("hidden_dim");
+            output_shape.dims = {
+                ShapeDim::SeqLen(),
+                ShapeDim::Fixed(hidden_dim)};
+        } else if (name.find("gate_proj") != std::string::npos || name.find("up_proj") != std::string::npos) {
+            // [seq_len, intermediate_size]
+            size_t intermediate_size = node->get_param<size_t>("intermediate_size");
+            output_shape.dims = {
+                ShapeDim::SeqLen(),
+                ShapeDim::Fixed(intermediate_size)};
+        }
+        break;
+    }
+
+    case OpType::RMS_NORM: {
+        // Output: [seq_len, hidden_size]
+        size_t hidden_size = node->get_param<size_t>("hidden_size");
+        output_shape.dims = {
+            ShapeDim::SeqLen(),
+            ShapeDim::Fixed(hidden_size)};
+        break;
+    }
+
+    case OpType::ROPE: {
+        // Output: [seq_len, nhead/nkvhead, head_dim]
+        auto name = node->name();
+        bool is_k_rope = (name.find("k_rope") != std::string::npos);
+        size_t head_dim = node->get_param<size_t>("head_dim");
+
+        if (is_k_rope) {
+            size_t nkvhead = node->get_param<size_t>("nkvhead");
+            output_shape.dims = {
+                ShapeDim::SeqLen(),
+                ShapeDim::Fixed(nkvhead),
+                ShapeDim::Fixed(head_dim)};
+        } else {
+            size_t nhead = node->get_param<size_t>("nhead");
+            output_shape.dims = {
+                ShapeDim::SeqLen(),
+                ShapeDim::Fixed(nhead),
+                ShapeDim::Fixed(head_dim)};
+        }
+        break;
+    }
+
+    case OpType::SELF_ATTENTION: {
+        // Output: [seq_len, nhead, head_dim]
+        size_t nhead = node->get_param<size_t>("nhead");
+        size_t head_dim = node->get_param<size_t>("head_dim");
+        output_shape.dims = {
+            ShapeDim::SeqLen(),
+            ShapeDim::Fixed(nhead),
+            ShapeDim::Fixed(head_dim)};
+        break;
+    }
+
+    case OpType::SWIGLU: {
+        // Output: [seq_len, intermediate_size]
+        size_t intermediate_size = node->get_param<size_t>("intermediate_size");
+        output_shape.dims = {
+            ShapeDim::SeqLen(),
+            ShapeDim::Fixed(intermediate_size)};
+        break;
+    }
+
+    case OpType::ADD: {
+        // Output: same as first input
+        size_t hidden_size = node->get_param<size_t>("hidden_size");
+        output_shape.dims = {
+            ShapeDim::SeqLen(),
+            ShapeDim::Fixed(hidden_size)};
+        break;
+    }
+
+    default:
+        throw std::runtime_error(
+            "Shape inference not implemented for op type: " + std::to_string(static_cast<int>(node->op_type())));
+    }
+
+    if (!output_shape.dims.empty()) {
+        node->set_output_shape_template(std::move(output_shape));
+    }
+}
+
 void ComputeGraph::optimize() {
+    infer_shapes();
+    validate_shapes();
+
     // Apply graph optimization strategies
-    fuse_operators();
-    fold_constants();
-    eliminate_dead_code();
-    optimize_memory();
+    // fuse_operators();
+    // fold_constants();
+    // eliminate_dead_code();
+    // optimize_memory();
 }
 
 /**

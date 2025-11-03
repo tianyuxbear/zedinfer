@@ -1,6 +1,7 @@
 #pragma once
 
 #include "backend/tensor/tensor.hpp"
+#include "frontend/graph/shape.hpp"
 
 #include <any>
 #include <memory>
@@ -63,14 +64,31 @@ public:
         return params_.find(key) != params_.end();
     }
 
+    void set_output_shape_template(ShapeTemplate shape_template) {
+        output_shape_template_ = std::move(shape_template);
+    }
+
+    const ShapeTemplate &get_output_shape_template() const {
+        if (!output_shape_template_.has_value()) {
+            throw std::runtime_error(
+                "Output shape template not set for node: " + name_);
+        }
+        return *output_shape_template_;
+    }
+
+    bool has_output_shape_template() const {
+        return output_shape_template_.has_value();
+    }
+
 private:
     OpType op_type_;
     std::string name_;
     std::vector<std::shared_ptr<GraphNode>> inputs_;
     tensor_t weight_;
     tensor_t bias_;
-    std::vector<size_t> output_shape_;
     std::unordered_map<std::string, std::any> params_;
+
+    std::optional<ShapeTemplate> output_shape_template_;
 };
 
 using graph_node_t = std::shared_ptr<GraphNode>;
@@ -118,6 +136,12 @@ private:
     void fold_constants();
     void eliminate_dead_code();
     void optimize_memory();
+
+    // Shape inference and validation
+    bool shapes_inferred_ = false;
+    void infer_shapes();
+    void validate_shapes();
+    void infer_node_shape(graph_node_t node);
 };
 
 using compute_graph_t = std::shared_ptr<ComputeGraph>;
