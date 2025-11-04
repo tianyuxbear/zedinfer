@@ -20,17 +20,17 @@ void KVCacheConfig::validate() const {
 
 size_t KVCacheConfig::bytes_per_token() const {
     size_t element_size = utils::dsize(dtype);
-    return 2 * num_kv_heads * head_dim * element_size;
+    return 2 * num_layers * num_kv_heads * head_dim * element_size;
 }
 
-KVCacheManager::KVCacheManager(const KVCacheConfig &config)
+KVCache::KVCache(const KVCacheConfig &config)
     : config_(config), current_length_(0) {
     config_.validate();
     k_caches_.reserve(config_.num_layers);
     v_caches_.reserve(config_.num_layers);
 }
 
-void KVCacheManager::update_seq_len(int new_tokens) {
+void KVCache::update_seq_len(int new_tokens) {
     if (new_tokens < 0) {
         throw std::invalid_argument("new_tokens must be non-negative");
     }
@@ -46,11 +46,11 @@ void KVCacheManager::update_seq_len(int new_tokens) {
     }
 }
 
-void KVCacheManager::reset() {
+void KVCache::reset() {
     current_length_ = 0;
 }
 
-std::string KVCacheManager::get_stats() const {
+std::string KVCache::get_stats() const {
     std::ostringstream oss;
 
     oss << "\n=== KV Cache Statistics ===\n";
@@ -67,18 +67,17 @@ std::string KVCacheManager::get_stats() const {
     return oss.str();
 }
 
-void KVCacheManager::validate_layer_idx(int layer_idx) const {
+void KVCache::validate_layer_idx(int layer_idx) const {
     if (layer_idx < 0 || layer_idx >= config_.num_layers) {
         throw std::out_of_range("Invalid layer_idx");
     }
 }
 
-void KVCacheManager::validate_length_params(int past_len, int seq_len) const {
+void KVCache::validate_length_params(int past_len, int seq_len) const {
     if (past_len < 0 || seq_len < 0) {
         throw std::invalid_argument("Lengths must be non-negative");
     }
     if (past_len > current_length_) {
-        std::cout << "past_len: " << past_len << ", current_length_: " << current_length_ << std::endl;
         throw std::invalid_argument("past_len exceeds current_length");
     }
 }

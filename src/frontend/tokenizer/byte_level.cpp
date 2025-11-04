@@ -1,7 +1,8 @@
 #include "frontend/tokenizer/byte_level.hpp"
+#include "utils/logging.hpp"
 
 #include <algorithm>
-#include <iostream>
+#include <plog/Log.h>
 #include <vector>
 
 namespace neollm::tokenizer {
@@ -83,7 +84,7 @@ std::string ByteLevel::byte_to_unicode(unsigned char byte) {
         return it->second;
     }
     // Should never happen: all 256 bytes are mapped.
-    std::cerr << "[ByteLevel] Warning: No mapping for byte " << static_cast<int>(byte) << '\n';
+    LOG_ERROR_(utils::BOTH) << "[ByteLevel] Warning: No mapping for byte " << static_cast<int>(byte) << '\n';
     return std::string(1, static_cast<char>(byte));
 }
 
@@ -96,7 +97,7 @@ unsigned char ByteLevel::unicode_to_byte(UChar32 unicode_char) {
     if (unicode_char <= 255) {
         return static_cast<unsigned char>(unicode_char);
     }
-    std::cerr << "[ByteLevel] Warning: Unknown Unicode char: " << unicode_char << '\n';
+    LOG_ERROR_(utils::BOTH) << "[ByteLevel] Warning: Unknown Unicode char: " << unicode_char << '\n';
     return 0;
 }
 

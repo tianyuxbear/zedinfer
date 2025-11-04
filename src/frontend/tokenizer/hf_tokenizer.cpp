@@ -1,5 +1,6 @@
 #include "frontend/tokenizer/hf_tokenizer.hpp"
 #include "frontend/tokenizer/byte_level.hpp"
+#include "utils/logging.hpp"
 
 #include <cctype>
 #include <climits>
@@ -7,12 +8,13 @@
 #include <fstream>
 #include <iostream>
 #include <nlohmann/json.hpp>
+#include <plog/Log.h>
 
 using json = nlohmann::json;
 
 namespace neollm::tokenizer {
 
-std::unique_ptr<Tokenizer> HFTokenizer::create(const std::string &tokenizer_path) {
+std::shared_ptr<Tokenizer> HFTokenizer::create(const std::string &tokenizer_path) {
     auto tokenizer = std::make_unique<HFTokenizer>();
     tokenizer->load_from_file(tokenizer_path);
     return tokenizer;
@@ -59,9 +61,9 @@ void HFTokenizer::load_from_file(const std::string &tokenizer_path) {
                         icu::UnicodeString uPattern = icu::UnicodeString::fromUTF8(pattern_);
                         pre_tokenize_regex_.reset(icu::RegexPattern::compile(uPattern, 0, status));
                         if (U_FAILURE(status)) {
-                            std::cerr << "[Tokenizer] Invalid regex pattern: "
-                                      << u_errorName(status)
-                                      << " - Pattern: " << pattern_ << std::endl;
+                            LOG_ERROR_(utils::BOTH) << "[Tokenizer] Invalid regex pattern: "
+                                                    << u_errorName(status)
+                                                    << " - Pattern: " << pattern_ << std::endl;
                             pre_tokenize_regex_.reset();
                         }
                     }
@@ -213,7 +215,7 @@ std::string HFTokenizer::apply_chat_template(
 void HFTokenizer::load_config_file(const std::string &tokenizer_config_path) {
     std::ifstream file(tokenizer_config_path);
     if (!file.is_open()) {
-        std::cout << "Note: tokenizer_config.json not found; using default configuration." << std::endl;
+        LOG_WARNING_(utils::BOTH) << "Note: tokenizer_config.json not found; using default configuration." << std::endl;
         return;
     }
 
@@ -261,8 +263,8 @@ std::vector<std::string> HFTokenizer::split_by_special_tokens(const std::string 
         icu::RegexPattern::compile(uPattern, 0, status));
 
     if (U_FAILURE(status)) {
-        std::cerr << "[HFTokenizer] Special token regex compilation failed: "
-                  << u_errorName(status) << std::endl;
+        LOG_ERROR_(utils::BOTH) << "[HFTokenizer] Special token regex compilation failed: "
+                                << u_errorName(status) << std::endl;
         result.push_back(text);
         return result;
     }
@@ -344,8 +346,8 @@ std::vector<std::string> HFTokenizer::pre_tokenize(const std::string &text) {
         pre_tokenize_regex_->matcher(uText, status));
 
     if (U_FAILURE(status)) {
-        std::cerr << "[HFTokenizer] Matcher creation failed: "
-                  << u_errorName(status) << std::endl;
+        LOG_ERROR_(utils::BOTH) << "[HFTokenizer] Matcher creation failed: "
+                                << u_errorName(status) << std::endl;
         words.push_back(text);
         return words;
     }
@@ -359,7 +361,7 @@ std::vector<std::string> HFTokenizer::pre_tokenize(const std::string &text) {
     }
 
     if (U_FAILURE(status)) {
-        std::cerr << "[HFTokenizer] Matching error: " << u_errorName(status) << std::endl;
+        LOG_ERROR_(utils::BOTH) << "[HFTokenizer] Matching error: " << u_errorName(status) << std::endl;
     }
 
     if (words.empty() && !text.empty()) {
@@ -408,7 +410,7 @@ std::vector<int> HFTokenizer::bpe_encode(const std::string &word) {
         if (it != vocab_.end()) {
             result.push_back(it->second);
         } else {
-            std::cerr << "Token not in vocab after BPE: [" << token << "]" << std::endl;
+            LOG_ERROR_(utils::BOTH) << "Token not in vocab after BPE: [" << token << "]" << std::endl;
             if (special_tokens_.unk_token_id != -1) {
                 result.push_back(special_tokens_.unk_token_id);
             } else {

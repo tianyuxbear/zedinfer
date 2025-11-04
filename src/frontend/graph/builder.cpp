@@ -4,6 +4,14 @@
 
 namespace neollm::graph {
 
+std::shared_ptr<GraphBuilder> GraphBuilder::create(const std::string &model_type) {
+    if (model_type == "qwen2") {
+        return std::make_unique<Qwen2GraphBuilder>();
+    } else {
+        throw std::runtime_error("Unsupported model type: " + model_type);
+    }
+}
+
 compute_graph_t Qwen2GraphBuilder::build(const model::Model *model) {
     auto graph = std::make_shared<ComputeGraph>();
     size_t per_token_activation_numel = 0;
@@ -41,7 +49,6 @@ compute_graph_t Qwen2GraphBuilder::build(const model::Model *model) {
 
         hidden_states = build_transformer_layer(
             graph, hidden_states, model, i, k_cache_node, v_cache_node, position_ids, per_token_activation_numel);
-
     }
 
     // Final normalization layer

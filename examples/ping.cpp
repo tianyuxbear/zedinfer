@@ -1,7 +1,10 @@
+#include "backend/device/device.hpp"
 #include "neollm.h"
 #include "neollm/engine.hpp"
+#include "neollm/session.hpp"
 #include "plog/Severity.h"
-#include "utils/logger.hpp"
+#include "utils/logging.hpp"
+#include "utils/system_info.hpp"
 
 #include <chrono>
 #include <memory>
@@ -12,12 +15,14 @@ static const std::string model_path = "/mnt/hdd/shared/models/deepseek-ai/DeepSe
 using namespace neollm;
 
 int main() {
-    initLoggerWithOverwrite(plog::verbose, "logs/ping.log");
-    LOG_VERBOSE_(BOTH) << get_runtime_info();
+    utils::initLoggerWithOverwrite(plog::verbose, "logs/ping.log");
+    LOG_VERBOSE_(utils::BOTH) << utils::get_runtime_info();
 
     auto start = std::chrono::high_resolution_clock::now();
 
-    std::unique_ptr<InferenceEngine> engine = InferenceEngine::create(model_path, NEOLLM_DEVICE_CPU, 0);
+    device::Device device(NEOLLM_DEVICE_CPU, 0);
+    size_t max_prefill_len = 128;
+    std::shared_ptr<InferenceEngine> engine = InferenceEngine::create(model_path, device, max_prefill_len);
 
     auto end = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
@@ -30,8 +35,7 @@ int main() {
 
     std::string prompt = "Who are you?";
 
-    std::vector<std::pair<std::string, std::string>> messages = {
-        {"user", prompt}};
+    auto session = engine->create_session(gen_config);
 
-    std::string output = engine->chat(messages, gen_config);
+    session->chat(prompt);
 }

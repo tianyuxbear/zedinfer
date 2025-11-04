@@ -483,34 +483,38 @@ void ComputeGraph::optimize_memory() {
     TO_BE_IMPLEMENTED();
 }
 
-void ComputeGraph::print() const {
-    std::cout << "=== Compute Graph ===" << std::endl;
-    std::cout << "Total nodes: " << nodes_.size() << std::endl;
-    std::cout << "Inputs: " << inputs_.size() << std::endl;
-    std::cout << "Outputs: " << outputs_.size() << std::endl;
-    std::cout << std::endl;
+std::string ComputeGraph::get_stats() const {
+    std::ostringstream oss;
 
-    std::cout << "=== Input Nodes ===" << std::endl;
+    oss << "=== Compute Graph ===\n";
+    oss << "Total nodes: " << nodes_.size() << '\n';
+    oss << "Inputs: " << inputs_.size() << '\n';
+    oss << "Outputs: " << outputs_.size() << '\n';
+    oss << '\n';
+
+    oss << "=== Input Nodes ===\n";
     for (const auto &[name, node] : inputs_) {
-        std::cout << "  " << name << " -> " << node->name() << std::endl;
+        oss << "  " << name << " -> " << node->name() << '\n';
     }
-    std::cout << std::endl;
+    oss << '\n';
 
-    std::cout << "=== Execution Order ===" << std::endl;
+    oss << "=== Execution Order ===\n";
     auto execution_order = get_execution_order();
     for (size_t i = 0; i < execution_order.size(); ++i) {
         auto node = execution_order[i];
-        std::cout << i << ". " << node->name()
-                  << " (OpType: " << static_cast<int>(node->op_type()) << ")"
-                  << " inputs: " << node->inputs().size()
-                  << std::endl;
+        oss << i << ". " << node->name()
+            << " (OpType: " << static_cast<int>(node->op_type()) << ")"
+            << " inputs: " << node->inputs().size()
+            << '\n';
     }
-    std::cout << std::endl;
+    oss << '\n';
 
-    std::cout << "=== Output Nodes ===" << std::endl;
+    oss << "=== Output Nodes ===\n";
     for (const auto &[name, node] : outputs_) {
-        std::cout << "  " << name << " <- " << node->name() << std::endl;
+        oss << "  " << name << " <- " << node->name() << '\n';
     }
+
+    return oss.str();
 }
 
 } // namespace neollm::graph

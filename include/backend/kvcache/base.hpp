@@ -8,19 +8,19 @@
 namespace neollm::kvcache {
 
 /**
- * KV Cache基础配置
+ * Configuration for KV cache initialization
  */
 struct KVCacheConfig {
-    // 模型结构参数
+    // Model architecture
     int num_layers;
     int num_kv_heads;
     int head_dim;
 
-    // 设备参数
+    // Device settings
     NeollmDeviceType_t device_type = NEOLLM_DEVICE_CPU;
     int device_id = 0;
 
-    // 数据类型
+    // Data type
     NeollmDataType_t dtype = NEOLLM_DTYPE_BF16;
 
     void validate() const;
@@ -28,31 +28,31 @@ struct KVCacheConfig {
 };
 
 /**
- * KV Cache管理器基类
+ * Base class for KV cache management
  */
-class KVCacheManager {
+class KVCache {
 public:
-    explicit KVCacheManager(const KVCacheConfig &config);
-    virtual ~KVCacheManager() = default;
+    explicit KVCache(const KVCacheConfig &config);
+    virtual ~KVCache() = default;
 
-    // 基本信息
+    // Getters
     const KVCacheConfig &config() const { return config_; }
     int current_length() const { return current_length_; }
     virtual int allocated_capacity() const = 0;
 
-    // 核心接口（纯虚函数）
+    // Cache access interface
     virtual tensor_t get_k_cache(int layer_idx) = 0;
     virtual tensor_t get_v_cache(int layer_idx) = 0;
     virtual tensor_t get_k_cache_slice(int layer_idx, int total_len) = 0;
     virtual tensor_t get_v_cache_slice(int layer_idx, int total_len) = 0;
-    virtual tensor_t get_k_cache_write_slice(int layer_idx, int past_len, int seq_len) = 0;
-    virtual tensor_t get_v_cache_write_slice(int layer_idx, int past_len, int seq_len) = 0;
+    virtual tensor_t get_k_cache_slice(int layer_idx, int past_len, int seq_len) = 0;
+    virtual tensor_t get_v_cache_slice(int layer_idx, int past_len, int seq_len) = 0;
 
-    // 状态管理
+    // State management
     void update_seq_len(int new_tokens);
     virtual void reset();
 
-    // 统计信息
+    // Statistics
     virtual size_t memory_usage() const = 0;
     virtual float utilization() const = 0;
     virtual std::string get_stats() const;
@@ -63,11 +63,11 @@ protected:
     std::vector<tensor_t> k_caches_;
     std::vector<tensor_t> v_caches_;
 
-    // 辅助方法
+    // Helper methods
     void validate_layer_idx(int layer_idx) const;
     void validate_length_params(int past_len, int seq_len) const;
 };
 
-using kvcache_t = std::shared_ptr<KVCacheManager>;
+using kvcache_t = std::unique_ptr<KVCache>;
 
 } // namespace neollm::kvcache

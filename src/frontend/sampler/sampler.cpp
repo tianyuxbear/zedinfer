@@ -27,11 +27,11 @@ bool SamplerParams::validate() const {
 
 std::string SamplerParams::info() const {
     std::ostringstream oss;
-    oss << "SamplerParams { "
-        << "temperature: " << temperature << ", "
-        << "top_k: " << top_k << ", "
-        << "top_p: " << top_p << ", "
-        << "seed: " << seed << " }";
+    oss << "\n=== SamplerParams ===\n"
+        << "    temperature: " << temperature << "\n"
+        << "    top_k: " << top_k << "\n"
+        << "    top_p: " << top_p << "\n"
+        << "    seed: " << seed;
     return oss.str();
 }
 
