@@ -97,6 +97,15 @@ private:
     bool should_stop(int token_id) const;
     void update_stats_prefill(double time_ms, int num_tokens);
     void update_stats_decode(double time_ms);
+
+private:
+    /**
+     * Warm up engine by running dummy inference
+     * Should be called after create() to initialize execution paths
+     * @param prefill_len Prefill sequence length for warmup
+     * @param decode_steps Number of decode steps to warmup
+     */
+    void warmup(size_t prefill_len = 32, size_t decode_steps = 8);
 };
 
 } // namespace neollm
