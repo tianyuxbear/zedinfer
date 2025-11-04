@@ -93,6 +93,11 @@ std::shared_ptr<InferenceEngine> InferenceEngine::create(
 
     LOGI << "[Engine] Initialization complete";
 
+    // Warmup engine with reasonable defaults
+    LOG_VERBOSE_(utils::BOTH) << "[Engine] Performing warmup...";
+    engine->warmup(std::min(max_prefill_len, size_t(32)), 8);
+    LOG_VERBOSE_(utils::BOTH) << "[Engine] Ready";
+
     return engine;
 }
 
@@ -277,6 +282,52 @@ void InferenceEngine::update_stats_prefill(double time_ms, int num_tokens) {
 void InferenceEngine::update_stats_decode(double time_ms) {
     last_stats_.decode_time_ms += time_ms;
     last_stats_.total_time_ms += time_ms;
+}
+
+void InferenceEngine::warmup(size_t prefill_len, size_t decode_steps) {
+    LOGI << "[Engine] Warming up with prefill_len=" << prefill_len
+         << ", decode_steps=" << decode_steps;
+
+    auto warmup_start = std::chrono::high_resolution_clock::now();
+
+    // Create temporary KV cache for warmup
+    kvcache::DynamicKVCacheConfig kv_config;
+    const auto &model_config = model_->config();
+
+    kv_config.num_layers = model_config.num_hidden_layers;
+    kv_config.num_kv_heads = model_config.num_key_value_heads;
+    kv_config.head_dim = model_config.hidden_size / model_config.num_attention_heads;
+    kv_config.device_type = device_.type();
+    kv_config.device_id = device_.id();
+    kv_config.dtype = utils::str_to_dtype(model_config.torch_dtype);
+    kv_config.initial_capacity = prefill_len + decode_steps;
+    kv_config.model_max_seq_len = tokenizer_->get_config().model_max_length;
+
+    auto temp_kvcache = kvcache::DynamicKVCache::create_dynamic_kvcache(kv_config);
+
+    // Generate dummy input tokens
+    std::vector<int> dummy_input(prefill_len, 1); // Use token_id=1 as dummy
+
+    // Warmup prefill phase
+    int past_len = 0;
+    tensor_t logits = executor_->forward(*temp_kvcache, dummy_input, past_len);
+    int next_token = sampler_->sample(logits);
+
+    past_len += prefill_len;
+
+    // Warmup decode phase
+    for (size_t i = 1; i < decode_steps; ++i) {
+        logits = executor_->forward(*temp_kvcache, {next_token}, past_len);
+        next_token = sampler_->sample(logits);
+        past_len++;
+    }
+
+    auto warmup_end = std::chrono::high_resolution_clock::now();
+    double warmup_time = std::chrono::duration<double, std::milli>(
+                             warmup_end - warmup_start)
+                             .count();
+
+    LOGI << "[Engine] Warmup complete in " << warmup_time << " ms";
 }
 
 } // namespace neollm
