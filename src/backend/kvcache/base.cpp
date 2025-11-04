@@ -4,7 +4,7 @@
 #include <iostream>
 #include <sstream>
 
-namespace neollm::kvcache {
+namespace zedinfer::kvcache {
 
 void KVCacheConfig::validate() const {
     if (num_layers <= 0) {
@@ -81,4 +81,4 @@ void KVCache::validate_length_params(int past_len, int seq_len) const {
         throw std::invalid_argument("past_len exceeds current_length");
     }
 }
-} // namespace neollm::kvcache
+} // namespace zedinfer::kvcache

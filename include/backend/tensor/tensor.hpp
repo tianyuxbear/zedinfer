@@ -1,15 +1,15 @@
 #pragma once
 
 #include "backend/core/core.hpp"
-#include "neollm.h"
+#include "zedinfer.h"
 
 #include <vector>
-namespace neollm {
+namespace zedinfer {
 class Tensor;
 using tensor_t = std::shared_ptr<Tensor>;
 
 struct TensorMeta {
-    NeollmDataType_t dtype;
+    zedinferDataType_t dtype;
     std::vector<size_t> shape;
     std::vector<ptrdiff_t> strides;
 };
@@ -24,8 +24,8 @@ private:
 public:
     static tensor_t create(
         const std::vector<size_t> &shape,
-        NeollmDataType_t dtype,
-        NeollmDeviceType_t device_type = NEOLLM_DEVICE_CPU,
+        zedinferDataType_t dtype,
+        zedinferDeviceType_t device_type = ZEDINFER_DEVICE_CPU,
         int device_id = 0, bool is_mmap = false, std::byte *mmap_ptr = nullptr);
     ~Tensor() = default;
     // Info
@@ -36,8 +36,8 @@ public:
     const std::vector<ptrdiff_t> &strides() const;
     size_t dim(size_t i) const;
     ptrdiff_t stride(size_t i) const;
-    NeollmDataType_t dtype() const;
-    NeollmDeviceType_t deviceType() const;
+    zedinferDataType_t dtype() const;
+    zedinferDeviceType_t deviceType() const;
     int deviceId() const;
     size_t numel() const;
     size_t elementSize() const;
@@ -58,8 +58,8 @@ public:
     // Challenging features
     tensor_t contiguous() const;
     tensor_t reshape(const std::vector<size_t> &shape) const;
-    tensor_t to(NeollmDeviceType_t device_type, int device_id = -1) const;
-    tensor_t to(NeollmDataType_t data_type) const;
+    tensor_t to(zedinferDeviceType_t device_type, int device_id = -1) const;
+    tensor_t to(zedinferDataType_t data_type) const;
 };
 
-} // namespace neollm
+} // namespace zedinfer

@@ -2,23 +2,23 @@
 #include "backend/core/context/context.hpp"
 #include "backend/core/storage/storage.hpp" // IWYU pragma: keep
 #include "backend/ops/ops.hpp"
-#include "neollm.h"
 #include "utils/check.hpp"
 #include "utils/types.hpp"
+#include "zedinfer.h"
 
 #include <algorithm>
 #include <cstring>
 #include <numeric>
 #include <sstream>
 
-namespace neollm {
+namespace zedinfer {
 
 Tensor::Tensor(TensorMeta meta, core::storage_t storage, size_t offset)
     : _meta(std::move(meta)), _storage(std::move(storage)), _offset(offset) {}
 
 tensor_t Tensor::create(const std::vector<size_t> &shape,
-                        NeollmDataType_t dtype,
-                        NeollmDeviceType_t device_type,
+                        zedinferDataType_t dtype,
+                        zedinferDeviceType_t device_type,
                         int device_id, bool is_mmap, std::byte *mmap_ptr) {
     size_t ndim_ = shape.size();
     std::vector<ptrdiff_t> strides(ndim_);
@@ -32,13 +32,13 @@ tensor_t Tensor::create(const std::vector<size_t> &shape,
     size_t dtype_size = utils::dsize(dtype);
 
     if (is_mmap) {
-        ASSERT(device_type == NEOLLM_DEVICE_CPU, "mmap-backed tensors must reside on CPU");
+        ASSERT(device_type == ZEDINFER_DEVICE_CPU, "mmap-backed tensors must reside on CPU");
         ASSERT(device_id == 0, "device_id must be 0 for CPU tensors");
         auto storage = core::context().runtime().allocateMmapStorage(mmap_ptr, total_elems * dtype_size);
         return std::shared_ptr<Tensor>(new Tensor(meta, storage));
     }
 
-    if (device_type == NEOLLM_DEVICE_CPU && core::context().runtime().deviceType() != NEOLLM_DEVICE_CPU) {
+    if (device_type == ZEDINFER_DEVICE_CPU && core::context().runtime().deviceType() != ZEDINFER_DEVICE_CPU) {
         auto storage = core::context().runtime().allocateHostStorage(total_elems * dtype_size);
         return std::shared_ptr<Tensor>(new Tensor(meta, storage));
     } else {
@@ -76,11 +76,11 @@ ptrdiff_t Tensor::stride(size_t i) const {
     return _meta.strides[i];
 }
 
-NeollmDataType_t Tensor::dtype() const {
+zedinferDataType_t Tensor::dtype() const {
     return _meta.dtype;
 }
 
-NeollmDeviceType_t Tensor::deviceType() const {
+zedinferDeviceType_t Tensor::deviceType() const {
     return _storage->deviceType();
 }
 
@@ -131,35 +131,35 @@ void print_data(const T *data, const std::vector<size_t> &shape, const std::vect
     }
 }
 
-void debug_print(const std::byte *data, const std::vector<size_t> &shape, const std::vector<ptrdiff_t> &strides, NeollmDataType_t dtype) {
+void debug_print(const std::byte *data, const std::vector<size_t> &shape, const std::vector<ptrdiff_t> &strides, zedinferDataType_t dtype) {
     switch (dtype) {
-    case NEOLLM_DTYPE_BYTE:
+    case ZEDINFER_DTYPE_BYTE:
         return print_data(reinterpret_cast<const char *>(data), shape, strides, 0);
-    case NEOLLM_DTYPE_BOOL:
+    case ZEDINFER_DTYPE_BOOL:
         return print_data(reinterpret_cast<const bool *>(data), shape, strides, 0);
-    case NEOLLM_DTYPE_I8:
+    case ZEDINFER_DTYPE_I8:
         return print_data(reinterpret_cast<const int8_t *>(data), shape, strides, 0);
-    case NEOLLM_DTYPE_I16:
+    case ZEDINFER_DTYPE_I16:
         return print_data(reinterpret_cast<const int16_t *>(data), shape, strides, 0);
-    case NEOLLM_DTYPE_I32:
+    case ZEDINFER_DTYPE_I32:
         return print_data(reinterpret_cast<const int32_t *>(data), shape, strides, 0);
-    case NEOLLM_DTYPE_I64:
+    case ZEDINFER_DTYPE_I64:
         return print_data(reinterpret_cast<const int64_t *>(data), shape, strides, 0);
-    case NEOLLM_DTYPE_U8:
+    case ZEDINFER_DTYPE_U8:
         return print_data(reinterpret_cast<const uint8_t *>(data), shape, strides, 0);
-    case NEOLLM_DTYPE_U16:
+    case ZEDINFER_DTYPE_U16:
         return print_data(reinterpret_cast<const uint16_t *>(data), shape, strides, 0);
-    case NEOLLM_DTYPE_U32:
+    case ZEDINFER_DTYPE_U32:
         return print_data(reinterpret_cast<const uint32_t *>(data), shape, strides, 0);
-    case NEOLLM_DTYPE_U64:
+    case ZEDINFER_DTYPE_U64:
         return print_data(reinterpret_cast<const uint64_t *>(data), shape, strides, 0);
-    case NEOLLM_DTYPE_F16:
+    case ZEDINFER_DTYPE_F16:
         return print_data(reinterpret_cast<const fp16_t *>(data), shape, strides, 0);
-    case NEOLLM_DTYPE_F32:
+    case ZEDINFER_DTYPE_F32:
         return print_data(reinterpret_cast<const float *>(data), shape, strides, 0);
-    case NEOLLM_DTYPE_F64:
+    case ZEDINFER_DTYPE_F64:
         return print_data(reinterpret_cast<const double *>(data), shape, strides, 0);
-    case NEOLLM_DTYPE_BF16:
+    case ZEDINFER_DTYPE_BF16:
         return print_data(reinterpret_cast<const bf16_t *>(data), shape, strides, 0);
     default:
         EXCEPTION_UNSUPPORTED_DATATYPE(dtype);
@@ -170,7 +170,7 @@ void Tensor::debug() const {
     core::context().setDevice(this->deviceType(), this->deviceId());
     core::context().runtime().api()->device_synchronize();
     std::cout << this->info() << std::endl;
-    if (this->deviceType() == NEOLLM_DEVICE_CPU) {
+    if (this->deviceType() == ZEDINFER_DEVICE_CPU) {
         debug_print(this->data(), this->shape(), this->strides(), this->dtype());
     } else {
         auto tmp_tensor = create({this->_storage->size()}, this->dtype());
@@ -178,7 +178,7 @@ void Tensor::debug() const {
             tmp_tensor->data(),
             this->data(),
             this->numel() * this->elementSize(),
-            NEOLLM_MEMCPY_D2H);
+            ZEDINFER_MEMCPY_D2H);
         debug_print(tmp_tensor->data(), this->shape(), this->strides(), this->dtype());
     }
 }
@@ -367,15 +367,15 @@ void Tensor::load(const void *src_) {
     ASSERT(_storage->size() != 0, "storage size must be no-zero");
 
     // Ensure the runtime device matches this tensor's affinity
-    NeollmDeviceType_t device_type = deviceType();
+    zedinferDeviceType_t device_type = deviceType();
     int device_id = deviceId();
     if (device_type != core::context().runtime().deviceType() || device_id != core::context().runtime().deviceId()) {
         core::context().setDevice(device_type, device_id);
     }
 
-    NeollmMemcpyKind_t direction = NEOLLM_MEMCPY_H2D;
-    if (device_type == NEOLLM_DEVICE_CPU) {
-        direction = NEOLLM_MEMCPY_H2H;
+    zedinferMemcpyKind_t direction = ZEDINFER_MEMCPY_H2D;
+    if (device_type == ZEDINFER_DEVICE_CPU) {
+        direction = ZEDINFER_MEMCPY_H2H;
     }
 
     // Perform synchronous host-to-device memory copy
@@ -429,7 +429,7 @@ tensor_t Tensor::contiguous() const {
     // Allocate destination storage on the correct device:
     // - If target is CPU but current runtime is GPU -> allocate host memory explicitly
     // - Otherwise, set device context and allocate device memory
-    if (device_type == NEOLLM_DEVICE_CPU && core::context().runtime().deviceType() != NEOLLM_DEVICE_CPU) {
+    if (device_type == ZEDINFER_DEVICE_CPU && core::context().runtime().deviceType() != ZEDINFER_DEVICE_CPU) {
         // Force allocation in host memory when copying to CPU from non-CPU runtime
         new_storage = core::context().runtime().allocateHostStorage(total_bytes);
     } else {
@@ -456,7 +456,7 @@ tensor_t Tensor::contiguous() const {
     // of how the original tensor was constructed (make_shared, new+shared_ptr, etc.).
     // The rearrange() operation performs an efficient device-side copy using
     // the original shape and strides to map logical indices to physical locations.
-    neollm::ops::rearrange(new_tensor, old_tensor);
+    zedinfer::ops::rearrange(new_tensor, old_tensor);
 
     return new_tensor;
 }
@@ -497,13 +497,13 @@ tensor_t Tensor::reshape(const std::vector<size_t> &shape) const {
  * This is the standard interface for device migration in deep learning frameworks,
  * equivalent to PyTorch's `.to(device)` or TensorFlow's `tf.device`.
  *
- * @param device_type The target device type (e.g., NEOLLM_DEVICE_CPU or NEOLLM_DEVICE_CUDA).
+ * @param device_type The target device type (e.g., ZEDINFER_DEVICE_CPU or ZEDINFER_DEVICE_CUDA).
  * @param device_id   The target device ID (e.g., 0 for GPU:0).
  * @return A new Tensor with the same shape, dtype, and values, located on the target device.
  * @note This operation may trigger a full memory copy if the source and target devices differ.
  *       Use this method to explicitly control where computation occurs (e.g., moving data to GPU).
  */
-tensor_t Tensor::to(NeollmDeviceType_t device_type, int device_id) const {
+tensor_t Tensor::to(zedinferDeviceType_t device_type, int device_id) const {
     // If target device matches current device, return a shallow clone (zero-copy)
     if (device_type == deviceType() && device_id == deviceId()) {
         return std::shared_ptr<Tensor>(new Tensor(_meta, _storage, _offset));
@@ -518,7 +518,7 @@ tensor_t Tensor::to(NeollmDeviceType_t device_type, int device_id) const {
     // Allocate destination storage on the correct device:
     // - If target is CPU but current runtime is GPU -> allocate host memory explicitly
     // - Otherwise, set device context and allocate device memory
-    if (device_type == NEOLLM_DEVICE_CPU && core::context().runtime().deviceType() != NEOLLM_DEVICE_CPU) {
+    if (device_type == ZEDINFER_DEVICE_CPU && core::context().runtime().deviceType() != ZEDINFER_DEVICE_CPU) {
         // Force allocation in host memory when copying to CPU from non-CPU runtime
         new_storage = core::context().runtime().allocateHostStorage(total_bytes);
     } else {
@@ -535,7 +535,7 @@ tensor_t Tensor::to(NeollmDeviceType_t device_type, int device_id) const {
 
     // Perform data transfer from current tensor's storage to new storage
     // Determine direction: from current device to target device
-    NeollmDeviceType_t src_device_type = deviceType();
+    zedinferDeviceType_t src_device_type = deviceType();
     int src_device_id = deviceId();
 
     // Ensure source context is active before reading
@@ -544,15 +544,15 @@ tensor_t Tensor::to(NeollmDeviceType_t device_type, int device_id) const {
     }
 
     // Copy data synchronously
-    if (src_device_type == NEOLLM_DEVICE_CPU && device_type == NEOLLM_DEVICE_CPU) {
+    if (src_device_type == ZEDINFER_DEVICE_CPU && device_type == ZEDINFER_DEVICE_CPU) {
         // H2H: Both on CPU — use standard memcpy via CPU runtime
         core::context().runtime().api()->memcpy_sync(
             new_storage->memory(), // dst: host memory
             _storage->memory(),    // src: host memory
             total_bytes,
-            NEOLLM_MEMCPY_H2H);
+            ZEDINFER_MEMCPY_H2H);
 
-    } else if (src_device_type == NEOLLM_DEVICE_CPU && device_type != NEOLLM_DEVICE_CPU) {
+    } else if (src_device_type == ZEDINFER_DEVICE_CPU && device_type != ZEDINFER_DEVICE_CPU) {
         // H2D: Source is CPU, destination is GPU — must be executed by GPU runtime
         // Switch context to target device (GPU) to perform the copy
         core::context().setDevice(device_type, device_id);
@@ -560,16 +560,16 @@ tensor_t Tensor::to(NeollmDeviceType_t device_type, int device_id) const {
             new_storage->memory(), // dst: device memory (GPU)
             _storage->memory(),    // src: host memory (CPU)
             total_bytes,
-            NEOLLM_MEMCPY_H2D);
+            ZEDINFER_MEMCPY_H2D);
 
-    } else if (src_device_type != NEOLLM_DEVICE_CPU && device_type == NEOLLM_DEVICE_CPU) {
+    } else if (src_device_type != ZEDINFER_DEVICE_CPU && device_type == ZEDINFER_DEVICE_CPU) {
         // D2H: Source is GPU, destination is CPU — must be executed by GPU runtime
         // Already in source (GPU) context — safe to invoke D2H
         core::context().runtime().api()->memcpy_sync(
             new_storage->memory(), // dst: host memory (CPU)
             _storage->memory(),    // src: device memory (GPU)
             total_bytes,
-            NEOLLM_MEMCPY_D2H);
+            ZEDINFER_MEMCPY_D2H);
 
     } else {
         // D2D: Source and destination are both non-CPU devices (e.g., GPU->GPU)
@@ -578,14 +578,14 @@ tensor_t Tensor::to(NeollmDeviceType_t device_type, int device_id) const {
             new_storage->memory(), // dst: target device memory
             _storage->memory(),    // src: source device memory
             total_bytes,
-            NEOLLM_MEMCPY_D2D);
+            ZEDINFER_MEMCPY_D2D);
     }
 
     return new_tensor;
 }
 
-tensor_t Tensor::to(NeollmDataType_t data_type) const {
-    ASSERT(data_type == NEOLLM_DTYPE_F32 && dtype() != data_type && deviceType() == NEOLLM_DEVICE_CPU,
+tensor_t Tensor::to(zedinferDataType_t data_type) const {
+    ASSERT(data_type == ZEDINFER_DTYPE_F32 && dtype() != data_type && deviceType() == ZEDINFER_DEVICE_CPU,
            "Only support data type transfer from f16/bf16 to f32 on CPU");
     // Compute total byte size of data to copy
     const size_t total_bytes = numel() * utils::dsize(data_type);
@@ -596,12 +596,12 @@ tensor_t Tensor::to(NeollmDataType_t data_type) const {
     // Allocate destination storage on the correct device:
     // - If target is CPU but current runtime is GPU -> allocate host memory explicitly
     // - Otherwise, set device context and allocate device memory
-    if (core::context().runtime().deviceType() != NEOLLM_DEVICE_CPU) {
+    if (core::context().runtime().deviceType() != ZEDINFER_DEVICE_CPU) {
         // Force allocation in host memory when copying to CPU from non-CPU runtime
         new_storage = core::context().runtime().allocateHostStorage(total_bytes);
     } else {
         // Ensure kernel launches execute on the tensor's native device
-        core::context().setDevice(NEOLLM_DEVICE_CPU, 0);
+        core::context().setDevice(ZEDINFER_DEVICE_CPU, 0);
         new_storage = core::context().runtime().allocateDeviceStorage(total_bytes);
     }
 
@@ -611,9 +611,9 @@ tensor_t Tensor::to(NeollmDataType_t data_type) const {
     // Create new tensor wrapper around the new storage
     tensor_t new_tensor = std::shared_ptr<Tensor>(new Tensor(new_meta, new_storage, 0));
 
-    if (dtype() == NEOLLM_DTYPE_BF16) {
+    if (dtype() == ZEDINFER_DTYPE_BF16) {
         utils::bf16_to_fp32_batch(reinterpret_cast<float *>(new_tensor->data()), reinterpret_cast<const bf16_t *>(data()), numel());
-    } else if (dtype() == NEOLLM_DTYPE_F16) {
+    } else if (dtype() == ZEDINFER_DTYPE_F16) {
         utils::fp16_to_fp32_batch_f16c(reinterpret_cast<float *>(new_tensor->data()), reinterpret_cast<const fp16_t *>(data()), numel());
     } else {
         ASSERT(false, "Only support data type transfer from f16/bf16 to f32 on CPU");
@@ -621,4 +621,4 @@ tensor_t Tensor::to(NeollmDataType_t data_type) const {
 
     return new_tensor;
 }
-} // namespace neollm
+} // namespace zedinfer

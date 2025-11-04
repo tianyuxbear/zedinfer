@@ -1,5 +1,5 @@
 -- Project configuration
-set_project("neollm")
+set_project("zedinfer")
 set_languages("c++17")
 set_encodings("utf-8")
 
@@ -85,11 +85,11 @@ target("backend")
 target_end()
 
 -- Main library
-target("neollm")
+target("zedinfer")
     set_kind("static")
     add_deps("utils")
     add_deps("frontend")
     add_deps("backend")
-    add_files("src/neollm/*.cpp")
+    add_files("src/zedinfer/*.cpp")
     on_install(function (target) end)
 target_end()

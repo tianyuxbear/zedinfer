@@ -6,7 +6,7 @@
 
 #include <cstddef>
 
-namespace neollm::ops {
+namespace zedinfer::ops {
 void linear(tensor_t out, tensor_t in, tensor_t weight, tensor_t bias) {
     if (bias) {
         CHECK_SAME_DEVICE(out, in, weight, bias);
@@ -26,17 +26,17 @@ void linear(tensor_t out, tensor_t in, tensor_t weight, tensor_t bias) {
     }
 
     // always support cpu calculation
-    if (out->deviceType() == NEOLLM_DEVICE_CPU) {
+    if (out->deviceType() == ZEDINFER_DEVICE_CPU) {
         return cpu::linear(out->data(), in->data(), weight->data(), bias_data, out->dtype(), out->dim(0), out->dim(1), in->dim(1));
     }
 
-    neollm::core::context().setDevice(out->deviceType(), out->deviceId());
+    zedinfer::core::context().setDevice(out->deviceType(), out->deviceId());
 
     switch (out->deviceType()) {
-    case NEOLLM_DEVICE_CPU:
+    case ZEDINFER_DEVICE_CPU:
         return cpu::linear(out->data(), in->data(), weight->data(), bias_data, out->dtype(), out->dim(0), out->dim(1), in->dim(1));
 #ifdef ENABLE_NVIDIA_API
-    case NEOLLM_DEVICE_NVIDIA:
+    case ZEDINFER_DEVICE_NVIDIA:
         TO_BE_IMPLEMENTED();
         return;
 #endif
@@ -44,4 +44,4 @@ void linear(tensor_t out, tensor_t in, tensor_t weight, tensor_t bias) {
         EXCEPTION_UNSUPPORTED_DEVICE;
     }
 }
-} // namespace neollm::ops
+} // namespace zedinfer::ops

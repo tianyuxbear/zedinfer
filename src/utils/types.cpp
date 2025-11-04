@@ -4,7 +4,7 @@
 #include <emmintrin.h>
 #include <omp.h>
 
-namespace neollm::utils {
+namespace zedinfer::utils {
 
 float _f16_to_f32(fp16_t val) {
     uint16_t h = val._v;
@@ -311,4 +311,4 @@ void fp32_to_bf16_batch(bf16_t *dst, const float *src, size_t count) {
 #endif
 }
 
-} // namespace neollm::utils
+} // namespace zedinfer::utils

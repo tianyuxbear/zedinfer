@@ -4,7 +4,7 @@
 #include <unicode/unistr.h>
 #include <unordered_map>
 
-namespace neollm::tokenizer {
+namespace zedinfer::tokenizer {
 
 /**
  * Byte-level encoder/decoder (GPT-2 style).
@@ -37,4 +37,4 @@ private:
     static const std::unordered_map<UChar32, unsigned char> unicode_to_byte_map_;
 };
 
-} // namespace neollm::tokenizer
+} // namespace zedinfer::tokenizer

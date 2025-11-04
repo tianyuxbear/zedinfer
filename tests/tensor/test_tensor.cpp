@@ -5,7 +5,7 @@
 #include <gtest/gtest.h>
 #include <numeric>
 
-namespace neollm {
+namespace zedinfer {
 namespace test {
 
 // ============================================================================
@@ -42,7 +42,7 @@ protected:
     template <typename T>
     std::vector<T> readTensorData(tensor_t tensor) {
         std::vector<T> result(tensor->numel());
-        if (tensor->deviceType() == NEOLLM_DEVICE_CPU) {
+        if (tensor->deviceType() == ZEDINFER_DEVICE_CPU) {
             memcpy(result.data(), tensor->data(),
                    tensor->numel() * sizeof(T));
         } else {
@@ -50,7 +50,7 @@ protected:
             core::context().runtime().api()->memcpy_sync(
                 result.data(), tensor->data(),
                 tensor->numel() * sizeof(T),
-                NEOLLM_MEMCPY_D2H);
+                ZEDINFER_MEMCPY_D2H);
         }
         return result;
     }
@@ -60,18 +60,18 @@ protected:
 // 基础功能测试
 // ============================================================================
 TEST_F(TensorTest, CreateTensorCPU) {
-    auto tensor = Tensor::create({2, 3, 4}, NEOLLM_DTYPE_F32, NEOLLM_DEVICE_CPU);
+    auto tensor = Tensor::create({2, 3, 4}, ZEDINFER_DTYPE_F32, ZEDINFER_DEVICE_CPU);
 
     ASSERT_NE(tensor, nullptr);
     EXPECT_EQ(tensor->ndim(), 3);
     EXPECT_EQ(tensor->numel(), 24);
-    EXPECT_EQ(tensor->deviceType(), NEOLLM_DEVICE_CPU);
-    EXPECT_EQ(tensor->dtype(), NEOLLM_DTYPE_F32);
+    EXPECT_EQ(tensor->deviceType(), ZEDINFER_DEVICE_CPU);
+    EXPECT_EQ(tensor->dtype(), ZEDINFER_DTYPE_F32);
     EXPECT_EQ(tensor->elementSize(), 4); // sizeof(float)
 }
 
 TEST_F(TensorTest, ShapeAndStrides) {
-    auto tensor = Tensor::create({2, 3, 4}, NEOLLM_DTYPE_F32);
+    auto tensor = Tensor::create({2, 3, 4}, ZEDINFER_DTYPE_F32);
 
     // 验证 shape
     EXPECT_EQ(tensor->shape(), std::vector<size_t>({2, 3, 4}));
@@ -87,7 +87,7 @@ TEST_F(TensorTest, ShapeAndStrides) {
 }
 
 TEST_F(TensorTest, LoadAndReadData) {
-    auto tensor = Tensor::create({2, 3}, NEOLLM_DTYPE_F32);
+    auto tensor = Tensor::create({2, 3}, ZEDINFER_DTYPE_F32);
 
     // 准备测试数据
     std::vector<float> data = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
@@ -102,12 +102,12 @@ TEST_F(TensorTest, LoadAndReadData) {
 // isContiguous 测试
 // ============================================================================
 TEST_F(TensorTest, IsContiguousAfterCreation) {
-    auto tensor = Tensor::create({3, 4, 5}, NEOLLM_DTYPE_F32);
+    auto tensor = Tensor::create({3, 4, 5}, ZEDINFER_DTYPE_F32);
     EXPECT_TRUE(tensor->isContiguous());
 }
 
 TEST_F(TensorTest, IsContiguousAfterPermute) {
-    auto tensor = Tensor::create({2, 3, 4}, NEOLLM_DTYPE_F32);
+    auto tensor = Tensor::create({2, 3, 4}, ZEDINFER_DTYPE_F32);
 
     // 原始张量是连续的
     EXPECT_TRUE(tensor->isContiguous());
@@ -118,7 +118,7 @@ TEST_F(TensorTest, IsContiguousAfterPermute) {
 }
 
 TEST_F(TensorTest, IsContiguousAfterSlice) {
-    auto tensor = Tensor::create({5, 6}, NEOLLM_DTYPE_F32);
+    auto tensor = Tensor::create({5, 6}, ZEDINFER_DTYPE_F32);
 
     // 沿第二维切片仍然连续（最内层维度完整）
     auto sliced = tensor->slice(0, 1, 4);
@@ -132,7 +132,7 @@ TEST_F(TensorTest, IsContiguousAfterSlice) {
 // permute 测试
 // ============================================================================
 TEST_F(TensorTest, PermuteBasic) {
-    auto tensor = Tensor::create({2, 3, 4}, NEOLLM_DTYPE_F32);
+    auto tensor = Tensor::create({2, 3, 4}, ZEDINFER_DTYPE_F32);
     std::vector<float> data(24);
     std::iota(data.begin(), data.end(), 0.0f); // 0, 1, 2, ..., 23
     fillTensorData(tensor, data);
@@ -146,7 +146,7 @@ TEST_F(TensorTest, PermuteBasic) {
 }
 
 TEST_F(TensorTest, PermuteInvalidOrder) {
-    auto tensor = Tensor::create({2, 3, 4}, NEOLLM_DTYPE_F32);
+    auto tensor = Tensor::create({2, 3, 4}, ZEDINFER_DTYPE_F32);
 
     // 维度数量不匹配
     EXPECT_THROW(tensor->permute({0, 1}), std::invalid_argument);
@@ -159,7 +159,7 @@ TEST_F(TensorTest, PermuteInvalidOrder) {
 }
 
 TEST_F(TensorTest, PermutePreservesData) {
-    auto tensor = Tensor::create({2, 3}, NEOLLM_DTYPE_F32);
+    auto tensor = Tensor::create({2, 3}, ZEDINFER_DTYPE_F32);
     std::vector<float> data = {
         1.0f, 2.0f, 3.0f,
         4.0f, 5.0f, 6.0f};
@@ -185,7 +185,7 @@ TEST_F(TensorTest, PermutePreservesData) {
 // slice 测试
 // ============================================================================
 TEST_F(TensorTest, SliceBasic) {
-    auto tensor = Tensor::create({5, 6}, NEOLLM_DTYPE_F32);
+    auto tensor = Tensor::create({5, 6}, ZEDINFER_DTYPE_F32);
     std::vector<float> data(30);
     std::iota(data.begin(), data.end(), 0.0f);
     fillTensorData(tensor, data);
@@ -204,7 +204,7 @@ TEST_F(TensorTest, SliceBasic) {
 }
 
 TEST_F(TensorTest, SliceInvalidRange) {
-    auto tensor = Tensor::create({5, 6}, NEOLLM_DTYPE_F32);
+    auto tensor = Tensor::create({5, 6}, ZEDINFER_DTYPE_F32);
 
     // start >= end
     EXPECT_THROW(tensor->slice(0, 3, 3), std::invalid_argument);
@@ -218,7 +218,7 @@ TEST_F(TensorTest, SliceInvalidRange) {
 }
 
 TEST_F(TensorTest, SliceChaining) {
-    auto tensor = Tensor::create({5, 6, 7}, NEOLLM_DTYPE_F32);
+    auto tensor = Tensor::create({5, 6, 7}, ZEDINFER_DTYPE_F32);
 
     // 连续切片
     auto sliced1 = tensor->slice(0, 1, 4);  // (3,6,7)
@@ -233,7 +233,7 @@ TEST_F(TensorTest, SliceChaining) {
 // view 测试
 // ============================================================================
 TEST_F(TensorTest, ViewBasic) {
-    auto tensor = Tensor::create({2, 3, 4}, NEOLLM_DTYPE_F32);
+    auto tensor = Tensor::create({2, 3, 4}, ZEDINFER_DTYPE_F32);
 
     // Reshape: (2,3,4) -> (6,4)
     auto viewed = tensor->view({6, 4});
@@ -244,7 +244,7 @@ TEST_F(TensorTest, ViewBasic) {
 }
 
 TEST_F(TensorTest, ViewFlatten) {
-    auto tensor = Tensor::create({2, 3, 4}, NEOLLM_DTYPE_F32);
+    auto tensor = Tensor::create({2, 3, 4}, ZEDINFER_DTYPE_F32);
 
     // 展平为一维
     auto flattened = tensor->view({24});
@@ -254,7 +254,7 @@ TEST_F(TensorTest, ViewFlatten) {
 }
 
 TEST_F(TensorTest, ViewIncompatibleShape) {
-    auto tensor = Tensor::create({2, 3, 4}, NEOLLM_DTYPE_F32);
+    auto tensor = Tensor::create({2, 3, 4}, ZEDINFER_DTYPE_F32);
 
     // 元素数量不匹配
     EXPECT_THROW(tensor->view({2, 10}), std::invalid_argument);
@@ -262,7 +262,7 @@ TEST_F(TensorTest, ViewIncompatibleShape) {
 }
 
 TEST_F(TensorTest, ViewRequiresContiguous) {
-    auto tensor = Tensor::create({2, 3, 4}, NEOLLM_DTYPE_F32);
+    auto tensor = Tensor::create({2, 3, 4}, ZEDINFER_DTYPE_F32);
     auto transposed = tensor->permute({2, 1, 0}); // 非连续
 
     // view 要求张量连续
@@ -270,7 +270,7 @@ TEST_F(TensorTest, ViewRequiresContiguous) {
 }
 
 TEST_F(TensorTest, ViewSharesStorage) {
-    auto tensor = Tensor::create({2, 3}, NEOLLM_DTYPE_F32);
+    auto tensor = Tensor::create({2, 3}, ZEDINFER_DTYPE_F32);
     std::vector<float> data = {1, 2, 3, 4, 5, 6};
     fillTensorData(tensor, data);
 
@@ -288,7 +288,7 @@ TEST_F(TensorTest, ViewSharesStorage) {
 // contiguous 测试
 // ============================================================================
 TEST_F(TensorTest, ContiguousOnContiguousTensor) {
-    auto tensor = Tensor::create({2, 3, 4}, NEOLLM_DTYPE_F32);
+    auto tensor = Tensor::create({2, 3, 4}, ZEDINFER_DTYPE_F32);
     std::vector<float> data(24);
     std::iota(data.begin(), data.end(), 0.0f);
     fillTensorData(tensor, data);
@@ -302,7 +302,7 @@ TEST_F(TensorTest, ContiguousOnContiguousTensor) {
 }
 
 TEST_F(TensorTest, ContiguousOnNonContiguousTensor) {
-    auto tensor = Tensor::create({2, 3}, NEOLLM_DTYPE_F32);
+    auto tensor = Tensor::create({2, 3}, ZEDINFER_DTYPE_F32);
     std::vector<float> data = {1, 2, 3, 4, 5, 6};
     fillTensorData(tensor, data);
 
@@ -322,7 +322,7 @@ TEST_F(TensorTest, ContiguousOnNonContiguousTensor) {
 
 TEST_F(TensorTest, ContiguousComplexCase) {
     // 创建一个复杂的非连续张量
-    auto tensor = Tensor::create({2, 3, 4}, NEOLLM_DTYPE_F32);
+    auto tensor = Tensor::create({2, 3, 4}, ZEDINFER_DTYPE_F32);
     std::vector<float> data(24);
     std::iota(data.begin(), data.end(), 1.0f); // 1-24
     fillTensorData(tensor, data);
@@ -345,7 +345,7 @@ TEST_F(TensorTest, ContiguousComplexCase) {
 // reshape 测试
 // ============================================================================
 TEST_F(TensorTest, ReshapeOnContiguousTensor) {
-    auto tensor = Tensor::create({2, 3, 4}, NEOLLM_DTYPE_F32);
+    auto tensor = Tensor::create({2, 3, 4}, ZEDINFER_DTYPE_F32);
 
     // 连续张量的 reshape 应该是零拷贝
     auto reshaped = tensor->reshape({6, 4});
@@ -355,7 +355,7 @@ TEST_F(TensorTest, ReshapeOnContiguousTensor) {
 }
 
 TEST_F(TensorTest, ReshapeOnNonContiguousTensor) {
-    auto tensor = Tensor::create({2, 3, 4}, NEOLLM_DTYPE_F32);
+    auto tensor = Tensor::create({2, 3, 4}, ZEDINFER_DTYPE_F32);
     std::vector<float> data(24);
     std::iota(data.begin(), data.end(), 0.0f);
     fillTensorData(tensor, data);
@@ -371,7 +371,7 @@ TEST_F(TensorTest, ReshapeOnNonContiguousTensor) {
 }
 
 TEST_F(TensorTest, ReshapeInvalidShape) {
-    auto tensor = Tensor::create({2, 3, 4}, NEOLLM_DTYPE_F32);
+    auto tensor = Tensor::create({2, 3, 4}, ZEDINFER_DTYPE_F32);
 
     EXPECT_THROW(tensor->reshape({2, 10}), std::invalid_argument);
 }
@@ -380,28 +380,28 @@ TEST_F(TensorTest, ReshapeInvalidShape) {
 // to (设备迁移) 测试
 // ============================================================================
 TEST_F(TensorTest, ToSameDevice) {
-    auto tensor = Tensor::create({2, 3}, NEOLLM_DTYPE_F32, NEOLLM_DEVICE_CPU);
+    auto tensor = Tensor::create({2, 3}, ZEDINFER_DTYPE_F32, ZEDINFER_DEVICE_CPU);
     std::vector<float> data = {1, 2, 3, 4, 5, 6};
     fillTensorData(tensor, data);
 
     // 移到相同设备应该零拷贝
-    auto same_device = tensor->to(NEOLLM_DEVICE_CPU, 0);
+    auto same_device = tensor->to(ZEDINFER_DEVICE_CPU, 0);
 
-    EXPECT_EQ(same_device->deviceType(), NEOLLM_DEVICE_CPU);
+    EXPECT_EQ(same_device->deviceType(), ZEDINFER_DEVICE_CPU);
     auto result = readTensorData<float>(same_device);
     EXPECT_TRUE(compareFloatVectors(result, data));
 }
 
 #ifdef ENABLE_NVIDIA_API
 TEST_F(TensorTest, ToCPUToGPU) {
-    auto cpu_tensor = Tensor::create({2, 3}, NEOLLM_DTYPE_F32, NEOLLM_DEVICE_CPU);
+    auto cpu_tensor = Tensor::create({2, 3}, ZEDINFER_DTYPE_F32, ZEDINFER_DEVICE_CPU);
     std::vector<float> data = {1, 2, 3, 4, 5, 6};
     fillTensorData(cpu_tensor, data);
 
     // CPU -> GPU
-    auto gpu_tensor = cpu_tensor->to(NEOLLM_DEVICE_CUDA, 0);
+    auto gpu_tensor = cpu_tensor->to(ZEDINFER_DEVICE_CUDA, 0);
 
-    EXPECT_EQ(gpu_tensor->deviceType(), NEOLLM_DEVICE_CUDA);
+    EXPECT_EQ(gpu_tensor->deviceType(), ZEDINFER_DEVICE_CUDA);
     EXPECT_EQ(gpu_tensor->shape(), std::vector<size_t>({2, 3}));
 
     // 验证数据
@@ -410,20 +410,20 @@ TEST_F(TensorTest, ToCPUToGPU) {
 }
 
 TEST_F(TensorTest, ToGPUToCPU) {
-    auto gpu_tensor = Tensor::create({2, 3}, NEOLLM_DTYPE_F32, NEOLLM_DEVICE_CUDA);
+    auto gpu_tensor = Tensor::create({2, 3}, ZEDINFER_DTYPE_F32, ZEDINFER_DEVICE_CUDA);
     std::vector<float> data = {1, 2, 3, 4, 5, 6};
     fillTensorData(gpu_tensor, data);
 
     // GPU -> CPU
-    auto cpu_tensor = gpu_tensor->to(NEOLLM_DEVICE_CPU, 0);
+    auto cpu_tensor = gpu_tensor->to(ZEDINFER_DEVICE_CPU, 0);
 
-    EXPECT_EQ(cpu_tensor->deviceType(), NEOLLM_DEVICE_CPU);
+    EXPECT_EQ(cpu_tensor->deviceType(), ZEDINFER_DEVICE_CPU);
     auto result = readTensorData<float>(cpu_tensor);
     EXPECT_TRUE(compareFloatVectors(result, data));
 }
 
 TEST_F(TensorTest, ToNonContiguousTensor) {
-    auto tensor = Tensor::create({2, 3, 4}, NEOLLM_DTYPE_F32, NEOLLM_DEVICE_CPU);
+    auto tensor = Tensor::create({2, 3, 4}, ZEDINFER_DTYPE_F32, ZEDINFER_DEVICE_CPU);
     std::vector<float> data(24);
     std::iota(data.begin(), data.end(), 0.0f);
     fillTensorData(tensor, data);
@@ -432,9 +432,9 @@ TEST_F(TensorTest, ToNonContiguousTensor) {
     EXPECT_FALSE(transposed->isContiguous());
 
     // 非连续张量迁移到 GPU
-    auto gpu_tensor = transposed->to(NEOLLM_DEVICE_CUDA, 0);
+    auto gpu_tensor = transposed->to(ZEDINFER_DEVICE_CUDA, 0);
 
-    EXPECT_EQ(gpu_tensor->deviceType(), NEOLLM_DEVICE_CUDA);
+    EXPECT_EQ(gpu_tensor->deviceType(), ZEDINFER_DEVICE_CUDA);
     EXPECT_TRUE(gpu_tensor->isContiguous()); // 优化后应该变连续
 }
 #endif
@@ -444,7 +444,7 @@ TEST_F(TensorTest, ToNonContiguousTensor) {
 // ============================================================================
 TEST_F(TensorTest, ComplexOperationChain) {
     // 创建张量: (2,3,4)
-    auto tensor = Tensor::create({2, 3, 4}, NEOLLM_DTYPE_F32);
+    auto tensor = Tensor::create({2, 3, 4}, ZEDINFER_DTYPE_F32);
     std::vector<float> data(24);
     std::iota(data.begin(), data.end(), 1.0f);
     fillTensorData(tensor, data);
@@ -462,7 +462,7 @@ TEST_F(TensorTest, ComplexOperationChain) {
 }
 
 TEST_F(TensorTest, DataIntegrityAfterMultipleTransforms) {
-    auto tensor = Tensor::create({3, 4}, NEOLLM_DTYPE_F32);
+    auto tensor = Tensor::create({3, 4}, ZEDINFER_DTYPE_F32);
     std::vector<float> data = {
         1, 2, 3, 4,
         5, 6, 7, 8,
@@ -494,12 +494,12 @@ TEST_F(TensorTest, DataIntegrityAfterMultipleTransforms) {
 // ============================================================================
 TEST_F(TensorTest, EmptyShapeDimension) {
     // 包含 0 的 shape
-    auto tensor = Tensor::create({2, 0, 3}, NEOLLM_DTYPE_F32);
+    auto tensor = Tensor::create({2, 0, 3}, ZEDINFER_DTYPE_F32);
     EXPECT_EQ(tensor->numel(), 0);
 }
 
 TEST_F(TensorTest, SingleElementTensor) {
-    auto tensor = Tensor::create({1}, NEOLLM_DTYPE_F32);
+    auto tensor = Tensor::create({1}, ZEDINFER_DTYPE_F32);
     EXPECT_EQ(tensor->numel(), 1);
     EXPECT_TRUE(tensor->isContiguous());
 
@@ -511,11 +511,11 @@ TEST_F(TensorTest, SingleElementTensor) {
 }
 
 TEST_F(TensorTest, HighDimensionalTensor) {
-    auto tensor = Tensor::create({2, 3, 4, 5, 6}, NEOLLM_DTYPE_F32);
+    auto tensor = Tensor::create({2, 3, 4, 5, 6}, ZEDINFER_DTYPE_F32);
     EXPECT_EQ(tensor->ndim(), 5);
     EXPECT_EQ(tensor->numel(), 720);
     EXPECT_TRUE(tensor->isContiguous());
 }
 
 } // namespace test
-} // namespace neollm
+} // namespace zedinfer

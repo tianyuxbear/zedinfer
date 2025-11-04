@@ -3,18 +3,18 @@
 #include "backend/core/context/context.hpp"
 #include "backend/core/memory/allocator.hpp"
 #include "backend/device/runtime_api.hpp"
-#include "neollm.h"
 #include "utils/check.hpp"
+#include "zedinfer.h"
 
 #include <cstddef>
 
-namespace neollm::core::memory {
+namespace zedinfer::core::memory {
 
 // A memory allocator that uses a memory pool for efficient device allocations.
 class PooledAllocator : public MemoryAllocator {
 public:
-    PooledAllocator(const NeollmRuntimeAPI *api,
-                    NeollmDeviceType_t device_type,
+    PooledAllocator(const ZedinferRuntimeAPI *api,
+                    zedinferDeviceType_t device_type,
                     int device_id,
                     const MemoryPoolConfig &config = MemoryPoolConfig())
         : MemoryAllocator(api, device_type, device_id) {
@@ -65,4 +65,4 @@ public:
     }
 };
 
-} // namespace neollm::core::memory
+} // namespace zedinfer::core::memory

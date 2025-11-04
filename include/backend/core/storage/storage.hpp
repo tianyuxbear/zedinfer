@@ -1,9 +1,9 @@
 #pragma once
 
 #include "backend/core/core.hpp"
-#include "neollm.h"
+#include "zedinfer.h"
 
-namespace neollm::core {
+namespace zedinfer::core {
 
 // Memory block managed by a Runtime.
 class Storage {
@@ -22,10 +22,10 @@ public:
 
     std::byte *memory() const;
     size_t size() const;
-    NeollmDeviceType_t deviceType() const;
+    zedinferDeviceType_t deviceType() const;
     int deviceId() const;
     bool isHost() const;
     bool isMmap() const;
 };
 
-} // namespace neollm::core
+} // namespace zedinfer::core

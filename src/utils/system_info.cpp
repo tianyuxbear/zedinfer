@@ -13,7 +13,7 @@
 #include <cpuid.h>
 #endif
 
-namespace neollm::utils {
+namespace zedinfer::utils {
 
 int get_physical_cores() {
 #ifdef __linux__
@@ -129,4 +129,4 @@ std::string get_numa_maps_info(int max_lines) {
     return oss.str();
 }
 
-} // namespace neollm::utils
+} // namespace zedinfer::utils

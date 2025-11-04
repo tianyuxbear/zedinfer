@@ -5,7 +5,7 @@
 
 #include <cstddef>
 
-namespace neollm::graph {
+namespace zedinfer::graph {
 
 // Base class for building computation graphs from model definitions
 class GraphBuilder {
@@ -57,4 +57,4 @@ private:
         size_t &numel);
 };
 
-} // namespace neollm::graph
+} // namespace zedinfer::graph

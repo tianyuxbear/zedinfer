@@ -4,7 +4,7 @@
 
 #include <memory>
 
-namespace neollm::model {
+namespace zedinfer::model {
 
 // Qwen2-specific configuration extending base model config.
 struct Qwen2Config : public ModelConfig {
@@ -45,4 +45,4 @@ private:
     size_t num_params_;
 };
 
-} // namespace neollm::model
+} // namespace zedinfer::model

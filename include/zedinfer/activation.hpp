@@ -2,25 +2,25 @@
 
 #include "backend/core/storage/storage.hpp" // IWYU pragma: keep
 #include "backend/tensor/tensor.hpp"
-#include "neollm.h"
+#include "zedinfer.h"
 
 #include <cstddef>
 
-namespace neollm {
+namespace zedinfer {
 
 /**
  * Configuration for model execution environment.
  */
 struct ExecutorConfig {
-    NeollmDeviceType_t device_type;
+    zedinferDeviceType_t device_type;
     int device_id;
-    NeollmDataType_t data_type; // Default dtype for activations
+    zedinferDataType_t data_type; // Default dtype for activations
     size_t max_prefill_len;
     size_t max_seq_len;
 
-    ExecutorConfig(NeollmDeviceType_t device_type = NEOLLM_DEVICE_CPU,
+    ExecutorConfig(zedinferDeviceType_t device_type = ZEDINFER_DEVICE_CPU,
                    int device_id = 0,
-                   NeollmDataType_t data_type = NEOLLM_DTYPE_F32,
+                   zedinferDataType_t data_type = ZEDINFER_DTYPE_F32,
                    size_t max_prefill_len = 128,
                    size_t max_seq_len = 16384)
         : device_type(device_type),
@@ -140,4 +140,4 @@ private:
     std::vector<TensorSlot> pool_;
 };
 
-} // namespace neollm
+} // namespace zedinfer

@@ -5,15 +5,15 @@
 #include "frontend/models/base.hpp"
 #include "frontend/sampler/sampler.hpp"
 #include "frontend/tokenizer/base.hpp"
-#include "neollm/executor.hpp"
-#include "neollm/generation_types.hpp"
+#include "zedinfer/executor.hpp"
+#include "zedinfer/generation_types.hpp"
 
 #include <cstddef>
 #include <memory>
 #include <string>
 #include <vector>
 
-namespace neollm {
+namespace zedinfer {
 
 // Forward declaration
 class InferenceSession;
@@ -108,4 +108,4 @@ private:
     void warmup(size_t prefill_len = 32, size_t decode_steps = 8);
 };
 
-} // namespace neollm
+} // namespace zedinfer

@@ -6,7 +6,7 @@
 #include <plog/Initializers/RollingFileInitializer.h>
 #include <plog/Log.h>
 
-namespace neollm::utils {
+namespace zedinfer::utils {
 
 // Define logger IDs
 enum {
@@ -40,4 +40,4 @@ inline bool initLoggerWithOverwrite(plog::Severity level, const std::string &fil
     return true;
 }
 
-} // namespace neollm::utils
+} // namespace zedinfer::utils

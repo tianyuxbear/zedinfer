@@ -1,13 +1,13 @@
 #pragma once
 
-#include "neollm.h"
+#include "zedinfer.h"
 
 #include <cstddef>
 #include <cstdint>
 #include <immintrin.h>
 #include <stdexcept>
 
-namespace neollm {
+namespace zedinfer {
 struct CustomFloat16 {
     uint16_t _v;
 };
@@ -19,118 +19,118 @@ struct CustomBFloat16 {
 typedef struct CustomBFloat16 bf16_t;
 
 namespace utils {
-inline size_t dsize(NeollmDataType_t dtype) {
+inline size_t dsize(zedinferDataType_t dtype) {
     switch (dtype) {
-    case NEOLLM_DTYPE_BYTE:
+    case ZEDINFER_DTYPE_BYTE:
         return sizeof(unsigned char);
-    case NEOLLM_DTYPE_BOOL:
+    case ZEDINFER_DTYPE_BOOL:
         return sizeof(bool);
-    case NEOLLM_DTYPE_I8:
+    case ZEDINFER_DTYPE_I8:
         return sizeof(int8_t);
-    case NEOLLM_DTYPE_I16:
+    case ZEDINFER_DTYPE_I16:
         return sizeof(int16_t);
-    case NEOLLM_DTYPE_I32:
+    case ZEDINFER_DTYPE_I32:
         return sizeof(int32_t);
-    case NEOLLM_DTYPE_I64:
+    case ZEDINFER_DTYPE_I64:
         return sizeof(int64_t);
-    case NEOLLM_DTYPE_U8:
+    case ZEDINFER_DTYPE_U8:
         return sizeof(uint8_t);
-    case NEOLLM_DTYPE_U16:
+    case ZEDINFER_DTYPE_U16:
         return sizeof(uint16_t);
-    case NEOLLM_DTYPE_U32:
+    case ZEDINFER_DTYPE_U32:
         return sizeof(uint32_t);
-    case NEOLLM_DTYPE_U64:
+    case ZEDINFER_DTYPE_U64:
         return sizeof(uint64_t);
-    case NEOLLM_DTYPE_F16:
+    case ZEDINFER_DTYPE_F16:
         return 2;
-    case NEOLLM_DTYPE_F32:
+    case ZEDINFER_DTYPE_F32:
         return sizeof(float);
-    case NEOLLM_DTYPE_F64:
+    case ZEDINFER_DTYPE_F64:
         return sizeof(double);
-    case NEOLLM_DTYPE_BF16:
+    case ZEDINFER_DTYPE_BF16:
         return 2;
     default:
         throw std::invalid_argument("Unsupported or invalid data type.");
     }
 }
 
-inline const char *dtype_to_str(NeollmDataType_t dtype) {
+inline const char *dtype_to_str(zedinferDataType_t dtype) {
     switch (dtype) {
-    case NEOLLM_DTYPE_BYTE:
+    case ZEDINFER_DTYPE_BYTE:
         return "byte";
-    case NEOLLM_DTYPE_BOOL:
+    case ZEDINFER_DTYPE_BOOL:
         return "bool";
-    case NEOLLM_DTYPE_I8:
+    case ZEDINFER_DTYPE_I8:
         return "int8";
-    case NEOLLM_DTYPE_I16:
+    case ZEDINFER_DTYPE_I16:
         return "int16";
-    case NEOLLM_DTYPE_I32:
+    case ZEDINFER_DTYPE_I32:
         return "int32";
-    case NEOLLM_DTYPE_I64:
+    case ZEDINFER_DTYPE_I64:
         return "int64";
-    case NEOLLM_DTYPE_U8:
+    case ZEDINFER_DTYPE_U8:
         return "uint8";
-    case NEOLLM_DTYPE_U16:
+    case ZEDINFER_DTYPE_U16:
         return "uint16";
-    case NEOLLM_DTYPE_U32:
+    case ZEDINFER_DTYPE_U32:
         return "uint32";
-    case NEOLLM_DTYPE_U64:
+    case ZEDINFER_DTYPE_U64:
         return "uint64";
-    case NEOLLM_DTYPE_F16:
+    case ZEDINFER_DTYPE_F16:
         return "float16";
-    case NEOLLM_DTYPE_F32:
+    case ZEDINFER_DTYPE_F32:
         return "float32";
-    case NEOLLM_DTYPE_F64:
+    case ZEDINFER_DTYPE_F64:
         return "float64";
-    case NEOLLM_DTYPE_BF16:
+    case ZEDINFER_DTYPE_BF16:
         return "bfloat16";
     default:
         throw std::invalid_argument("Unsupported or invalid data type.");
     }
 }
 
-inline NeollmDataType_t str_to_dtype(std::string_view str) {
+inline zedinferDataType_t str_to_dtype(std::string_view str) {
     if (str == "byte") {
-        return NEOLLM_DTYPE_BYTE;
+        return ZEDINFER_DTYPE_BYTE;
     }
     if (str == "bool") {
-        return NEOLLM_DTYPE_BOOL;
+        return ZEDINFER_DTYPE_BOOL;
     }
     if (str == "int8") {
-        return NEOLLM_DTYPE_I8;
+        return ZEDINFER_DTYPE_I8;
     }
     if (str == "int16") {
-        return NEOLLM_DTYPE_I16;
+        return ZEDINFER_DTYPE_I16;
     }
     if (str == "int32") {
-        return NEOLLM_DTYPE_I32;
+        return ZEDINFER_DTYPE_I32;
     }
     if (str == "int64") {
-        return NEOLLM_DTYPE_I64;
+        return ZEDINFER_DTYPE_I64;
     }
     if (str == "uint8") {
-        return NEOLLM_DTYPE_U8;
+        return ZEDINFER_DTYPE_U8;
     }
     if (str == "uint16") {
-        return NEOLLM_DTYPE_U16;
+        return ZEDINFER_DTYPE_U16;
     }
     if (str == "uint32") {
-        return NEOLLM_DTYPE_U32;
+        return ZEDINFER_DTYPE_U32;
     }
     if (str == "uint64") {
-        return NEOLLM_DTYPE_U64;
+        return ZEDINFER_DTYPE_U64;
     }
     if (str == "float16") {
-        return NEOLLM_DTYPE_F16;
+        return ZEDINFER_DTYPE_F16;
     }
     if (str == "float32") {
-        return NEOLLM_DTYPE_F32;
+        return ZEDINFER_DTYPE_F32;
     }
     if (str == "float64") {
-        return NEOLLM_DTYPE_F64;
+        return ZEDINFER_DTYPE_F64;
     }
     if (str == "bfloat16") {
-        return NEOLLM_DTYPE_BF16;
+        return ZEDINFER_DTYPE_BF16;
     }
 
     throw std::invalid_argument("Unsupported or invalid data type string: " + std::string(str));
@@ -177,4 +177,4 @@ TypeTo cast(TypeFrom val) {
 }
 
 } // namespace utils
-} // namespace neollm
+} // namespace zedinfer

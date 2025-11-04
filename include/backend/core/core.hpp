@@ -2,7 +2,7 @@
 
 #include <memory>
 
-namespace neollm {
+namespace zedinfer {
 namespace core {
 
 class Storage;
@@ -22,4 +22,4 @@ class Context;
 Context &context();
 
 } // namespace core
-} // namespace neollm
+} // namespace zedinfer

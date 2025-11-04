@@ -1,6 +1,6 @@
 #pragma once
 
-#include "neollm.h"
+#include "zedinfer.h"
 
 #include <stddef.h>
 
@@ -10,9 +10,9 @@ typedef void (*set_device_api)(int);
 typedef void (*device_synchronize_api)();
 
 // Stream management
-typedef NeollmStream_t (*create_stream_api)();
-typedef void (*destroy_stream_api)(NeollmStream_t);
-typedef void (*stream_synchronize_api)(NeollmStream_t);
+typedef zedinferStream_t (*create_stream_api)();
+typedef void (*destroy_stream_api)(zedinferStream_t);
+typedef void (*stream_synchronize_api)(zedinferStream_t);
 
 // Device/host memory allocation
 typedef void *(*malloc_device_api)(size_t);
@@ -21,11 +21,11 @@ typedef void *(*malloc_host_api)(size_t);
 typedef void (*free_host_api)(void *);
 
 // Memory copy (sync/async)
-typedef void (*memcpy_sync_api)(void *, const void *, size_t, NeollmMemcpyKind_t);
-typedef void (*memcpy_async_api)(void *, const void *, size_t, NeollmMemcpyKind_t, NeollmStream_t);
+typedef void (*memcpy_sync_api)(void *, const void *, size_t, zedinferMemcpyKind_t);
+typedef void (*memcpy_async_api)(void *, const void *, size_t, zedinferMemcpyKind_t, zedinferStream_t);
 
 // Runtime API table for a backend (e.g., CUDA, CPU)
-typedef struct NeollmRuntimeAPI {
+typedef struct ZedinferRuntimeAPI {
     // Device
     get_device_count_api get_device_count;
     set_device_api set_device;
@@ -45,20 +45,20 @@ typedef struct NeollmRuntimeAPI {
     // Memory copy
     memcpy_sync_api memcpy_sync;
     memcpy_async_api memcpy_async;
-} NeollmRuntimeAPI;
+} ZedinferRuntimeAPI;
 
-namespace neollm::device {
+namespace zedinfer::device {
 
-const NeollmRuntimeAPI *getRuntimeAPI(NeollmDeviceType_t device_type);
+const ZedinferRuntimeAPI *getRuntimeAPI(zedinferDeviceType_t device_type);
 
 namespace cpu {
-const NeollmRuntimeAPI *getRuntimeAPI();
+const ZedinferRuntimeAPI *getRuntimeAPI();
 }
 
 #ifdef ENABLE_NVIDIA_API
 namespace nvidia {
-const NeollmRuntimeAPI *getRuntimeAPI();
+const ZedinferRuntimeAPI *getRuntimeAPI();
 }
 #endif
 
-} // namespace neollm::device
+} // namespace zedinfer::device

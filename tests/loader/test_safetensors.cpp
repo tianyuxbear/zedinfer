@@ -1,7 +1,7 @@
 #include "frontend/loader/interface.hpp"
 #include "frontend/loader/safetensors.hpp"
-#include "neollm.h"
 #include "utils/types.hpp"
+#include "zedinfer.h"
 
 #include <cmath>
 #include <cstddef>
@@ -9,7 +9,7 @@
 #include <iomanip>
 #include <iostream>
 
-using namespace neollm::loader;
+using namespace zedinfer::loader;
 
 class ModelLoaderTest : public ::testing::Test {
 protected:
@@ -221,13 +221,13 @@ TEST_F(ModelLoaderTest, ListAllTensorNames) {
             // 显示数据类型
             std::cout << " (";
             switch (info->dtype) {
-            case NEOLLM_DTYPE_F32:
+            case ZEDINFER_DTYPE_F32:
                 std::cout << "F32";
                 break;
-            case NEOLLM_DTYPE_F16:
+            case ZEDINFER_DTYPE_F16:
                 std::cout << "F16";
                 break;
-            case NEOLLM_DTYPE_BF16:
+            case ZEDINFER_DTYPE_BF16:
                 std::cout << "BF16";
                 break;
             default:
@@ -288,15 +288,15 @@ TEST_F(ModelLoaderTest, CanReadFloatData) {
 
         const TensorInfo *info = loader->get_tensor_info(name);
 
-        if (info && info->dtype == NEOLLM_DTYPE_BF16) {
+        if (info && info->dtype == ZEDINFER_DTYPE_BF16) {
             const void *data = loader->get_tensor_data(name);
             ASSERT_NE(data, nullptr);
 
-            const neollm::bf16_t *bf16_data = reinterpret_cast<const neollm::bf16_t *>(data);
+            const zedinfer::bf16_t *bf16_data = reinterpret_cast<const zedinfer::bf16_t *>(data);
 
             // 简单验证：检查前几个值不是NaN或Inf
             for (size_t i = 0; i < std::min(10UL, info->numel()); ++i) {
-                float item = neollm::utils::cast<float>(bf16_data[i]);
+                float item = zedinfer::utils::cast<float>(bf16_data[i]);
                 EXPECT_FALSE(std::isnan(item))
                     << "Found NaN in tensor " << name << " at index " << i;
                 EXPECT_FALSE(std::isinf(item))
@@ -311,13 +311,13 @@ TEST_F(ModelLoaderTest, CanReadFloatData) {
 TEST_F(ModelLoaderTest, ReadNormData) {
     std::string tensor_name = "model.norm.weight";
     const void *data = loader->get_tensor_data(tensor_name);
-    const neollm::bf16_t *bf16_data = reinterpret_cast<const neollm::bf16_t *>(data);
+    const zedinfer::bf16_t *bf16_data = reinterpret_cast<const zedinfer::bf16_t *>(data);
 
     std::cout << "First 10 elem of " << tensor_name << std::endl;
 
     std::cout << "[";
     for (size_t i = 0; i < 10UL; ++i) {
-        float item = neollm::utils::cast<float>(bf16_data[i]);
+        float item = zedinfer::utils::cast<float>(bf16_data[i]);
         std::cout << item;
         if (i != 9) {
             std::cout << ", ";

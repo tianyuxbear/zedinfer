@@ -1,11 +1,11 @@
 #include "backend/device/runtime_api.hpp"
-#include "neollm.h"
 #include "utils/check.hpp"
+#include "zedinfer.h"
 
 #include <cstdlib>
 #include <cstring>
 
-namespace neollm::device::cpu {
+namespace zedinfer::device::cpu {
 
 namespace runtime_api {
 
@@ -21,15 +21,15 @@ void deviceSynchronize() {
     // No-op: CPU execution is synchronous
 }
 
-NeollmStream_t createStream() {
+zedinferStream_t createStream() {
     return nullptr; // CPU uses default (null) stream
 }
 
-void destroyStream(NeollmStream_t stream) {
+void destroyStream(zedinferStream_t stream) {
     ASSERT(stream == nullptr, "CPU does not support explicit streams");
 }
 
-void streamSynchronize(NeollmStream_t stream) {
+void streamSynchronize(zedinferStream_t stream) {
     ASSERT(stream == nullptr, "CPU does not support explicit streams");
 }
 
@@ -49,17 +49,17 @@ void freeHost(void *ptr) {
     freeDevice(ptr);
 }
 
-void memcpySync(void *dst, const void *src, size_t size, NeollmMemcpyKind_t kind) {
-    ASSERT(kind == NEOLLM_MEMCPY_H2H, "CPU only supports host-to-host memory copy");
+void memcpySync(void *dst, const void *src, size_t size, zedinferMemcpyKind_t kind) {
+    ASSERT(kind == ZEDINFER_MEMCPY_H2H, "CPU only supports host-to-host memory copy");
     std::memcpy(dst, src, size);
 }
 
-void memcpyAsync(void *dst, const void *src, size_t size, NeollmMemcpyKind_t kind, NeollmStream_t stream) {
+void memcpyAsync(void *dst, const void *src, size_t size, zedinferMemcpyKind_t kind, zedinferStream_t stream) {
     ASSERT(stream == nullptr, "CPU does not support explicit streams");
     memcpySync(dst, src, size, kind); // Async falls back to sync on CPU
 }
 
-static const NeollmRuntimeAPI RUNTIME_API = {
+static const ZedinferRuntimeAPI RUNTIME_API = {
     &getDeviceCount,
     &setDevice,
     &deviceSynchronize,
@@ -75,8 +75,8 @@ static const NeollmRuntimeAPI RUNTIME_API = {
 
 } // namespace runtime_api
 
-const NeollmRuntimeAPI *getRuntimeAPI() {
+const ZedinferRuntimeAPI *getRuntimeAPI() {
     return &runtime_api::RUNTIME_API;
 }
 
-} // namespace neollm::device::cpu
+} // namespace zedinfer::device::cpu

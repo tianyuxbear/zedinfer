@@ -1,10 +1,10 @@
 #include "backend/device/device.hpp"
-#include "neollm.h"
-#include "neollm/engine.hpp"
-#include "neollm/session.hpp"
 #include "plog/Severity.h"
 #include "utils/logging.hpp"
 #include "utils/system_info.hpp"
+#include "zedinfer.h"
+#include "zedinfer/engine.hpp"
+#include "zedinfer/session.hpp"
 
 #include <chrono>
 #include <memory>
@@ -12,7 +12,7 @@
 
 static const std::string model_path = "/mnt/hdd/shared/models/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B";
 
-using namespace neollm;
+using namespace zedinfer;
 
 int main() {
     utils::initLoggerWithOverwrite(plog::verbose, "logs/ping.log");
@@ -20,7 +20,7 @@ int main() {
 
     auto start = std::chrono::high_resolution_clock::now();
 
-    device::Device device(NEOLLM_DEVICE_CPU, 0);
+    device::Device device(ZEDINFER_DEVICE_CPU, 0);
     size_t max_prefill_len = 128;
     std::shared_ptr<InferenceEngine> engine = InferenceEngine::create(model_path, device, max_prefill_len);
 

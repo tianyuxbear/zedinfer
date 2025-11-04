@@ -5,13 +5,13 @@
 #include "backend/tensor/tensor.hpp"
 #include "frontend/graph/graph.hpp"
 #include "frontend/graph/shape.hpp"
-#include "neollm/activation.hpp"
+#include "zedinfer/activation.hpp"
 
 #include <memory>
 #include <unordered_map>
 #include <vector>
 
-namespace neollm {
+namespace zedinfer {
 
 /**
  * Computation graph executor with optimized memory management
@@ -85,4 +85,4 @@ private:
     int extract_layer_idx(const std::string &node_name);
 };
 
-} // namespace neollm
+} // namespace zedinfer

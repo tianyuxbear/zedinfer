@@ -6,12 +6,12 @@
 
 #include <plog/Log.h>
 
-namespace neollm::core {
-Runtime::Runtime(NeollmDeviceType_t device_type, int device_id)
+namespace zedinfer::core {
+Runtime::Runtime(zedinferDeviceType_t device_type, int device_id)
     : device_type_(device_type), device_id_(device_id), is_active_(false) {
 
     // Retrieve device-specific runtime API.
-    api_ = neollm::device::getRuntimeAPI(device_type_);
+    api_ = zedinfer::device::getRuntimeAPI(device_type_);
     if (api_ == nullptr) {
         throw std::runtime_error(
             "No runtime API available for device type: " + std::to_string(static_cast<int>(device_type_)));
@@ -23,7 +23,7 @@ Runtime::Runtime(NeollmDeviceType_t device_type, int device_id)
     }
 
     stream_ = api_->create_stream();
-    if (device_type_ != NEOLLM_DEVICE_CPU && stream_ == nullptr) {
+    if (device_type_ != ZEDINFER_DEVICE_CPU && stream_ == nullptr) {
         throw std::runtime_error("Failed to create stream");
     }
 
@@ -31,7 +31,7 @@ Runtime::Runtime(NeollmDeviceType_t device_type, int device_id)
 }
 
 std::unique_ptr<Runtime> Runtime::create(
-    NeollmDeviceType_t device_type,
+    zedinferDeviceType_t device_type,
     int device_id) {
 
     std::unique_ptr<Runtime> runtime(new Runtime(device_type, device_id));
@@ -84,4 +84,4 @@ void Runtime::synchronize() const {
     api_->stream_synchronize(stream_);
 }
 
-} // namespace neollm::core
+} // namespace zedinfer::core

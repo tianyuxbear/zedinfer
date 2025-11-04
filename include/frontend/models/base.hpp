@@ -1,7 +1,7 @@
 #pragma once
 
 #include "backend/tensor/tensor.hpp"
-#include "neollm.h"
+#include "zedinfer.h"
 
 #include <nlohmann/json.hpp>
 #include <stdexcept>
@@ -9,7 +9,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace neollm::model {
+namespace zedinfer::model {
 
 using json = nlohmann::json;
 
@@ -87,7 +87,7 @@ private:
 
 public:
     // Parses model directory and returns a concrete Model instance.
-    static std::shared_ptr<Model> parse(const std::string &model_path, NeollmDeviceType_t target_device);
+    static std::shared_ptr<Model> parse(const std::string &model_path, zedinferDeviceType_t target_device);
 
     // Populates ModelConfig from parsed JSON.
     static void load_base_config(ModelConfig &config, const json &j);
@@ -96,10 +96,10 @@ public:
     static std::unique_ptr<ModelConfig> load_config(const std::string &config_path);
 
     // Loads model weights from files in the given path.
-    static std::unique_ptr<ModelWeights> load_weights(const std::string &model_path, NeollmDeviceType_t target_device);
+    static std::unique_ptr<ModelWeights> load_weights(const std::string &model_path, zedinferDeviceType_t target_device);
 
     // Normalizes raw weight names (e.g., strips "model." prefix).
     static std::string map_weight_name(const std::string &raw_name);
 };
 
-} // namespace neollm::model
+} // namespace zedinfer::model

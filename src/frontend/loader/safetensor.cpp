@@ -1,5 +1,5 @@
 #include "frontend/loader/safetensors.hpp"
-#include "neollm.h"
+#include "zedinfer.h"
 
 #include <algorithm>
 #include <cstring>
@@ -18,7 +18,7 @@
 namespace fs = std::filesystem;
 using json = nlohmann::json;
 
-namespace neollm::loader {
+namespace zedinfer::loader {
 
 // ============================================
 // SafeTensorFile Implementation
@@ -86,22 +86,22 @@ SafeTensorFile &SafeTensorFile::operator=(SafeTensorFile &&other) noexcept {
     return *this;
 }
 
-NeollmDataType_t SafeTensorFile::parse_dtype(const std::string &dtype_str) {
-    static const std::unordered_map<std::string, NeollmDataType_t> dtype_map = {
-        {"BYTE", NEOLLM_DTYPE_BYTE},
-        {"BOOL", NEOLLM_DTYPE_BOOL},
-        {"I8", NEOLLM_DTYPE_I8},
-        {"I16", NEOLLM_DTYPE_I16},
-        {"I32", NEOLLM_DTYPE_I32},
-        {"I64", NEOLLM_DTYPE_I64},
-        {"U8", NEOLLM_DTYPE_U8},
-        {"U16", NEOLLM_DTYPE_U16},
-        {"U32", NEOLLM_DTYPE_U32},
-        {"U64", NEOLLM_DTYPE_U64},
-        {"F16", NEOLLM_DTYPE_F16},
-        {"F32", NEOLLM_DTYPE_F32},
-        {"F64", NEOLLM_DTYPE_F64},
-        {"BF16", NEOLLM_DTYPE_BF16}};
+zedinferDataType_t SafeTensorFile::parse_dtype(const std::string &dtype_str) {
+    static const std::unordered_map<std::string, zedinferDataType_t> dtype_map = {
+        {"BYTE", ZEDINFER_DTYPE_BYTE},
+        {"BOOL", ZEDINFER_DTYPE_BOOL},
+        {"I8", ZEDINFER_DTYPE_I8},
+        {"I16", ZEDINFER_DTYPE_I16},
+        {"I32", ZEDINFER_DTYPE_I32},
+        {"I64", ZEDINFER_DTYPE_I64},
+        {"U8", ZEDINFER_DTYPE_U8},
+        {"U16", ZEDINFER_DTYPE_U16},
+        {"U32", ZEDINFER_DTYPE_U32},
+        {"U64", ZEDINFER_DTYPE_U64},
+        {"F16", ZEDINFER_DTYPE_F16},
+        {"F32", ZEDINFER_DTYPE_F32},
+        {"F64", ZEDINFER_DTYPE_F64},
+        {"BF16", ZEDINFER_DTYPE_BF16}};
 
     auto it = dtype_map.find(dtype_str);
     if (it != dtype_map.end()) {
@@ -331,4 +331,4 @@ size_t SafeTensorsLoader::get_num_files() const {
     return files.size();
 }
 
-} // namespace neollm::loader
+} // namespace zedinfer::loader

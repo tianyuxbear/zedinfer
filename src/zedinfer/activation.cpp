@@ -1,4 +1,4 @@
-#include "neollm/activation.hpp"
+#include "zedinfer/activation.hpp"
 #include "backend/core/context/context.hpp"
 #include "backend/tensor/tensor.hpp"
 #include "utils/check.hpp"
@@ -13,7 +13,7 @@
 #include <stdexcept>
 #include <vector>
 
-namespace neollm {
+namespace zedinfer {
 
 // ============================================================================
 // PositionIDsCache - Pre-computed position indices for attention
@@ -28,7 +28,7 @@ void PositionIDsCache::initialize_cache() {
     // Create tensor [0, 1, 2, ..., max_seq_len-1]
     cache_ = Tensor::create(
         {static_cast<size_t>(config_.max_seq_len)},
-        NEOLLM_DTYPE_I64,
+        ZEDINFER_DTYPE_I64,
         config_.device_type,
         config_.device_id,
         false,
@@ -66,7 +66,7 @@ PrefillArena::PrefillArena(const ExecutorConfig &config, size_t capacity)
       current_offset_(0),
       peak_usage_(0) {
     // Allocate backing storage based on device type
-    if (config_.device_type == NEOLLM_DEVICE_CPU && core::context().runtime().deviceType() != NEOLLM_DEVICE_CPU) {
+    if (config_.device_type == ZEDINFER_DEVICE_CPU && core::context().runtime().deviceType() != ZEDINFER_DEVICE_CPU) {
         storage_ = core::context().runtime().allocateHostStorage(capacity);
     } else {
         core::context().setDevice(config_.device_type, config_.device_id);
@@ -232,4 +232,4 @@ std::string DecodePool::get_stats() const {
     return oss.str();
 }
 
-} // namespace neollm
+} // namespace zedinfer

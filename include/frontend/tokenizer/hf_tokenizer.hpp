@@ -5,7 +5,7 @@
 #include <unicode/regex.h>
 #include <unordered_map>
 
-namespace neollm::tokenizer {
+namespace zedinfer::tokenizer {
 
 class HFTokenizer : public Tokenizer {
 public:
@@ -66,4 +66,4 @@ private:
     std::string cleanup_spaces(const std::string &text);
 };
 
-} // namespace neollm::tokenizer
+} // namespace zedinfer::tokenizer

@@ -2,7 +2,7 @@
 #include "frontend/graph/graph.hpp"
 #include <cstddef>
 
-namespace neollm::graph {
+namespace zedinfer::graph {
 
 std::shared_ptr<GraphBuilder> GraphBuilder::create(const std::string &model_type) {
     if (model_type == "qwen2") {
@@ -257,4 +257,4 @@ graph_node_t Qwen2GraphBuilder::build_mlp(
     return down_proj;
 }
 
-} // namespace neollm::graph
+} // namespace zedinfer::graph

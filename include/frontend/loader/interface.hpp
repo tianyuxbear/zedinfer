@@ -1,17 +1,17 @@
 #pragma once
 
-#include "neollm.h"
+#include "zedinfer.h"
 
 #include <functional>
 #include <numeric>
 #include <string>
 #include <vector>
 
-namespace neollm::loader {
+namespace zedinfer::loader {
 
 struct TensorInfo {
     std::string name;
-    NeollmDataType_t dtype;
+    zedinferDataType_t dtype;
     std::vector<size_t> shape;
     size_t data_offset; // Offset of tensor data within the file
     size_t num_bytes;   // Size of tensor data in bytes
@@ -60,4 +60,4 @@ public:
     virtual size_t get_num_files() const = 0;
 };
 
-} // namespace neollm::loader
+} // namespace zedinfer::loader

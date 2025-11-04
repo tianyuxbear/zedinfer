@@ -8,7 +8,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace neollm::core::memory {
+namespace zedinfer::core::memory {
 
 // Metadata for a memory block managed by the pool.
 struct MemoryBlock {
@@ -22,12 +22,12 @@ struct MemoryBlock {
 
 // Configuration for memory pool behavior.
 struct MemoryPoolConfig {
-    size_t initial_block_size = 64 * 1024 * 1024;     // Initial raw block size (64 MB)
+    size_t initial_block_size = 64 * 1024 * 1024;      // Initial raw block size (64 MB)
     size_t max_pool_size = 10ULL * 1024 * 1024 * 1024; // Hard limit (8 GB)
-    size_t alignment = 64;                            // Allocation alignment (e.g., cache line)
-    size_t min_split_size = 4 * 1024;                 // Minimum size to split a free block
-    bool allow_growth = true;                         // Allow allocating new raw blocks
-    float fragmentation_threshold = 0.3f;             // Defrag if fragmentation exceeds this
+    size_t alignment = 64;                             // Allocation alignment (e.g., cache line)
+    size_t min_split_size = 4 * 1024;                  // Minimum size to split a free block
+    bool allow_growth = true;                          // Allow allocating new raw blocks
+    float fragmentation_threshold = 0.3f;              // Defrag if fragmentation exceeds this
 
     // Size classes for fast best-fit lookup (sorted, terminated by SIZE_MAX)
     std::vector<size_t> size_classes = {
@@ -138,4 +138,4 @@ private:
     static constexpr size_t COALESCE_BATCH = 128; // Deallocations before auto-coalesce
 };
 
-} // namespace neollm::core::memory
+} // namespace zedinfer::core::memory

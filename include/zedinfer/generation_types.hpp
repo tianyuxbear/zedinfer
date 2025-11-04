@@ -3,7 +3,7 @@
 #include <functional>
 #include <string>
 
-namespace neollm {
+namespace zedinfer {
 
 /**
  * Generation operation mode
@@ -75,4 +75,4 @@ struct GenerationStats {
     std::string summary() const;
 };
 
-} // namespace neollm
+} // namespace zedinfer

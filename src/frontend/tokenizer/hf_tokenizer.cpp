@@ -12,7 +12,7 @@
 
 using json = nlohmann::json;
 
-namespace neollm::tokenizer {
+namespace zedinfer::tokenizer {
 
 std::shared_ptr<Tokenizer> HFTokenizer::create(const std::string &tokenizer_path) {
     auto tokenizer = std::make_unique<HFTokenizer>();
@@ -488,4 +488,4 @@ HFTokenizer::merge_pair(const std::vector<std::string> &chars, int i, int j) {
     return result;
 }
 
-} // namespace neollm::tokenizer
+} // namespace zedinfer::tokenizer

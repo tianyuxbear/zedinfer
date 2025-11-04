@@ -1,10 +1,10 @@
-#include "neollm/generation_types.hpp"
+#include "zedinfer/generation_types.hpp"
 
 #include <iomanip>
 #include <sstream>
 #include <stdexcept>
 
-namespace neollm {
+namespace zedinfer {
 
 // ============================================================================
 // GenerationConfig
@@ -54,4 +54,4 @@ std::string GenerationStats::summary() const {
     return oss.str();
 }
 
-} // namespace neollm
+} // namespace zedinfer

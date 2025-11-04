@@ -5,7 +5,7 @@
 #include <plog/Log.h>
 #include <queue>
 
-namespace neollm::graph {
+namespace zedinfer::graph {
 graph_node_t ComputeGraph::add_node(OpType op, const std::string &name) {
     auto node = std::make_shared<GraphNode>(op, name);
     nodes_.push_back(node);
@@ -517,4 +517,4 @@ std::string ComputeGraph::get_stats() const {
     return oss.str();
 }
 
-} // namespace neollm::graph
+} // namespace zedinfer::graph

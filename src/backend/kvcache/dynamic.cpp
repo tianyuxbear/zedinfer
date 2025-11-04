@@ -1,7 +1,7 @@
 #include "backend/kvcache/dynamic.hpp"
 #include "backend/core/context/context.hpp"
-#include "neollm.h"
 #include "utils/types.hpp"
+#include "zedinfer.h"
 
 #include <chrono>
 #include <cstring>
@@ -10,7 +10,7 @@
 #include <plog/Log.h>
 #include <sstream>
 
-namespace neollm::kvcache {
+namespace zedinfer::kvcache {
 
 void DynamicKVCacheConfig::validate() const {
     KVCacheConfig::validate();
@@ -137,13 +137,13 @@ void DynamicKVCache::copy_cache_data(tensor_t src, tensor_t dst, int valid_len) 
     size_t copy_size = valid_len * config_.num_kv_heads * config_.head_dim
                      * utils::dsize(config_.dtype);
 
-    if (config_.device_type == NEOLLM_DEVICE_CPU) {
+    if (config_.device_type == ZEDINFER_DEVICE_CPU) {
         std::memcpy(dst_slice->data(), src_slice->data(), copy_size);
     } else {
         // GPU memory copy
         core::context().setDevice(config_.device_type, config_.device_id);
         core::context().runtime().api()->memcpy_sync(
-            dst_slice->data(), src_slice->data(), copy_size, NEOLLM_MEMCPY_D2D);
+            dst_slice->data(), src_slice->data(), copy_size, ZEDINFER_MEMCPY_D2D);
     }
 }
 
@@ -262,4 +262,4 @@ std::string DynamicKVCache::get_stats() const {
     return oss.str();
 }
 
-} // namespace neollm::kvcache
+} // namespace zedinfer::kvcache

@@ -3,11 +3,11 @@
 #include "backend/core/core.hpp"
 #include "backend/core/runtime/runtime.hpp"
 #include "backend/device/device.hpp"
-#include "neollm.h"
+#include "zedinfer.h"
 
 #include <unordered_map>
 
-namespace neollm::core {
+namespace zedinfer::core {
 
 class Context {
 private:
@@ -27,7 +27,7 @@ public:
     Context &operator=(Context &&) = delete;
 
     // Sets the active device by type and ID.
-    void setDevice(NeollmDeviceType_t device_type, int device_id);
+    void setDevice(zedinferDeviceType_t device_type, int device_id);
 
     // Returns the currently active Runtime.
     Runtime &runtime();
@@ -38,4 +38,4 @@ public:
     friend Context &context();
 };
 
-} // namespace neollm::core
+} // namespace zedinfer::core

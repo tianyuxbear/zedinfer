@@ -1,11 +1,11 @@
 #pragma once
 
 #include "backend/tensor/tensor.hpp"
-#include "neollm.h"
+#include "zedinfer.h"
 #include <memory>
 #include <vector>
 
-namespace neollm::kvcache {
+namespace zedinfer::kvcache {
 
 /**
  * Configuration for KV cache initialization
@@ -17,11 +17,11 @@ struct KVCacheConfig {
     int head_dim;
 
     // Device settings
-    NeollmDeviceType_t device_type = NEOLLM_DEVICE_CPU;
+    zedinferDeviceType_t device_type = ZEDINFER_DEVICE_CPU;
     int device_id = 0;
 
     // Data type
-    NeollmDataType_t dtype = NEOLLM_DTYPE_BF16;
+    zedinferDataType_t dtype = ZEDINFER_DTYPE_BF16;
 
     void validate() const;
     size_t bytes_per_token() const;
@@ -70,4 +70,4 @@ protected:
 
 using kvcache_t = std::unique_ptr<KVCache>;
 
-} // namespace neollm::kvcache
+} // namespace zedinfer::kvcache

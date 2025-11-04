@@ -1,6 +1,6 @@
 #include "frontend/models/qwen2.hpp"
 
-namespace neollm::model {
+namespace zedinfer::model {
 
 std::string Qwen2Model::get_embedding_weight_name() const {
     return "embed_tokens.weight";
@@ -40,4 +40,4 @@ size_t Qwen2Model::calculate_num_parameters() const {
     return total;
 }
 
-} // namespace neollm::model
+} // namespace zedinfer::model

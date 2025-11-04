@@ -1,7 +1,7 @@
 #include "backend/core/storage/storage.hpp"
 #include "backend/core/runtime/runtime.hpp"
 
-namespace neollm::core {
+namespace zedinfer::core {
 Storage::Storage(std::byte *memory, size_t size, Runtime &runtime, bool is_host, bool is_mmap)
     : memory_(memory), size_(size), runtime_(runtime), is_host_(is_host), is_mmap_(is_mmap) {}
 
@@ -17,9 +17,9 @@ size_t Storage::size() const {
     return size_;
 }
 
-NeollmDeviceType_t Storage::deviceType() const {
+zedinferDeviceType_t Storage::deviceType() const {
     if (isHost()) {
-        return NEOLLM_DEVICE_CPU;
+        return ZEDINFER_DEVICE_CPU;
     } else {
         return runtime_.deviceType();
     }
@@ -40,4 +40,4 @@ bool Storage::isHost() const {
 bool Storage::isMmap() const {
     return is_mmap_;
 }
-} // namespace neollm::core
+} // namespace zedinfer::core

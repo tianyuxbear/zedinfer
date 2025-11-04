@@ -4,7 +4,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace neollm::tokenizer {
+namespace zedinfer::tokenizer {
 
 struct Config;
 
@@ -62,4 +62,4 @@ struct Config {
     int model_max_length = 16384;
 };
 
-} // namespace neollm::tokenizer
+} // namespace zedinfer::tokenizer
