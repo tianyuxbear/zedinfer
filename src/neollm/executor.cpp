@@ -1,4 +1,5 @@
 #include "neollm/executor.hpp"
+#include "backend/kvcache/base.hpp"
 #include "backend/ops/ops.hpp"
 #include "neollm.h"
 #include "neollm/activation.hpp"
@@ -9,70 +10,73 @@
 #include <memory>
 #include <plog/Log.h>
 #include <sstream>
+#include <stdexcept>
+#include <string>
 
 namespace neollm {
 
 using namespace graph;
 
-// ==================== GraphExecutor ====================
+// ============================================================================
+// GraphExecutor
+// ============================================================================
+
 GraphExecutor::GraphExecutor(
     compute_graph_t graph,
-    kvcache::kvcache_t kv_cache,
     const ExecutorConfig &config)
     : graph_(graph),
-      kv_cache_(kv_cache),
       config_(config) {
-    // Allocate arena memory for prefill-phase activations.
+
+    // Allocate arena for prefill phase (batch processing)
     const size_t per_token_bytes = graph_->get_per_token_activation_numel() * utils::dsize(config_.data_type);
     const size_t capacity = per_token_bytes * config_.max_prefill_len;
     prefill_arena_ = std::make_unique<PrefillArena>(config_, capacity);
 
-    // Initialize tensor pool for decode-phase activations.
+    // Allocate pool for decode phase (token-by-token)
     decode_pool_ = std::make_unique<DecodePool>(config_);
 
-    // Pre-allocate reusable position ID tensor.
+    // Pre-allocate reusable position IDs tensor
     position_ids_cache_ = std::make_unique<PositionIDsCache>(config_);
 
-    graph->optimize();
+    // Apply graph optimizations
+    graph_->optimize();
 }
 
-std::unique_ptr<GraphExecutor> GraphExecutor::create(
+std::shared_ptr<GraphExecutor> GraphExecutor::create(
     compute_graph_t graph,
-    kvcache::kvcache_t kv_cache,
     ExecutorConfig config) {
-    // Validate input arguments to ensure safe construction.
+
+    // Validate inputs
     if (!graph) {
-        throw std::invalid_argument("Graph must not be null.");
-    }
-    if (!kv_cache) {
-        throw std::invalid_argument("KV cache must not be null.");
+        throw std::invalid_argument("Graph cannot be null");
     }
     if (config.max_prefill_len <= 0) {
-        throw std::invalid_argument("max_prefill_len must be positive.");
+        throw std::invalid_argument("max_prefill_len must be positive");
     }
     if (config.max_seq_len <= 0) {
-        throw std::invalid_argument("max_seq_len must be positive.");
+        throw std::invalid_argument("max_seq_len must be positive");
     }
 
-    // Construct GraphExecutor safely with validated inputs.
-    return std::unique_ptr<GraphExecutor>(
-        new GraphExecutor(graph, kv_cache, config));
+    // Create executor instance
+    return std::shared_ptr<GraphExecutor>(
+        new GraphExecutor(graph, config));
 }
 
 tensor_t GraphExecutor::forward(
+    kvcache::KVCache &kvcache,
     const std::vector<int> &input_ids,
     int past_len) {
 
-    int seq_len = input_ids.size();
+    const int seq_len = input_ids.size();
 
     if (seq_len == 0) {
         throw std::invalid_argument("input_ids cannot be empty");
     }
 
-    // Activation storage
+    // Activation storage: maps graph nodes to their output tensors
     std::unordered_map<graph_node_t, tensor_t> activations;
 
-    // ==================== 1. Prepare input_ids ====================
+    // ===== Step 1: Prepare input_ids tensor =====
     auto input_ids_node = graph_->get_input("input_ids");
     if (!input_ids_node) {
         throw std::runtime_error("Graph input 'input_ids' not found");
@@ -88,48 +92,49 @@ tensor_t GraphExecutor::forward(
     input_ids_tensor->load(input_ids.data());
     activations[input_ids_node] = input_ids_tensor;
 
-    // ==================== 2. Prepare position_ids ====================
+    // ===== Step 2: Prepare position_ids tensor =====
     auto position_ids_node = graph_->get_input("position_ids");
     if (!position_ids_node) {
         throw std::runtime_error("Graph input 'position_ids' not found");
     }
 
-    // Zero-copy from cache
+    // Zero-copy slice from cached position IDs
     auto position_ids_tensor = position_ids_cache_->get_slice(past_len, seq_len);
     activations[position_ids_node] = position_ids_tensor;
 
-    // ==================== 3. Prepare KV cache ====================
-    for (int layer_idx = 0; layer_idx < kv_cache_->config().num_layers; ++layer_idx) {
+    // ===== Step 3: Prepare KV cache slices =====
+    for (int layer_idx = 0; layer_idx < kvcache.config().num_layers; ++layer_idx) {
         auto k_cache_node = graph_->get_input(
             "layer_" + std::to_string(layer_idx) + "_k_cache");
         auto v_cache_node = graph_->get_input(
             "layer_" + std::to_string(layer_idx) + "_v_cache");
-        activations[k_cache_node] = kv_cache_->get_k_cache_slice(layer_idx, past_len + seq_len);
-        activations[v_cache_node] = kv_cache_->get_v_cache_slice(layer_idx, past_len + seq_len);
+
+        activations[k_cache_node] = kvcache.get_k_cache_slice(layer_idx, past_len + seq_len);
+        activations[v_cache_node] = kvcache.get_v_cache_slice(layer_idx, past_len + seq_len);
     }
 
-    // ==================== 4. Execute graph ====================
+    // ===== Step 4: Execute computation graph =====
     auto execution_order = graph_->get_execution_order();
 
-    // Prepare execution context
     ExecutionContext ctx{1, seq_len, past_len};
 
     for (auto &node : execution_order) {
+        // Skip nodes that already have activations (inputs)
         if (activations.find(node) != activations.end()) {
-            continue; // Skip input nodes
+            continue;
         }
 
-        execute_node(node, activations, ctx);
+        execute_node(kvcache, node, activations, ctx);
     }
 
-    // ==================== 5. Release activations ====================
+    // ===== Step 5: Reset memory allocators =====
     prefill_arena_->reset();
     decode_pool_->reset();
 
-    // ==================== 6. Update KV cache length ====================
-    kv_cache_->update_seq_len(seq_len);
+    // ===== Step 6: Update KV cache length =====
+    kvcache.update_seq_len(seq_len);
 
-    // ==================== 7. Return logits ====================
+    // ===== Step 7: Return output logits =====
     auto logits_node = graph_->get_output("logits");
     if (!logits_node) {
         throw std::runtime_error("Graph output 'logits' not found");
@@ -139,6 +144,7 @@ tensor_t GraphExecutor::forward(
 }
 
 void GraphExecutor::execute_node(
+    kvcache::KVCache &kvcache,
     graph_node_t node,
     std::unordered_map<graph_node_t, tensor_t> &activations,
     ExecutionContext &ctx) {
@@ -146,57 +152,58 @@ void GraphExecutor::execute_node(
     // Select activation allocator based on phase
     ActivationAllocator *activation_allocator;
     if (ctx.seq_len == 1) {
+        // Decode: token-by-token
         activation_allocator = decode_pool_.get();
     } else {
+        // Prefill: batch processing
         activation_allocator = prefill_arena_.get();
     }
 
-    // Collect input tensors
+    // Gather input tensors for this node
     std::vector<tensor_t> inputs;
     for (const auto &input_node : node->inputs()) {
         auto it = activations.find(input_node);
         if (it == activations.end()) {
             throw std::runtime_error(
-                "Input activation not found for node: " + node->name());
+                "Missing input activation for node: " + node->name());
         }
         inputs.push_back(it->second);
     }
 
+    // Determine output tensor
     tensor_t output;
-    std::vector<size_t> shape;
-    std::string node_name = node->name();
+    const std::string &node_name = node->name();
 
-    // Handle special case: write directly to KV cache
+    // Special case: write directly to KV cache (v_proj, k_rope)
     bool is_v_proj = node_name.find("v_proj") != std::string::npos;
     bool is_k_rope = node_name.find("k_rope") != std::string::npos;
     bool write_to_kv_cache = is_k_rope || is_v_proj;
 
+    std::vector<size_t> shape = node->get_output_shape_template().resolve(ctx);
+
     if (write_to_kv_cache) {
         int layer_idx = extract_layer_idx(node_name);
 
+        // Write directly into KV cache memory
         output = is_v_proj
-                   ? kv_cache_->get_v_cache_write_slice(layer_idx, ctx.past_len, ctx.seq_len)
-                   : kv_cache_->get_k_cache_write_slice(layer_idx, ctx.past_len, ctx.seq_len);
+                   ? kvcache.get_v_cache_slice(layer_idx, ctx.past_len, ctx.seq_len)
+                   : kvcache.get_k_cache_slice(layer_idx, ctx.past_len, ctx.seq_len);
 
-        // Resolve shape from template and reshape
-        shape = node->get_output_shape_template().resolve(ctx);
         output = output->view(shape);
     } else {
-        // Resolve shape from cached template
-        shape = node->get_output_shape_template().resolve(ctx);
+        // Allocate from memory pool/arena
         output = activation_allocator->acquire(shape);
     }
 
-    // Reshape ROPE input to match expected 3D format
-    bool is_rope = node_name.find("rope") != std::string::npos;
-    if (is_rope) {
+    // Reshape ROPE input to 3D format if needed
+    if (node_name.find("rope") != std::string::npos) {
         inputs[0] = inputs[0]->view(shape);
     }
 
-    // Execute operator
+    // Execute the operation
     execute_op(node, inputs, output);
 
-    // Flatten SELF_ATTENTION output
+    // Flatten SELF_ATTENTION output back to 2D
     if (node->op_type() == OpType::SELF_ATTENTION) {
         size_t nhead = node->get_param<size_t>("nhead");
         size_t head_dim = node->get_param<size_t>("head_dim");
@@ -237,7 +244,8 @@ void GraphExecutor::execute_op(
     }
 
     case OpType::SELF_ATTENTION: {
-        float scale = 1.0f / std::sqrt(static_cast<float>(node->get_param<size_t>("head_dim")));
+        size_t head_dim = node->get_param<size_t>("head_dim");
+        float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
         ops::self_attention(output, inputs[0], inputs[1], inputs[2], scale);
         break;
     }
@@ -248,17 +256,17 @@ void GraphExecutor::execute_op(
 
     default:
         throw std::runtime_error(
-            "Unsupported op type: " + std::to_string(static_cast<int>(node->op_type())));
+            "Unsupported operation: " + std::to_string(static_cast<int>(node->op_type())));
     }
 }
 
 int GraphExecutor::extract_layer_idx(const std::string &node_name) {
     size_t layer_pos = node_name.find("layer_");
     if (layer_pos == std::string::npos) {
-        throw std::runtime_error("Cannot extract layer_idx from: " + node_name);
+        throw std::runtime_error("Cannot extract layer index from: " + node_name);
     }
 
-    size_t start = layer_pos + 6;
+    size_t start = layer_pos + 6; // Skip "layer_"
     size_t end = node_name.find("_", start);
 
     std::string layer_str = node_name.substr(start, end - start);
@@ -268,10 +276,11 @@ int GraphExecutor::extract_layer_idx(const std::string &node_name) {
 void GraphExecutor::print_stats() const {
     std::ostringstream oss;
 
-    oss << "\n=== GraphExecutor Statistics ===\n";
-    oss << "  Device: " << (config_.device_type == NEOLLM_DEVICE_CPU ? "CPU" : "GPU")
-        << " (ID: " << config_.device_id << ")" << std::endl;
-    oss << "  Default dtype: ";
+    oss << "\n=== Executor Statistics ===\n"
+        << "Device: " << (config_.device_type == NEOLLM_DEVICE_CPU ? "CPU" : "GPU")
+        << " (ID: " << config_.device_id << ")\n"
+        << "Data type: ";
+
     switch (config_.data_type) {
     case NEOLLM_DTYPE_BF16:
         oss << "BF16";
@@ -284,17 +293,19 @@ void GraphExecutor::print_stats() const {
         break;
     default:
         oss << "Unknown";
+        break;
     }
-    oss << std::endl;
+
+    oss << "\n";
 
     LOGI << oss.str();
 
-    // Pool statistics
+    // Print graph stats
+    LOGI << graph_->get_stats();
+
+    // Print memory pool statistics
     LOGI << prefill_arena_->get_stats();
     LOGI << decode_pool_->get_stats();
-
-    // KV Cache statistics
-    LOGI << kv_cache_->get_stats();
 }
 
 } // namespace neollm

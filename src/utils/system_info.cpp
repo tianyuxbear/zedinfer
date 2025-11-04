@@ -1,7 +1,8 @@
-#include "utils/logger.hpp"
+#include "utils/system_info.hpp"
 
 #include <fstream>
 #include <set>
+#include <sstream>
 #include <thread>
 
 #ifdef _OPENMP
@@ -11,6 +12,8 @@
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386) || defined(_M_IX86)
 #include <cpuid.h>
 #endif
+
+namespace neollm::utils {
 
 int get_physical_cores() {
 #ifdef __linux__
@@ -103,3 +106,27 @@ std::string get_runtime_info() {
 
     return oss.str();
 }
+
+std::string get_numa_maps_info(int max_lines) {
+    std::ostringstream oss;
+    std::ifstream file("/proc/self/numa_maps");
+
+    if (!file.is_open()) {
+        oss << "Failed to open /proc/self/numa_maps\n";
+        return oss.str();
+    }
+
+    oss << "\n===== NUMA maps (top " << max_lines << " anon regions) =====\n";
+
+    std::string line;
+    int count = 0;
+    while (std::getline(file, line) && count < max_lines) {
+        if (line.find("anon") != std::string::npos) {
+            oss << line << '\n';
+            ++count;
+        }
+    }
+    return oss.str();
+}
+
+} // namespace neollm::utils

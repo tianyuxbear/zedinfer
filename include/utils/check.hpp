@@ -1,7 +1,7 @@
 #pragma once
 
-#include <iostream>
-#include <stdexcept>
+#include <iostream>  // IWYU pragma: keep
+#include <stdexcept> // IWYU pragma: keep
 
 #define EXCEPTION_LOCATION_MSG \
     " from " << __func__ << " at " << __FILE__ << ":" << __LINE__ << "."

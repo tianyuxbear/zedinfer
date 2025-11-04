@@ -6,6 +6,8 @@
 #include <plog/Initializers/RollingFileInitializer.h>
 #include <plog/Log.h>
 
+namespace neollm::utils {
+
 // Define logger IDs
 enum {
     FILE_ONLY = 0,    // Default logger: File only logger
@@ -38,5 +40,4 @@ inline bool initLoggerWithOverwrite(plog::Severity level, const std::string &fil
     return true;
 }
 
-int get_physical_cores();
-std::string get_runtime_info();
+} // namespace neollm::utils

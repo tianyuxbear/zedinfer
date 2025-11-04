@@ -1,10 +1,12 @@
 #include "frontend/loader/safetensors.hpp"
 #include "frontend/models/qwen2.hpp"
 #include "neollm.h"
+#ifdef DEBUG
+#include "utils/system_info.hpp"
+#endif
 
 #include <filesystem>
 #include <fstream>
-#include <iostream>
 #include <nlohmann/json.hpp>
 #include <plog/Log.h>
 #include <string>
@@ -12,30 +14,10 @@
 namespace fs = std::filesystem;
 using json = nlohmann::json;
 
-void dump_numa_maps_cpp(int max_lines = 20) {
-    std::ifstream file("/proc/self/numa_maps");
-    if (!file.is_open()) {
-        std::cerr << "Failed to open /proc/self/numa_maps" << std::endl;
-        return;
-    }
-
-    std::string line;
-    int count = 0;
-    std::cout << "\n===== NUMA maps (top " << max_lines << " anon regions) =====\n";
-    while (std::getline(file, line)) {
-        if (line.find("anon") != std::string::npos) {
-            std::cout << line << std::endl;
-            if (++count >= max_lines) {
-                break;
-            }
-        }
-    }
-}
-
 namespace neollm::model {
 
 // Parse model config and weights, then instantiate the corresponding model.
-std::unique_ptr<Model> Model::parse(const std::string &model_path, NeollmDeviceType_t target_device) {
+std::shared_ptr<Model> Model::parse(const std::string &model_path, NeollmDeviceType_t target_device) {
     // Load model configuration
     std::string config_path = (fs::path(model_path) / "config.json").string();
     auto config = load_config(config_path);
@@ -53,7 +35,7 @@ std::unique_ptr<Model> Model::parse(const std::string &model_path, NeollmDeviceT
         if (!qwen2_config) {
             throw std::logic_error("Config is not Qwen2Config");
         }
-        return std::make_unique<Qwen2Model>(*qwen2_config, std::move(weights));
+        return std::make_shared<Qwen2Model>(*qwen2_config, std::move(weights));
     }
 
     throw std::runtime_error("Unsupported model type: " + config->model_type);
@@ -158,7 +140,7 @@ std::unique_ptr<ModelWeights> Model::load_weights(const std::string &model_path,
     LOGI.printf("⏱️  Conversion time: %.4fs (%zu tensors)", convert_time, converted_count);
 
 #ifdef DEBUG
-    dump_numa_maps_cpp();
+    LOGD << utils::get_numa_maps_info();
 #endif
 
     return weights;

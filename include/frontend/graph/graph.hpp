@@ -118,8 +118,8 @@ public:
     // Graph optimization (fusion, constant folding, etc.)
     void optimize();
 
-    // Debug print
-    void print() const;
+    // Debug stats
+    std::string get_stats() const;
 
 private:
     std::vector<graph_node_t> nodes_;

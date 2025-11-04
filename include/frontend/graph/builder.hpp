@@ -2,6 +2,7 @@
 
 #include "frontend/graph/graph.hpp"
 #include "frontend/models/base.hpp"
+
 #include <cstddef>
 
 namespace neollm::graph {
@@ -12,6 +13,11 @@ public:
     virtual ~GraphBuilder() = default;
 
     virtual compute_graph_t build(const model::Model *model) = 0;
+
+    /**
+     * Factory method to create builder based on model type
+     */
+    static std::shared_ptr<GraphBuilder> create(const std::string &model_type);
 };
 
 // Graph builder implementation for Qwen2 architecture

@@ -6,6 +6,8 @@
 
 namespace neollm::tokenizer {
 
+struct Config;
+
 // Abstract base class for tokenizers.
 class Tokenizer {
 public:
@@ -25,6 +27,9 @@ public:
     virtual int get_eos_token_id() const { return -1; }
     virtual int get_pad_token_id() const { return -1; }
     virtual int get_unk_token_id() const { return -1; }
+
+    // Access tokenizer config.
+    virtual const Config &get_config() const = 0;
 
     // Load tokenizer from file.
     virtual void load_from_file(const std::string &path) = 0;

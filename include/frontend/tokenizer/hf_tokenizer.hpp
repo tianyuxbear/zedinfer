@@ -9,7 +9,7 @@ namespace neollm::tokenizer {
 
 class HFTokenizer : public Tokenizer {
 public:
-    static std::unique_ptr<Tokenizer> create(const std::string &tokenizer_path);
+    static std::shared_ptr<Tokenizer> create(const std::string &tokenizer_path);
 
     // Core encode/decode interface.
     std::vector<int> encode(const std::string &text) override;
@@ -30,7 +30,7 @@ public:
     int get_unk_token_id() const override { return special_tokens_.unk_token_id; }
 
     // Access tokenizer config.
-    const Config &get_config() const { return config_; }
+    const Config &get_config() const override { return config_; }
 
     // Load tokenizer from file.
     void load_from_file(const std::string &tokenizer_path) override;

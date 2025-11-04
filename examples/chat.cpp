@@ -1,8 +1,11 @@
-#include "neollm/chat.hpp"
-#include "frontend/sampler/sampler.hpp"
+#include "backend/device/device.hpp"
+#include "neollm.h"
 #include "neollm/engine.hpp"
-#include "utils/logger.hpp"
+#include "neollm/session.hpp"
+#include "utils/logging.hpp"
+#include "utils/system_info.hpp"
 
+#include <cstddef>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
@@ -10,6 +13,7 @@
 #include <string>
 
 namespace fs = std::filesystem;
+using namespace neollm;
 
 std::string get_usage_message(const char *program_name) {
     std::ostringstream oss;
@@ -56,16 +60,16 @@ std::string get_welcome_message() {
 }
 
 int main(int argc, char *argv[]) {
-    initLoggerWithOverwrite(plog::verbose, "logs/chat.log");
+    utils::initLoggerWithOverwrite(plog::verbose, "logs/chat.log");
 
     // Validate argument count
     if (argc != 2) {
-        PLOG_ERROR_(BOTH) << "Error: Invalid number of arguments";
-        PLOG_VERBOSE_(BOTH) << get_usage_message(argv[0]);
+        PLOG_ERROR_(utils::BOTH) << "Error: Invalid number of arguments";
+        PLOG_VERBOSE_(utils::BOTH) << get_usage_message(argv[0]);
         return 1;
     }
 
-    PLOG_VERBOSE_(BOTH) << get_runtime_info();
+    PLOG_VERBOSE_(utils::BOTH) << utils::get_runtime_info();
 
     // Parse and resolve model path
     std::string model_path_arg = argv[1];
@@ -74,33 +78,34 @@ int main(int argc, char *argv[]) {
     try {
         model_path_fs = fs::absolute(model_path_arg);
     } catch (const fs::filesystem_error &e) {
-        PLOG_ERROR_(BOTH) << "Error: Invalid path: " << e.what();
+        PLOG_ERROR_(utils::BOTH) << "Error: Invalid path: " << e.what();
         return 1;
     }
 
     // Validate model path exists
     if (!fs::exists(model_path_fs)) {
-        PLOG_ERROR_(BOTH) << "Error: Model path does not exist: " << model_path_fs;
+        PLOG_ERROR_(utils::BOTH) << "Error: Model path does not exist: " << model_path_fs;
         return 1;
     }
 
     // Validate model path is directory
     if (!fs::is_directory(model_path_fs)) {
-        PLOG_ERROR_(BOTH) << "Error: Model path is not a directory: " << model_path_fs;
+        PLOG_ERROR_(utils::BOTH) << "Error: Model path is not a directory: " << model_path_fs;
         return 1;
     }
 
     std::string model_path = model_path_fs.string();
 
     // Initialize inference engine
-    std::unique_ptr<neollm::InferenceEngine> engine = neollm::InferenceEngine::create(model_path, NEOLLM_DEVICE_CPU, 0);
+    device::Device device(NEOLLM_DEVICE_CPU, 0);
+    size_t max_prefill_len = 128;
+    std::shared_ptr<neollm::InferenceEngine>
+        engine = neollm::InferenceEngine::create(model_path, device, max_prefill_len);
 
     // Configure generation parameters
     neollm::GenerationConfig gen_config;
     gen_config.gen_mode = neollm::GenerationMode::CHAT;
-    gen_config.sampler_type = neollm::sampler::SamplerType::ARGMAX;
     gen_config.max_new_tokens = 16384;
-    gen_config.max_seq_len = 16384;
     gen_config.verbose = true;
     gen_config.print_stats = true;
     gen_config.stream = true;
@@ -109,9 +114,9 @@ int main(int argc, char *argv[]) {
     };
 
     // Create chat session
-    neollm::ChatSession chat_session(std::move(engine), gen_config);
+    auto session = engine->create_session(gen_config);
 
-    PLOG_VERBOSE_(BOTH) << get_welcome_message();
+    PLOG_VERBOSE_(utils::BOTH) << get_welcome_message();
 
     // Set UTF-8 locale for proper Chinese character handling
     std::setlocale(LC_ALL, "en_US.UTF-8");
@@ -152,27 +157,27 @@ int main(int argc, char *argv[]) {
 
         // Handle clear/reset commands
         if (lower_input == "reset" || lower_input == "clear" || lower_input == "cls") {
-            // chat_session.reset();
-            PLOG_VERBOSE_(BOTH) << "✨ Chat history cleared.";
+            session.reset();
+            PLOG_VERBOSE_(utils::BOTH) << "✨ Chat history cleared.";
             continue;
         }
 
         // Handle help command
         if (lower_input == "help") {
-            PLOG_VERBOSE_(BOTH) << get_welcome_message();
+            PLOG_VERBOSE_(utils::BOTH) << get_welcome_message();
             continue;
         }
 
         // Process chat message
         try {
             std::cout << "🤖 \033[1;34mAssistant:\033[0m <think> ";
-            chat_session.chat(user_input);
+            session->chat(user_input);
             std::cout << "\n";
         } catch (const std::exception &e) {
-            PLOG_ERROR_(BOTH) << "Error: " << e.what();
+            PLOG_ERROR_(utils::BOTH) << "Error: " << e.what();
         }
     }
 
-    PLOG_VERBOSE_(BOTH) << "\n👋 Goodbye! Thanks for using NeoLLM.";
+    PLOG_VERBOSE_(utils::BOTH) << "\n👋 Goodbye! Thanks for using NeoLLM.";
     return 0;
 }

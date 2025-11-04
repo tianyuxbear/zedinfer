@@ -2,8 +2,9 @@
 #include "backend/core/memory/pooled_allocator.hpp"
 #include "backend/core/storage/storage.hpp"
 #include "backend/device/runtime_api.hpp"
+#include "utils/logging.hpp"
 
-#include <iostream>
+#include <plog/Log.h>
 
 namespace neollm::core {
 Runtime::Runtime(NeollmDeviceType_t device_type, int device_id)
@@ -40,7 +41,7 @@ std::unique_ptr<Runtime> Runtime::create(
 
 Runtime::~Runtime() {
     if (!is_active_) {
-        std::cerr << "Mallicious destruction of inactive runtime." << std::endl;
+        LOG_ERROR_(utils::BOTH) << "Mallicious destruction of inactive runtime." << std::endl;
     }
     api_->destroy_stream(stream_);
     api_ = nullptr;

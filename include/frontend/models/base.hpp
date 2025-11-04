@@ -87,10 +87,11 @@ private:
 
 public:
     // Parses model directory and returns a concrete Model instance.
-    static std::unique_ptr<Model> parse(const std::string &model_path, NeollmDeviceType_t target_device);
+    static std::shared_ptr<Model> parse(const std::string &model_path, NeollmDeviceType_t target_device);
 
     // Populates ModelConfig from parsed JSON.
     static void load_base_config(ModelConfig &config, const json &j);
+
     // Loads and parses config.json into a ModelConfig.
     static std::unique_ptr<ModelConfig> load_config(const std::string &config_path);
 
