@@ -1,9 +1,9 @@
-#include "neollm/executor.hpp"
+#include "zedinfer/executor.hpp"
 #include "backend/kvcache/base.hpp"
 #include "backend/ops/ops.hpp"
-#include "neollm.h"
-#include "neollm/activation.hpp"
 #include "utils/types.hpp"
+#include "zedinfer.h"
+#include "zedinfer/activation.hpp"
 
 #include <cmath>
 #include <iostream>
@@ -13,7 +13,7 @@
 #include <stdexcept>
 #include <string>
 
-namespace neollm {
+namespace zedinfer {
 
 using namespace graph;
 
@@ -84,7 +84,7 @@ tensor_t GraphExecutor::forward(
 
     auto input_ids_tensor = Tensor::create(
         {static_cast<size_t>(seq_len)},
-        NEOLLM_DTYPE_I32,
+        ZEDINFER_DTYPE_I32,
         config_.device_type,
         config_.device_id,
         false,
@@ -277,18 +277,18 @@ void GraphExecutor::print_stats() const {
     std::ostringstream oss;
 
     oss << "\n=== Executor Statistics ===\n"
-        << "Device: " << (config_.device_type == NEOLLM_DEVICE_CPU ? "CPU" : "GPU")
+        << "Device: " << (config_.device_type == ZEDINFER_DEVICE_CPU ? "CPU" : "GPU")
         << " (ID: " << config_.device_id << ")\n"
         << "Data type: ";
 
     switch (config_.data_type) {
-    case NEOLLM_DTYPE_BF16:
+    case ZEDINFER_DTYPE_BF16:
         oss << "BF16";
         break;
-    case NEOLLM_DTYPE_F16:
+    case ZEDINFER_DTYPE_F16:
         oss << "FP16";
         break;
-    case NEOLLM_DTYPE_F32:
+    case ZEDINFER_DTYPE_F32:
         oss << "FP32";
         break;
     default:
@@ -308,4 +308,4 @@ void GraphExecutor::print_stats() const {
     LOGI << decode_pool_->get_stats();
 }
 
-} // namespace neollm
+} // namespace zedinfer

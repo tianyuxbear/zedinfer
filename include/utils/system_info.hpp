@@ -2,7 +2,7 @@
 
 #include <string>
 
-namespace neollm::utils {
+namespace zedinfer::utils {
 
 // Get the number of physical CPU cores
 int get_physical_cores();
@@ -15,4 +15,4 @@ std::string get_runtime_info();
 // @return Formatted string containing NUMA mapping information
 std::string get_numa_maps_info(int max_lines = 20);
 
-} // namespace neollm::utils
+} // namespace zedinfer::utils

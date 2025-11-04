@@ -5,25 +5,25 @@
 
 #include <memory>
 
-namespace neollm::core {
+namespace zedinfer::core {
 
 class Runtime {
 private:
-    NeollmDeviceType_t device_type_;
+    zedinferDeviceType_t device_type_;
     int device_id_;
     bool is_active_;
-    const NeollmRuntimeAPI *api_;
+    const ZedinferRuntimeAPI *api_;
     allocator_t allocator_;
-    NeollmStream_t stream_;
+    zedinferStream_t stream_;
 
-    Runtime(NeollmDeviceType_t device_type, int device_id);
+    Runtime(zedinferDeviceType_t device_type, int device_id);
 
     void activate();
     void deactivate();
 
 public:
     // Creates a new Runtime instance for the specified device.
-    static std::unique_ptr<Runtime> create(NeollmDeviceType_t device_type, int device_id);
+    static std::unique_ptr<Runtime> create(zedinferDeviceType_t device_type, int device_id);
 
     ~Runtime();
 
@@ -34,12 +34,12 @@ public:
     Runtime &operator=(Runtime &&) = delete;
 
     // Device properties.
-    NeollmDeviceType_t deviceType() const { return device_type_; }
+    zedinferDeviceType_t deviceType() const { return device_type_; }
     int deviceId() const { return device_id_; }
     bool isActive() const { return is_active_; }
 
     // Returns the associated runtime API.
-    const NeollmRuntimeAPI *api() const { return api_; }
+    const ZedinferRuntimeAPI *api() const { return api_; }
 
     // Device and host memory allocation.
     storage_t allocateDeviceStorage(size_t size);
@@ -48,10 +48,10 @@ public:
     void freeStorage(Storage *storage);
 
     // Stream management.
-    NeollmStream_t stream() const { return stream_; }
+    zedinferStream_t stream() const { return stream_; }
     void synchronize() const;
 
     friend class Context;
 };
 
-} // namespace neollm::core
+} // namespace zedinfer::core

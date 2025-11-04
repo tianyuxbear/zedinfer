@@ -6,7 +6,7 @@
 #include <random>
 #include <string>
 
-namespace neollm::sampler {
+namespace zedinfer::sampler {
 
 // Sampler type enumeration
 enum class SamplerType {
@@ -97,4 +97,4 @@ private:
 std::shared_ptr<Sampler> createSampler(SamplerType sampler_type,
                                        const SamplerParams &params = SamplerParams());
 
-} // namespace neollm::sampler
+} // namespace zedinfer::sampler

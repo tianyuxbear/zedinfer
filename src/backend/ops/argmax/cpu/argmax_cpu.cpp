@@ -8,7 +8,7 @@
 
 template <typename T>
 void argmax_(int64_t *max_idx, T *max_val, const T *vals, size_t numel) {
-    if constexpr (std::is_same_v<T, neollm::bf16_t> || std::is_same_v<T, neollm::fp16_t>) {
+    if constexpr (std::is_same_v<T, zedinfer::bf16_t> || std::is_same_v<T, zedinfer::fp16_t>) {
         using MaxPair = std::pair<float, int64_t>;
 
 #pragma omp declare reduction(max_pair:MaxPair : \
@@ -21,13 +21,13 @@ void argmax_(int64_t *max_idx, T *max_val, const T *vals, size_t numel) {
 
 #pragma omp parallel for reduction(max_pair : result)
         for (size_t i = 0; i < numel; ++i) {
-            float f_val = neollm::utils::cast<float>(vals[i]);
+            float f_val = zedinfer::utils::cast<float>(vals[i]);
             if (f_val > result.first) {
                 result = {f_val, i};
             }
         }
 
-        *max_val = neollm::utils::cast<T>(result.first);
+        *max_val = zedinfer::utils::cast<T>(result.first);
         *max_idx = result.second;
     } else {
         using MaxPair = std::pair<T, int64_t>;
@@ -53,19 +53,19 @@ void argmax_(int64_t *max_idx, T *max_val, const T *vals, size_t numel) {
     }
 }
 
-namespace neollm::ops::cpu {
-void argmax(std::byte *max_idx, std::byte *max_val, const std::byte *vals, NeollmDataType_t type, size_t numel) {
+namespace zedinfer::ops::cpu {
+void argmax(std::byte *max_idx, std::byte *max_val, const std::byte *vals, zedinferDataType_t type, size_t numel) {
     switch (type) {
-    case NEOLLM_DTYPE_F32:
+    case ZEDINFER_DTYPE_F32:
         return argmax_(reinterpret_cast<int64_t *>(max_idx), reinterpret_cast<float *>(max_val), reinterpret_cast<const float *>(vals), numel);
-    case NEOLLM_DTYPE_BF16:
-        return argmax_(reinterpret_cast<int64_t *>(max_idx), reinterpret_cast<neollm::bf16_t *>(max_val),
-                       reinterpret_cast<const neollm::bf16_t *>(vals), numel);
-    case NEOLLM_DTYPE_F16:
-        return argmax_(reinterpret_cast<int64_t *>(max_idx), reinterpret_cast<neollm::fp16_t *>(max_val),
-                       reinterpret_cast<const neollm::fp16_t *>(vals), numel);
+    case ZEDINFER_DTYPE_BF16:
+        return argmax_(reinterpret_cast<int64_t *>(max_idx), reinterpret_cast<zedinfer::bf16_t *>(max_val),
+                       reinterpret_cast<const zedinfer::bf16_t *>(vals), numel);
+    case ZEDINFER_DTYPE_F16:
+        return argmax_(reinterpret_cast<int64_t *>(max_idx), reinterpret_cast<zedinfer::fp16_t *>(max_val),
+                       reinterpret_cast<const zedinfer::fp16_t *>(vals), numel);
     default:
         EXCEPTION_UNSUPPORTED_DATATYPE(type);
     }
 }
-} // namespace neollm::ops::cpu
+} // namespace zedinfer::ops::cpu

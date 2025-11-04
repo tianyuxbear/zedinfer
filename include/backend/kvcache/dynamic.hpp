@@ -2,7 +2,7 @@
 
 #include "backend/kvcache/base.hpp"
 
-namespace neollm::kvcache {
+namespace zedinfer::kvcache {
 
 /**
  * @brief Configuration for dynamic KV cache
@@ -81,4 +81,4 @@ private:
     void copy_cache_data(tensor_t src, tensor_t dst, int valid_len);
 };
 
-} // namespace neollm::kvcache
+} // namespace zedinfer::kvcache

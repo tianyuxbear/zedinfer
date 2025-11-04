@@ -1,14 +1,14 @@
 #pragma once
 
 #include "backend/kvcache/base.hpp"
-#include "neollm/generation_types.hpp"
+#include "zedinfer/generation_types.hpp"
 
 #include <memory>
 #include <string>
 #include <utility>
 #include <vector>
 
-namespace neollm {
+namespace zedinfer {
 
 // Forward declaration
 class InferenceEngine;
@@ -77,4 +77,4 @@ private:
     bool is_first_turn_;                                            // First turn flag for BOS token
 };
 
-} // namespace neollm
+} // namespace zedinfer

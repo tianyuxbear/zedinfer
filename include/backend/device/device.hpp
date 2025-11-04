@@ -1,28 +1,28 @@
 #pragma once
 
-#include "neollm.h"
+#include "zedinfer.h"
 
 #include <functional>
 #include <stdexcept>
 #include <string>
 
-namespace neollm::device {
+namespace zedinfer::device {
 
 class Device {
 public:
-    static Device cpu() { return Device(NEOLLM_DEVICE_CPU, 0); }
-    static Device cuda(int id = 0) { return Device(NEOLLM_DEVICE_NVIDIA, id); }
+    static Device cpu() { return Device(ZEDINFER_DEVICE_CPU, 0); }
+    static Device cuda(int id = 0) { return Device(ZEDINFER_DEVICE_NVIDIA, id); }
 
-    Device() : type_(NEOLLM_DEVICE_CPU), id_(0) {}
+    Device() : type_(ZEDINFER_DEVICE_CPU), id_(0) {}
 
-    Device(NeollmDeviceType_t type, int id)
+    Device(zedinferDeviceType_t type, int id)
         : type_(type), id_(id) {
         validate();
     }
 
     Device(const Device &) = default;
 
-    NeollmDeviceType_t type() const { return type_; }
+    zedinferDeviceType_t type() const { return type_; }
     int id() const { return id_; }
 
     bool operator==(const Device &other) const {
@@ -42,10 +42,10 @@ public:
     std::string toString() const {
         const char *type_str = nullptr;
         switch (type_) {
-        case NEOLLM_DEVICE_CPU:
+        case ZEDINFER_DEVICE_CPU:
             type_str = "cpu";
             break;
-        case NEOLLM_DEVICE_NVIDIA:
+        case ZEDINFER_DEVICE_NVIDIA:
             type_str = "nvidia";
             break;
         default:
@@ -55,11 +55,11 @@ public:
         return std::string(type_str) + ":" + std::to_string(id_);
     }
 
-    bool isHost() const { return type_ == NEOLLM_DEVICE_CPU; }
+    bool isHost() const { return type_ == ZEDINFER_DEVICE_CPU; }
     bool isAccelerator() const { return !isHost(); }
 
 private:
-    NeollmDeviceType_t type_;
+    zedinferDeviceType_t type_;
     int id_;
 
     void validate() const {
@@ -69,4 +69,4 @@ private:
     }
 };
 
-} // namespace neollm::device
+} // namespace zedinfer::device

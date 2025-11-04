@@ -1,14 +1,14 @@
 #include "backend/core/context/context.hpp"
 #include "backend/core/runtime/runtime.hpp"
 #include "backend/core/storage/storage.hpp" // IWYU pragma: keep
-#include "neollm.h"
 #include "utils/check.hpp"
+#include "zedinfer.h"
 
 #include <gtest/gtest.h>
 #include <unordered_map>
 #include <vector>
 
-namespace neollm::test {
+namespace zedinfer::test {
 // 全局 Mock 状态
 struct MockState {
     std::unordered_map<void *, size_t> allocated_memory;
@@ -85,8 +85,8 @@ static void mock_stream_synchronize(void *stream) {
 }
 
 // 创建 Mock API
-static NeollmRuntimeAPI createMockAPI() {
-    NeollmRuntimeAPI api;
+static ZedinferRuntimeAPI createMockAPI() {
+    ZedinferRuntimeAPI api;
     api.malloc_device = mock_malloc_device;
     api.free_device = mock_free_device;
     api.malloc_host = mock_malloc_host;
@@ -99,22 +99,22 @@ static NeollmRuntimeAPI createMockAPI() {
     return api;
 }
 
-} // namespace neollm::test
+} // namespace zedinfer::test
 
-namespace neollm::device {
-static NeollmRuntimeAPI g_mock_api = neollm::test::createMockAPI();
+namespace zedinfer::device {
+static ZedinferRuntimeAPI g_mock_api = zedinfer::test::createMockAPI();
 
-const NeollmRuntimeAPI *getRuntimeAPI(NeollmDeviceType_t device) {
-    ASSERT(device == NEOLLM_DEVICE_CPU, "Only support CPU in test");
+const ZedinferRuntimeAPI *getRuntimeAPI(zedinferDeviceType_t device) {
+    ASSERT(device == ZEDINFER_DEVICE_CPU, "Only support CPU in test");
     return &g_mock_api;
 }
-} // namespace neollm::device
+} // namespace zedinfer::device
 
 // ============================================================================
 // Storage 测试
 // ============================================================================
-using namespace neollm::core;
-using namespace neollm::test;
+using namespace zedinfer::core;
+using namespace zedinfer::test;
 
 class StorageTest : public ::testing::Test {
 protected:
@@ -132,7 +132,7 @@ protected:
 
 TEST_F(StorageTest, DeviceStorageCreation) {
     Context &ctx = context();
-    ctx.setDevice(NEOLLM_DEVICE_CPU, 0);
+    ctx.setDevice(ZEDINFER_DEVICE_CPU, 0);
 
     size_t size = 1024 * 1024; // 1MB
     auto storage = ctx.runtime().allocateDeviceStorage(size);
@@ -141,7 +141,7 @@ TEST_F(StorageTest, DeviceStorageCreation) {
     EXPECT_NE(storage->memory(), nullptr);
     EXPECT_GE(storage->size(), size);
     EXPECT_FALSE(storage->isHost());
-    EXPECT_EQ(storage->deviceType(), NEOLLM_DEVICE_CPU);
+    EXPECT_EQ(storage->deviceType(), ZEDINFER_DEVICE_CPU);
     EXPECT_EQ(storage->deviceId(), 0);
 
     storage.reset();
@@ -150,7 +150,7 @@ TEST_F(StorageTest, DeviceStorageCreation) {
 
 TEST_F(StorageTest, HostStorageCreation) {
     Context &ctx = context();
-    ctx.setDevice(NEOLLM_DEVICE_CPU, 0);
+    ctx.setDevice(ZEDINFER_DEVICE_CPU, 0);
 
     size_t size = 2 * 1024 * 1024; // 2MB
     auto storage = ctx.runtime().allocateHostStorage(size);
@@ -159,7 +159,7 @@ TEST_F(StorageTest, HostStorageCreation) {
     EXPECT_NE(storage->memory(), nullptr);
     EXPECT_EQ(storage->size(), size);
     EXPECT_TRUE(storage->isHost());
-    EXPECT_EQ(storage->deviceType(), NEOLLM_DEVICE_CPU);
+    EXPECT_EQ(storage->deviceType(), ZEDINFER_DEVICE_CPU);
     EXPECT_EQ(storage->deviceId(), 0);
 
     storage.reset();
@@ -168,7 +168,7 @@ TEST_F(StorageTest, HostStorageCreation) {
 
 TEST_F(StorageTest, StorageAutoRelease) {
     Context &ctx = context();
-    ctx.setDevice(NEOLLM_DEVICE_CPU, 0);
+    ctx.setDevice(ZEDINFER_DEVICE_CPU, 0);
 
     size_t count_before = g_mock_state.getAllocatedCount();
 
@@ -184,7 +184,7 @@ TEST_F(StorageTest, StorageAutoRelease) {
 
 TEST_F(StorageTest, MultipleStorages) {
     Context &ctx = context();
-    ctx.setDevice(NEOLLM_DEVICE_CPU, 0);
+    ctx.setDevice(ZEDINFER_DEVICE_CPU, 0);
 
     std::vector<storage_t> storages;
 
@@ -206,7 +206,7 @@ TEST_F(StorageTest, MultipleStorages) {
 
 TEST_F(StorageTest, StorageMemoryAccess) {
     Context &ctx = context();
-    ctx.setDevice(NEOLLM_DEVICE_CPU, 0);
+    ctx.setDevice(ZEDINFER_DEVICE_CPU, 0);
 
     auto storage = ctx.runtime().allocateDeviceStorage(1024);
 
@@ -229,12 +229,12 @@ TEST_F(StorageTest, StorageOnDifferentDevices) {
     Context &ctx = context();
 
     // 在设备 0 上分配
-    ctx.setDevice(NEOLLM_DEVICE_CPU, 0);
+    ctx.setDevice(ZEDINFER_DEVICE_CPU, 0);
     auto storage0 = ctx.runtime().allocateDeviceStorage(1024);
     EXPECT_EQ(storage0->deviceId(), 0);
 
     // 在设备 1 上分配
-    ctx.setDevice(NEOLLM_DEVICE_CPU, 1);
+    ctx.setDevice(ZEDINFER_DEVICE_CPU, 1);
     auto storage1 = ctx.runtime().allocateDeviceStorage(1024);
     EXPECT_EQ(storage1->deviceId(), 1);
 

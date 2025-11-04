@@ -1,21 +1,21 @@
-#include "neollm/engine.hpp"
+#include "zedinfer/engine.hpp"
 #include "backend/device/device.hpp"
 #include "backend/kvcache/base.hpp"
 #include "backend/kvcache/dynamic.hpp"
 #include "frontend/graph/builder.hpp"
 #include "frontend/sampler/sampler.hpp"
 #include "frontend/tokenizer/hf_tokenizer.hpp"
-#include "neollm/activation.hpp"
-#include "neollm/session.hpp"
 #include "utils/logging.hpp"
 #include "utils/types.hpp"
+#include "zedinfer/activation.hpp"
+#include "zedinfer/session.hpp"
 
 #include <chrono>
 #include <memory>
 #include <plog/Log.h>
 #include <stdexcept>
 
-namespace neollm {
+namespace zedinfer {
 
 // ============================================================================
 // InferenceEngine
@@ -330,4 +330,4 @@ void InferenceEngine::warmup(size_t prefill_len, size_t decode_steps) {
     LOGI << "[Engine] Warmup complete in " << warmup_time << " ms";
 }
 
-} // namespace neollm
+} // namespace zedinfer

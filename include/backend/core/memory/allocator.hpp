@@ -2,21 +2,21 @@
 
 #include "backend/core/memory/memory_pool.hpp"
 #include "backend/device/runtime_api.hpp"
-#include "neollm.h"
+#include "zedinfer.h"
 
 #include <cstddef>
 #include <memory>
 
-namespace neollm::core::memory {
+namespace zedinfer::core::memory {
 
 class MemoryAllocator {
 protected:
-    const NeollmRuntimeAPI *api_;
-    NeollmDeviceType_t device_type_;
+    const ZedinferRuntimeAPI *api_;
+    zedinferDeviceType_t device_type_;
     int device_id_;
     std::unique_ptr<MemoryPool> memory_pool_;
 
-    MemoryAllocator(const NeollmRuntimeAPI *api, NeollmDeviceType_t device_type, int device_id)
+    MemoryAllocator(const ZedinferRuntimeAPI *api, zedinferDeviceType_t device_type, int device_id)
         : api_(api), device_type_(device_type), device_id_(device_id) {}
 
 public:
@@ -34,7 +34,7 @@ public:
 
     // Device info.
     int deviceId() const { return device_id_; }
-    const NeollmRuntimeAPI *api() const { return api_; }
+    const ZedinferRuntimeAPI *api() const { return api_; }
 };
 
-} // namespace neollm::core::memory
+} // namespace zedinfer::core::memory

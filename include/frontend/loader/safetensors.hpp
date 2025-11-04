@@ -1,7 +1,7 @@
 #pragma once
 
 #include "interface.hpp"
-#include "neollm.h"
+#include "zedinfer.h"
 
 #include <memory>
 #include <unordered_map>
@@ -10,7 +10,7 @@
 #include <windows.h>
 #endif
 
-namespace neollm::loader {
+namespace zedinfer::loader {
 
 // Represents a single .safetensors file using memory mapping
 class SafeTensorFile : public IModelFile {
@@ -28,7 +28,7 @@ private:
     int fd;
 #endif
 
-    NeollmDataType_t parse_dtype(const std::string &dtype_str);
+    zedinferDataType_t parse_dtype(const std::string &dtype_str);
     void load_metadata(); // Parses header and populates `tensors`
     void open_mmap();     // Maps file into memory
     void close_mmap();    // Unmaps file and releases resources
@@ -72,4 +72,4 @@ public:
     size_t get_num_files() const override;
 };
 
-} // namespace neollm::loader
+} // namespace zedinfer::loader

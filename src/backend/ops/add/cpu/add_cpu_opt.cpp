@@ -3,7 +3,7 @@
 #include <immintrin.h>
 #include <omp.h>
 
-void add_bf16(neollm::bf16_t *c, const neollm::bf16_t *a, const neollm::bf16_t *b, size_t numel) {
+void add_bf16(zedinfer::bf16_t *c, const zedinfer::bf16_t *a, const zedinfer::bf16_t *b, size_t numel) {
 #if defined(__AVX512F__)
     // AVX512 implementation: process 16 bf16 elements at once (converted to fp32 for addition)
     size_t mod = numel % 16;
@@ -41,22 +41,22 @@ void add_bf16(neollm::bf16_t *c, const neollm::bf16_t *a, const neollm::bf16_t *
 
     // Handle remaining elements (< 16) using scalar conversion
     for (size_t i = align; i < numel; ++i) {
-        float f_a = neollm::utils::cast<float>(a[i]);
-        float f_b = neollm::utils::cast<float>(b[i]);
-        c[i] = neollm::utils::cast<neollm::bf16_t>(f_a + f_b);
+        float f_a = zedinfer::utils::cast<float>(a[i]);
+        float f_b = zedinfer::utils::cast<float>(b[i]);
+        c[i] = zedinfer::utils::cast<zedinfer::bf16_t>(f_a + f_b);
     }
 #else
     // Fallback: scalar implementation with OpenMP parallelization for general CPUs
 #pragma omp parallel for
     for (size_t i = 0; i < numel; ++i) {
-        float f_a = neollm::utils::cast<float>(a[i]);
-        float f_b = neollm::utils::cast<float>(b[i]);
-        c[i] = neollm::utils::cast<neollm::bf16_t>(f_a + f_b);
+        float f_a = zedinfer::utils::cast<float>(a[i]);
+        float f_b = zedinfer::utils::cast<float>(b[i]);
+        c[i] = zedinfer::utils::cast<zedinfer::bf16_t>(f_a + f_b);
     }
 #endif
 }
 
-void add_f16(neollm::fp16_t *c, const neollm::fp16_t *a, const neollm::fp16_t *b, size_t numel) {
+void add_f16(zedinfer::fp16_t *c, const zedinfer::fp16_t *a, const zedinfer::fp16_t *b, size_t numel) {
 #if defined(__AVX512F__) && defined(__F16C__)
     // AVX512 + F16C implementation: Process 16 fp16 elements in parallel using native conversion
     size_t mod = numel % 16;
@@ -84,17 +84,17 @@ void add_f16(neollm::fp16_t *c, const neollm::fp16_t *a, const neollm::fp16_t *b
 
     // Handle remaining elements (< 16) with scalar fallback
     for (size_t i = align; i < numel; ++i) {
-        float f_a = neollm::utils::cast<float>(a[i]);
-        float f_b = neollm::utils::cast<float>(b[i]);
-        c[i] = neollm::utils::cast<neollm::fp16_t>(f_a + f_b);
+        float f_a = zedinfer::utils::cast<float>(a[i]);
+        float f_b = zedinfer::utils::cast<float>(b[i]);
+        c[i] = zedinfer::utils::cast<zedinfer::fp16_t>(f_a + f_b);
     }
 #else
     // Fallback: Scalar implementation with OpenMP parallelization for platforms without F16C support
 #pragma omp parallel for
     for (size_t i = 0; i < numel; ++i) {
-        float f_a = neollm::utils::cast<float>(a[i]);
-        float f_b = neollm::utils::cast<float>(b[i]);
-        c[i] = neollm::utils::cast<neollm::fp16_t>(f_a + f_b);
+        float f_a = zedinfer::utils::cast<float>(a[i]);
+        float f_b = zedinfer::utils::cast<float>(b[i]);
+        c[i] = zedinfer::utils::cast<zedinfer::fp16_t>(f_a + f_b);
     }
 #endif
 }

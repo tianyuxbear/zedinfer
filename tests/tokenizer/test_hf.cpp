@@ -4,14 +4,14 @@
 #include <string>
 #include <vector>
 
-using namespace neollm::tokenizer;
+using namespace zedinfer::tokenizer;
 
 const std::string tokenizer_json_path("/home/xiongtianyu/data/models/deepseek-ai/"
                                       "DeepSeek-R1-Distill-Qwen-1.5B/tokenizer.json");
 
 class HFTokenizerTest : public ::testing::Test {
 protected:
-    std::unique_ptr<Tokenizer> tokenizer;
+    std::shared_ptr<Tokenizer> tokenizer;
 
     void SetUp() override {
         tokenizer = HFTokenizer::create(tokenizer_json_path);

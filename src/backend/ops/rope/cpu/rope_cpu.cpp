@@ -28,28 +28,28 @@ void rope_(T *out, const T *in, const int64_t *pos_ids, float theta, size_t seql
                 double cos_val = std::cos(angle);
                 double sin_val = std::sin(angle);
 
-                double a = neollm::utils::cast<double>(in_t[k]);
-                double b = neollm::utils::cast<double>(in_t[k + half_d]);
-                out_t[k] = neollm::utils::cast<T>(a * cos_val - b * sin_val);
-                out_t[k + half_d] = neollm::utils::cast<T>(b * cos_val + a * sin_val);
+                double a = zedinfer::utils::cast<double>(in_t[k]);
+                double b = zedinfer::utils::cast<double>(in_t[k + half_d]);
+                out_t[k] = zedinfer::utils::cast<T>(a * cos_val - b * sin_val);
+                out_t[k + half_d] = zedinfer::utils::cast<T>(b * cos_val + a * sin_val);
             }
         }
     }
 }
 
-namespace neollm::ops::cpu {
-void rope(std::byte *out, const std::byte *in, const std::byte *pos_ids, float theta, NeollmDataType_t type, size_t seqlen, size_t nhead, size_t d) {
+namespace zedinfer::ops::cpu {
+void rope(std::byte *out, const std::byte *in, const std::byte *pos_ids, float theta, zedinferDataType_t type, size_t seqlen, size_t nhead, size_t d) {
     switch (type) {
-    case NEOLLM_DTYPE_F32:
+    case ZEDINFER_DTYPE_F32:
         return rope_(reinterpret_cast<float *>(out), reinterpret_cast<const float *>(in), reinterpret_cast<const int64_t *>(pos_ids), theta, seqlen, nhead, d);
-    case NEOLLM_DTYPE_BF16:
-        return rope_(reinterpret_cast<neollm::bf16_t *>(out), reinterpret_cast<const neollm::bf16_t *>(in),
+    case ZEDINFER_DTYPE_BF16:
+        return rope_(reinterpret_cast<zedinfer::bf16_t *>(out), reinterpret_cast<const zedinfer::bf16_t *>(in),
                      reinterpret_cast<const int64_t *>(pos_ids), theta, seqlen, nhead, d);
-    case NEOLLM_DTYPE_F16:
-        return rope_(reinterpret_cast<neollm::fp16_t *>(out), reinterpret_cast<const neollm::fp16_t *>(in),
+    case ZEDINFER_DTYPE_F16:
+        return rope_(reinterpret_cast<zedinfer::fp16_t *>(out), reinterpret_cast<const zedinfer::fp16_t *>(in),
                      reinterpret_cast<const int64_t *>(pos_ids), theta, seqlen, nhead, d);
     default:
         EXCEPTION_UNSUPPORTED_DATATYPE(type);
     }
 }
-} // namespace neollm::ops::cpu
+} // namespace zedinfer::ops::cpu

@@ -5,7 +5,7 @@
 #include <gtest/gtest.h>
 #include <vector>
 
-using namespace neollm::core::memory;
+using namespace zedinfer::core::memory;
 
 // Test Fixture for memory pool tests
 class MemoryPoolTest : public ::testing::Test {

@@ -4,7 +4,7 @@
 #include <algorithm>
 #include <cstdint>
 
-namespace neollm::core::memory {
+namespace zedinfer::core::memory {
 
 MemoryBlock::MemoryBlock(std::byte *ptr, size_t size, std::byte *base_ptr)
     : ptr(ptr), size(size), in_use(false), base_ptr(base_ptr ? base_ptr : ptr) {}
@@ -410,4 +410,4 @@ void BestFitMemoryPool::tryReclaimMemory() {
     }
 }
 
-} // namespace neollm::core::memory
+} // namespace zedinfer::core::memory

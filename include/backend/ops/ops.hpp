@@ -2,7 +2,7 @@
 
 #include "backend/tensor/tensor.hpp"
 
-namespace neollm::ops {
+namespace zedinfer::ops {
 
 void add(tensor_t c, tensor_t a, tensor_t b);
 void argmax(tensor_t max_idx, tensor_t max_val, tensor_t vals);
@@ -14,4 +14,4 @@ void rope(tensor_t out, tensor_t in, tensor_t pos_ids, float theta);
 void self_attention(tensor_t attn_val, tensor_t q, tensor_t k, tensor_t v, float scale);
 void swiglu(tensor_t out, tensor_t gate, tensor_t up);
 
-} // namespace neollm::ops
+} // namespace zedinfer::ops

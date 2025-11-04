@@ -2,7 +2,7 @@
 
 #include <vector>
 
-namespace neollm {
+namespace zedinfer {
 
 namespace ops {
 inline size_t indexToOffset(
@@ -19,4 +19,4 @@ inline size_t indexToOffset(
 }
 } // namespace ops
 
-} // namespace neollm
+} // namespace zedinfer

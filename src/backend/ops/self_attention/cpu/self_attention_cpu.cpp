@@ -45,8 +45,8 @@ void self_attention_(T *attn_val, const T *q, const T *k, const T *v, float scal
 
 #pragma omp simd reduction(+ : dot)
                 for (size_t dim = 0; dim < d; ++dim) {
-                    float q_val = neollm::utils::cast<float>(q[q_base + dim]);
-                    float k_val = neollm::utils::cast<float>(k[k_base + dim]);
+                    float q_val = zedinfer::utils::cast<float>(q[q_base + dim]);
+                    float k_val = zedinfer::utils::cast<float>(k[k_base + dim]);
                     dot += q_val * k_val;
                 }
                 scores[j] = dot * scale; // scale factor
@@ -69,7 +69,7 @@ void self_attention_(T *attn_val, const T *q, const T *k, const T *v, float scal
 #pragma omp simd reduction(+ : out_val)
                 for (size_t j = 0; j < causal_end; ++j) {
                     const size_t v_idx = j * nkvhead * dv + kvh * dv + dv_dim;
-                    const float v_val = neollm::utils::cast<float>(v[v_idx]);
+                    const float v_val = zedinfer::utils::cast<float>(v[v_idx]);
                     out_val += scores[j] * v_val;
                 }
 
@@ -77,8 +77,8 @@ void self_attention_(T *attn_val, const T *q, const T *k, const T *v, float scal
                 out_val /= exp_sum; // finalize softmax
 
                 /* down-cast if necessary */
-                if constexpr (std::is_same_v<T, neollm::bf16_t> || std::is_same_v<T, neollm::fp16_t>) {
-                    attn_val[attn_idx] = neollm::utils::cast<T>(out_val);
+                if constexpr (std::is_same_v<T, zedinfer::bf16_t> || std::is_same_v<T, zedinfer::fp16_t>) {
+                    attn_val[attn_idx] = zedinfer::utils::cast<T>(out_val);
                 } else {
                     attn_val[attn_idx] = out_val;
                 }
@@ -87,19 +87,19 @@ void self_attention_(T *attn_val, const T *q, const T *k, const T *v, float scal
     }
 }
 
-namespace neollm::ops::cpu {
-void self_attention(std::byte *attn_val, const std::byte *q, const std::byte *k, const std::byte *v, float scale, NeollmDataType_t type, size_t seqlen, size_t nhead, size_t dv, size_t total_len, size_t nkvhead, size_t d) {
+namespace zedinfer::ops::cpu {
+void self_attention(std::byte *attn_val, const std::byte *q, const std::byte *k, const std::byte *v, float scale, zedinferDataType_t type, size_t seqlen, size_t nhead, size_t dv, size_t total_len, size_t nkvhead, size_t d) {
     switch (type) {
-    case NEOLLM_DTYPE_F32:
+    case ZEDINFER_DTYPE_F32:
         return self_attention_(reinterpret_cast<float *>(attn_val), reinterpret_cast<const float *>(q), reinterpret_cast<const float *>(k), reinterpret_cast<const float *>(v), scale, seqlen, nhead, dv, total_len, nkvhead, d);
-    case NEOLLM_DTYPE_BF16:
-        return self_attention_(reinterpret_cast<neollm::bf16_t *>(attn_val), reinterpret_cast<const neollm::bf16_t *>(q),
-                               reinterpret_cast<const neollm::bf16_t *>(k), reinterpret_cast<const neollm::bf16_t *>(v), scale, seqlen, nhead, dv, total_len, nkvhead, d);
-    case NEOLLM_DTYPE_F16:
-        return self_attention_(reinterpret_cast<neollm::fp16_t *>(attn_val), reinterpret_cast<const neollm::fp16_t *>(q),
-                               reinterpret_cast<const neollm::fp16_t *>(k), reinterpret_cast<const neollm::fp16_t *>(v), scale, seqlen, nhead, dv, total_len, nkvhead, d);
+    case ZEDINFER_DTYPE_BF16:
+        return self_attention_(reinterpret_cast<zedinfer::bf16_t *>(attn_val), reinterpret_cast<const zedinfer::bf16_t *>(q),
+                               reinterpret_cast<const zedinfer::bf16_t *>(k), reinterpret_cast<const zedinfer::bf16_t *>(v), scale, seqlen, nhead, dv, total_len, nkvhead, d);
+    case ZEDINFER_DTYPE_F16:
+        return self_attention_(reinterpret_cast<zedinfer::fp16_t *>(attn_val), reinterpret_cast<const zedinfer::fp16_t *>(q),
+                               reinterpret_cast<const zedinfer::fp16_t *>(k), reinterpret_cast<const zedinfer::fp16_t *>(v), scale, seqlen, nhead, dv, total_len, nkvhead, d);
     default:
         EXCEPTION_UNSUPPORTED_DATATYPE(type);
     }
 }
-} // namespace neollm::ops::cpu
+} // namespace zedinfer::ops::cpu

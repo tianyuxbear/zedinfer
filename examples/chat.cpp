@@ -1,9 +1,9 @@
 #include "backend/device/device.hpp"
-#include "neollm.h"
-#include "neollm/engine.hpp"
-#include "neollm/session.hpp"
 #include "utils/logging.hpp"
 #include "utils/system_info.hpp"
+#include "zedinfer.h"
+#include "zedinfer/engine.hpp"
+#include "zedinfer/session.hpp"
 
 #include <cstddef>
 #include <cstdlib>
@@ -13,7 +13,7 @@
 #include <string>
 
 namespace fs = std::filesystem;
-using namespace neollm;
+using namespace zedinfer;
 
 std::string get_usage_message(const char *program_name) {
     std::ostringstream oss;
@@ -44,7 +44,7 @@ std::string get_welcome_message() {
     oss << "\n";
     oss << "╔══════════════════════════════════════════════════════════════╗\n";
     oss << "║                                                              ║\n";
-    oss << "║              🚀 Welcome to NeoLLM Inference Engine           ║\n";
+    oss << "║             🚀 Welcome to ZedInfer Inference Engine          ║\n";
     oss << "║                                                              ║\n";
     oss << "╚══════════════════════════════════════════════════════════════╝\n";
     oss << "\n";
@@ -97,14 +97,14 @@ int main(int argc, char *argv[]) {
     std::string model_path = model_path_fs.string();
 
     // Initialize inference engine
-    device::Device device(NEOLLM_DEVICE_CPU, 0);
+    device::Device device(ZEDINFER_DEVICE_CPU, 0);
     size_t max_prefill_len = 128;
-    std::shared_ptr<neollm::InferenceEngine>
-        engine = neollm::InferenceEngine::create(model_path, device, max_prefill_len);
+    std::shared_ptr<zedinfer::InferenceEngine>
+        engine = zedinfer::InferenceEngine::create(model_path, device, max_prefill_len);
 
     // Configure generation parameters
-    neollm::GenerationConfig gen_config;
-    gen_config.gen_mode = neollm::GenerationMode::CHAT;
+    zedinfer::GenerationConfig gen_config;
+    gen_config.gen_mode = zedinfer::GenerationMode::CHAT;
     gen_config.max_new_tokens = 16384;
     gen_config.verbose = true;
     gen_config.print_stats = true;
@@ -178,6 +178,6 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    PLOG_VERBOSE_(utils::BOTH) << "\n👋 Goodbye! Thanks for using NeoLLM.";
+    PLOG_VERBOSE_(utils::BOTH) << "\n👋 Goodbye! Thanks for using ZedInfer.";
     return 0;
 }

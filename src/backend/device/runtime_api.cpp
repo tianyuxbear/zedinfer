@@ -1,16 +1,16 @@
 #include "backend/device/runtime_api.hpp"
 #include "utils/check.hpp"
 
-namespace neollm::device {
+namespace zedinfer::device {
 
 // Returns the runtime API for the given device type
-const NeollmRuntimeAPI *getRuntimeAPI(NeollmDeviceType_t device_type) {
+const ZedinferRuntimeAPI *getRuntimeAPI(zedinferDeviceType_t device_type) {
     switch (device_type) {
-    case NEOLLM_DEVICE_CPU:
-        return neollm::device::cpu::getRuntimeAPI();
+    case ZEDINFER_DEVICE_CPU:
+        return zedinfer::device::cpu::getRuntimeAPI();
 #ifdef ENABLE_NVIDIA_API
-    case NEOLLM_DEVICE_NVIDIA:
-        return neollm::device::nvidia::getRuntimeAPI();
+    case ZEDINFER_DEVICE_NVIDIA:
+        return zedinfer::device::nvidia::getRuntimeAPI();
 #endif
     default:
         EXCEPTION_UNSUPPORTED_DEVICE;
@@ -18,4 +18,4 @@ const NeollmRuntimeAPI *getRuntimeAPI(NeollmDeviceType_t device_type) {
     }
 }
 
-} // namespace neollm::device
+} // namespace zedinfer::device

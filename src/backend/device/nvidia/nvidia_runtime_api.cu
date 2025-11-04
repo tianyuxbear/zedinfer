@@ -1,12 +1,12 @@
 #include "backend/device/runtime_api.hpp"
-#include "neollm.h"
 #include "utils/check.hpp"
+#include "zedinfer.h"
 
 #include <cstdlib>
 #include <cstring>
 #include <cuda_runtime.h>
 
-namespace neollm::device::nvidia {
+namespace zedinfer::device::nvidia {
 
 namespace runtime_api {
 
@@ -24,19 +24,19 @@ void deviceSynchronize() {
     cudaDeviceSynchronize();
 }
 
-NeollmStream_t createStream() {
+zedinferStream_t createStream() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
-    return reinterpret_cast<NeollmStream_t>(stream);
+    return reinterpret_cast<zedinferStream_t>(stream);
 }
 
-void destroyStream(NeollmStream_t stream) {
+void destroyStream(zedinferStream_t stream) {
     if (stream != nullptr) {
         cudaStreamDestroy(reinterpret_cast<cudaStream_t>(stream));
     }
 }
 
-void streamSynchronize(NeollmStream_t stream) {
+void streamSynchronize(zedinferStream_t stream) {
     if (stream != nullptr) {
         cudaStreamSynchronize(reinterpret_cast<cudaStream_t>(stream));
     }
@@ -66,19 +66,19 @@ void freeHost(void *ptr) {
     }
 }
 
-void memcpySync(void *dst, const void *src, size_t size, NeollmMemcpyKind_t kind) {
+void memcpySync(void *dst, const void *src, size_t size, zedinferMemcpyKind_t kind) {
     cudaMemcpyKind cuda_kind;
     switch (kind) {
-    case NEOLLM_MEMCPY_H2D:
+    case ZEDINFER_MEMCPY_H2D:
         cuda_kind = cudaMemcpyHostToDevice;
         break;
-    case NEOLLM_MEMCPY_D2H:
+    case ZEDINFER_MEMCPY_D2H:
         cuda_kind = cudaMemcpyDeviceToHost;
         break;
-    case NEOLLM_MEMCPY_D2D:
+    case ZEDINFER_MEMCPY_D2D:
         cuda_kind = cudaMemcpyDeviceToDevice;
         break;
-    case NEOLLM_MEMCPY_H2H:
+    case ZEDINFER_MEMCPY_H2H:
         cuda_kind = cudaMemcpyHostToHost;
         break;
     default:
@@ -88,19 +88,19 @@ void memcpySync(void *dst, const void *src, size_t size, NeollmMemcpyKind_t kind
     cudaMemcpy(dst, src, size, cuda_kind);
 }
 
-void memcpyAsync(void *dst, const void *src, size_t size, NeollmMemcpyKind_t kind, NeollmStream_t stream) {
+void memcpyAsync(void *dst, const void *src, size_t size, zedinferMemcpyKind_t kind, zedinferStream_t stream) {
     cudaMemcpyKind cuda_kind;
     switch (kind) {
-    case NEOLLM_MEMCPY_H2D:
+    case ZEDINFER_MEMCPY_H2D:
         cuda_kind = cudaMemcpyHostToDevice;
         break;
-    case NEOLLM_MEMCPY_D2H:
+    case ZEDINFER_MEMCPY_D2H:
         cuda_kind = cudaMemcpyDeviceToHost;
         break;
-    case NEOLLM_MEMCPY_D2D:
+    case ZEDINFER_MEMCPY_D2D:
         cuda_kind = cudaMemcpyDeviceToDevice;
         break;
-    case NEOLLM_MEMCPY_H2H:
+    case ZEDINFER_MEMCPY_H2H:
         cuda_kind = cudaMemcpyHostToHost;
         break;
     default:
@@ -110,7 +110,7 @@ void memcpyAsync(void *dst, const void *src, size_t size, NeollmMemcpyKind_t kin
     cudaMemcpyAsync(dst, src, size, cuda_kind, reinterpret_cast<cudaStream_t>(stream));
 }
 
-static const NeollmRuntimeAPI RUNTIME_API = {
+static const ZedinferRuntimeAPI RUNTIME_API = {
     &getDeviceCount,
     &setDevice,
     &deviceSynchronize,
@@ -126,8 +126,8 @@ static const NeollmRuntimeAPI RUNTIME_API = {
 
 } // namespace runtime_api
 
-const NeollmRuntimeAPI *getRuntimeAPI() {
+const ZedinferRuntimeAPI *getRuntimeAPI() {
     return &runtime_api::RUNTIME_API;
 }
 
-} // namespace neollm::device::nvidia
+} // namespace zedinfer::device::nvidia

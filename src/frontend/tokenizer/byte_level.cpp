@@ -5,7 +5,7 @@
 #include <plog/Log.h>
 #include <vector>
 
-namespace neollm::tokenizer {
+namespace zedinfer::tokenizer {
 
 // Static member definitions.
 const std::unordered_map<unsigned char, std::string>
@@ -132,4 +132,4 @@ void ByteLevel::apply_byte_level_mapping(icu::UnicodeString &uText) {
     uText.findAndReplace(icu::UnicodeString("\t"), icu::UnicodeString("ĉ")); // tab
 }
 
-} // namespace neollm::tokenizer
+} // namespace zedinfer::tokenizer

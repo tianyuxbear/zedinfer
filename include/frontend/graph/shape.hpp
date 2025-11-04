@@ -5,7 +5,7 @@
 #include <stdexcept>
 #include <vector>
 
-namespace neollm::graph {
+namespace zedinfer::graph {
 
 // Type of shape dimension
 enum class ShapeDimType {
@@ -85,4 +85,4 @@ struct ShapeTemplate {
     }
 };
 
-} // namespace neollm::graph
+} // namespace zedinfer::graph

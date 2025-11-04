@@ -4,7 +4,7 @@
 
 #include "utils/check.hpp"
 
-namespace neollm::ops {
+namespace zedinfer::ops {
 void embedding(tensor_t out, tensor_t index, tensor_t weight) {
     CHECK_SAME_DEVICE(out, index, weight);
     // Only support contiguous inputs with same shape for now.
@@ -12,17 +12,17 @@ void embedding(tensor_t out, tensor_t index, tensor_t weight) {
     ASSERT(out->isContiguous() && index->isContiguous() && weight->isContiguous(), "Embedding: all tensors must be contiguous.");
 
     // always support cpu calculation
-    if (out->deviceType() == NEOLLM_DEVICE_CPU) {
+    if (out->deviceType() == ZEDINFER_DEVICE_CPU) {
         return cpu::embedding(out->data(), index->data(), weight->data(), out->dtype(), out->numel(), out->dim(1));
     }
 
-    neollm::core::context().setDevice(out->deviceType(), out->deviceId());
+    zedinfer::core::context().setDevice(out->deviceType(), out->deviceId());
 
     switch (out->deviceType()) {
-    case NEOLLM_DEVICE_CPU:
+    case ZEDINFER_DEVICE_CPU:
         return cpu::embedding(out->data(), index->data(), weight->data(), out->dtype(), out->numel(), out->dim(1));
 #ifdef ENABLE_NVIDIA_API
-    case NEOLLM_DEVICE_NVIDIA:
+    case ZEDINFER_DEVICE_NVIDIA:
         TO_BE_IMPLEMENTED();
         return;
 #endif
@@ -30,4 +30,4 @@ void embedding(tensor_t out, tensor_t index, tensor_t weight) {
         EXCEPTION_UNSUPPORTED_DEVICE;
     }
 }
-} // namespace neollm::ops
+} // namespace zedinfer::ops

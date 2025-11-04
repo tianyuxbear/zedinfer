@@ -1,11 +1,11 @@
-#include "neollm/session.hpp"
-#include "neollm/engine.hpp"
+#include "zedinfer/session.hpp"
+#include "zedinfer/engine.hpp"
 
 #include <iomanip>
 #include <random>
 #include <sstream>
 
-namespace neollm {
+namespace zedinfer {
 
 // ============================================================================
 // InferenceSession
@@ -71,4 +71,4 @@ void InferenceSession::reset() {
     is_first_turn_ = true;
 }
 
-} // namespace neollm
+} // namespace zedinfer

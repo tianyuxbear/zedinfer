@@ -11,7 +11,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace neollm::graph {
+namespace zedinfer::graph {
 
 // Compute graph node operation types
 enum class OpType {
@@ -146,4 +146,4 @@ private:
 
 using compute_graph_t = std::shared_ptr<ComputeGraph>;
 
-} // namespace neollm::graph
+} // namespace zedinfer::graph

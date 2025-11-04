@@ -1,21 +1,21 @@
 #include "backend/core/context/context.hpp"
 #include "backend/core/runtime/runtime.hpp"
 #include "backend/device/device.hpp"
-#include "neollm.h"
 #include "utils/check.hpp"
+#include "zedinfer.h"
 
 #include <memory>
 
-namespace neollm::core {
+namespace zedinfer::core {
 
 Context::Context() : current_runtime_(nullptr) {
     // Initialize with a CPU runtime.
-    auto runtime = Runtime::create(NEOLLM_DEVICE_CPU, 0);
+    auto runtime = Runtime::create(ZEDINFER_DEVICE_CPU, 0);
     current_runtime_ = runtime.get();
     runtime_map_[device::Device::cpu()] = std::move(runtime);
 }
 
-void Context::setDevice(NeollmDeviceType_t device_type, int device_id) {
+void Context::setDevice(zedinferDeviceType_t device_type, int device_id) {
     device::Device device(device_type, device_id);
     auto it = runtime_map_.find(device);
 
@@ -54,4 +54,4 @@ Context &context() {
     return thread_context;
 }
 
-} // namespace neollm::core
+} // namespace zedinfer::core

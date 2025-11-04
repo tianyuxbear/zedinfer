@@ -2,7 +2,6 @@
 #include <cstdio>
 #include <immintrin.h>
 
-namespace neollm::ops::cpu {
 float sdot(const float *x, const float *y, const size_t N) {
     size_t mod = N % 16;
     size_t align = N - mod;
@@ -21,4 +20,3 @@ float sdot(const float *x, const float *y, const size_t N) {
     }
     return sum;
 }
-} // namespace neollm::ops::cpu

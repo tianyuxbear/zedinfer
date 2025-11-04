@@ -1,6 +1,6 @@
 #include "frontend/loader/safetensors.hpp"
 #include "frontend/models/qwen2.hpp"
-#include "neollm.h"
+#include "zedinfer.h"
 #ifdef DEBUG
 #include "utils/system_info.hpp"
 #endif
@@ -14,10 +14,10 @@
 namespace fs = std::filesystem;
 using json = nlohmann::json;
 
-namespace neollm::model {
+namespace zedinfer::model {
 
 // Parse model config and weights, then instantiate the corresponding model.
-std::shared_ptr<Model> Model::parse(const std::string &model_path, NeollmDeviceType_t target_device) {
+std::shared_ptr<Model> Model::parse(const std::string &model_path, zedinferDeviceType_t target_device) {
     // Load model configuration
     std::string config_path = (fs::path(model_path) / "config.json").string();
     auto config = load_config(config_path);
@@ -25,7 +25,7 @@ std::shared_ptr<Model> Model::parse(const std::string &model_path, NeollmDeviceT
     // Load model weights from SafeTensors files
     auto weights = load_weights(model_path, target_device);
 
-    if (target_device == NEOLLM_DEVICE_CPU) {
+    if (target_device == ZEDINFER_DEVICE_CPU) {
         config->torch_dtype = "float32";
     }
 
@@ -90,10 +90,10 @@ std::unique_ptr<ModelConfig> Model::load_config(const std::string &config_path) 
 }
 
 // Load model weights using memory-mapped SafeTensors.
-std::unique_ptr<ModelWeights> Model::load_weights(const std::string &model_path, NeollmDeviceType_t target_device) {
+std::unique_ptr<ModelWeights> Model::load_weights(const std::string &model_path, zedinferDeviceType_t target_device) {
     auto load_start = std::chrono::high_resolution_clock::now();
 
-    auto loader = neollm::loader::SafeTensorsLoader::create(model_path);
+    auto loader = zedinfer::loader::SafeTensorsLoader::create(model_path);
 
     auto mmap_end = std::chrono::high_resolution_clock::now();
     auto mmap_time = std::chrono::duration<double>(mmap_end - load_start).count();
@@ -121,13 +121,13 @@ std::unique_ptr<ModelWeights> Model::load_weights(const std::string &model_path,
         auto tensor = Tensor::create(
             info->shape,
             info->dtype,
-            NEOLLM_DEVICE_CPU,
+            ZEDINFER_DEVICE_CPU,
             0,
             true, // is_mmap
             const_cast<std::byte *>(static_cast<const std::byte *>(data_ptr)));
 
-        if (target_device == NEOLLM_DEVICE_CPU) {
-            tensor = tensor->to(NEOLLM_DTYPE_F32);
+        if (target_device == ZEDINFER_DEVICE_CPU) {
+            tensor = tensor->to(ZEDINFER_DTYPE_F32);
             converted_count++;
         } else {
             tensor = tensor->to(target_device, 0);
@@ -154,4 +154,4 @@ std::string Model::map_weight_name(const std::string &raw_name) {
     return raw_name;
 }
 
-} // namespace neollm::model
+} // namespace zedinfer::model
