@@ -157,7 +157,7 @@ int main(int argc, char *argv[]) {
 
         // Handle clear/reset commands
         if (lower_input == "reset" || lower_input == "clear" || lower_input == "cls") {
-            session.reset();
+            session->reset();
             PLOG_VERBOSE_(utils::BOTH) << "✨ Chat history cleared.";
             continue;
         }
