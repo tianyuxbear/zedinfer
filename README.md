@@ -55,12 +55,23 @@ xmake run chat ./models/qwen2-1.5b
 - `clear`, `cls`, `reset`：清空对话历史
 - `help`：显示帮助信息
 
+> server1/2/3上的模型路径详见单次推理测试部分。
+
 #### 2️⃣ 单次推理测试
 ```bash
 xmake run ping
 ```
 
 > `ping` 命令使用内置模型与提示词进行快速验证。
+模型路径：
+```cpp
+// 模型路径
+static const std::string model_path = "/mnt/hdd0/shared/models/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"; // For server1
+// static const std::string model_path = "/mnt/hdd/shared/models/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"; // For server2/server3
+
+// 提示词
+std::string prompt = "Who are you?";
+```
 
 ### 📦 模型目录结构
 ```bash
@@ -108,10 +119,13 @@ zedinfer/
 ```bash
 xmake run -g test    # 运行全部测试
 # 运行特定模块测试
-xmake run test_loader
-xmake run test_tensor
-xmake run test_memorypool
+xmake run test-tokenizer
+xmake run test-loader
+xmake run test-memorypool
+xmake run test-storage
+xmake run test-tensor
 ```
+> `test-tokenizer`和`test-loader`部分需要设置模型路径，详见代码。
 
 ## ⚡ 性能参考
 | 模型         | 硬件             | Prefill 速度    | Decode 速度    |
