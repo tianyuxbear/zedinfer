@@ -10,7 +10,10 @@
 #include <memory>
 #include <string>
 
-static const std::string model_path = "/mnt/hdd/shared/models/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B";
+// For server1
+static const std::string model_path = "/mnt/hdd0/shared/models/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B";
+// For server2/server3
+// static const std::string model_path = "/mnt/hdd/shared/models/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B";
 
 using namespace zedinfer;
 

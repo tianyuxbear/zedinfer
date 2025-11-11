@@ -13,7 +13,11 @@ using namespace zedinfer::loader;
 
 class ModelLoaderTest : public ::testing::Test {
 protected:
-    std::string model_path = "/home/xiongtianyu/data/models/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B";
+    // For server1
+    std::string model_path = "/mnt/hdd0/shared/models/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B";
+    // For server2/server3
+    // std::string model_path = "/mnt/hdd/shared/models/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B";
+
     std::unique_ptr<IModelLoader> loader;
 
     void SetUp() override {

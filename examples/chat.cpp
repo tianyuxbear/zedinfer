@@ -51,9 +51,9 @@ std::string get_welcome_message() {
     oss << "💬 Ready for conversation! Type your message and press Enter.\n";
     oss << "\n";
     oss << "📝 Commands:\n";
-    oss << "   exit, quit, q     Exit the program\n";
-    oss << "   clear, cls        Clear conversation history\n";
-    oss << "   help              Show this help message\n";
+    oss << "   exit, quit, q        Exit the program\n";
+    oss << "   reset, clear, cls    Clear conversation history\n";
+    oss << "   help                 Show this help message\n";
     oss << "\n";
 
     return oss.str();

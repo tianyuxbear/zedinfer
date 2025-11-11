@@ -6,8 +6,10 @@
 
 using namespace zedinfer::tokenizer;
 
-const std::string tokenizer_json_path("/home/xiongtianyu/data/models/deepseek-ai/"
-                                      "DeepSeek-R1-Distill-Qwen-1.5B/tokenizer.json");
+// For server1
+const std::string tokenizer_json_path("/mnt/hdd0/shared/models/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B/tokenizer.json");
+// For server2/server3
+// const std::string tokenizer_json_path("/mnt/hdd/shared/models/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B/tokenizer.json");
 
 class HFTokenizerTest : public ::testing::Test {
 protected:
