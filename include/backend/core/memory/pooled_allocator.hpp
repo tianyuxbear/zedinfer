@@ -49,6 +49,9 @@ public:
 
     // Allocates memory from the pool, switching to the correct device context.
     std::byte *allocate(size_t size) override {
+        if (size == 0) {
+            return nullptr;
+        }
         core::context().setDevice(device_type_, device_id_);
         auto ptr = memory_pool_->allocate(size);
         ASSERT(ptr != nullptr, "Memory pool allocation failed: returned nullptr.");
