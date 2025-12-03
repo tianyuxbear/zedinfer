@@ -1,5 +1,6 @@
 #include "backend/core/context/context.hpp"
 #include "backend/ops/argmax/cpu/argmax_cpu.hpp"
+#include "backend/ops/argmax/nvidia/argmax_nvidia.cuh"
 #include "backend/ops/ops.hpp"
 #include "utils/check.hpp"
 
@@ -22,8 +23,7 @@ void argmax(tensor_t max_idx, tensor_t max_val, tensor_t vals) {
         return cpu::argmax(max_idx->data(), max_val->data(), vals->data(), vals->dtype(), vals->numel());
 #ifdef ENABLE_NVIDIA_API
     case ZEDINFER_DEVICE_NVIDIA:
-        TO_BE_IMPLEMENTED();
-        return;
+        return nvidia::argmax(max_idx->data(), max_val->data(), vals->data(), vals->dtype(), vals->numel());
 #endif
     default:
         EXCEPTION_UNSUPPORTED_DEVICE;

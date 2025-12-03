@@ -11,33 +11,28 @@
 #include <vector>
 
 template <typename T>
-void linear_(T *out, const T *in, const T *weight, const T *bias,
-             size_t nrow, size_t ncol_out, size_t ncol_in) {
-
-    const size_t M = nrow;
-    const size_t N = ncol_out;
-    const size_t K = ncol_in;
-
+void linear_(T *output, const T *input, const T *weight, const T *bias,
+             size_t M, size_t N, size_t K) {
     if constexpr (std::is_same_v<T, float>) {
         if (bias) {
             for (size_t i = 0; i < M; ++i) {
-                std::memcpy(out + i * N, bias, N * sizeof(T));
+                std::memcpy(output + i * N, bias, N * sizeof(T));
             }
         } else {
-            memset(out, 0, M * N * sizeof(T));
+            memset(output, 0, M * N * sizeof(T));
         }
         if (M == 1) {
-            vecmul(in, weight, out, N, K);
+            vecmul(input, weight, output, N, K);
         } else {
-            matmul(in, weight, out, M, N, K);
+            matmul(input, weight, output, M, N, K);
         }
 
     } else if constexpr (std::is_same_v<T, zedinfer::fp16_t>) {
-        std::vector<float> in_fp32(M * K);
+        std::vector<float> input_fp32(M * K);
         std::vector<float> weight_fp32(N * K);
-        std::vector<float> out_fp32(M * N, {});
+        std::vector<float> output_fp32(M * N, {});
 
-        zedinfer::utils::fp16_to_fp32_batch_f16c(in_fp32.data(), in, M * K);
+        zedinfer::utils::fp16_to_fp32_batch_f16c(input_fp32.data(), input, M * K);
         zedinfer::utils::fp16_to_fp32_batch_f16c(weight_fp32.data(), weight, N * K);
 
         if (bias) {
@@ -45,23 +40,23 @@ void linear_(T *out, const T *in, const T *weight, const T *bias,
             zedinfer::utils::fp16_to_fp32_batch_f16c(bias_fp32.data(), bias, N);
 
             for (size_t i = 0; i < M; ++i) {
-                std::memcpy(out_fp32.data() + i * N, bias_fp32.data(), N * sizeof(float));
+                std::memcpy(output_fp32.data() + i * N, bias_fp32.data(), N * sizeof(float));
             }
         }
 
         if (M == 1) {
-            vecmul(in_fp32.data(), weight_fp32.data(), out_fp32.data(), N, K);
+            vecmul(input_fp32.data(), weight_fp32.data(), output_fp32.data(), N, K);
         } else {
-            matmul(in_fp32.data(), weight_fp32.data(), out_fp32.data(), M, N, K);
+            matmul(input_fp32.data(), weight_fp32.data(), output_fp32.data(), M, N, K);
         }
 
-        zedinfer::utils::fp32_to_fp16_batch_f16c(out, out_fp32.data(), M * N);
+        zedinfer::utils::fp32_to_fp16_batch_f16c(output, output_fp32.data(), M * N);
     } else if constexpr (std::is_same_v<T, zedinfer::bf16_t>) {
-        std::vector<float> in_fp32(M * K);
+        std::vector<float> input_fp32(M * K);
         std::vector<float> weight_fp32(N * K);
-        std::vector<float> out_fp32(M * N, {});
+        std::vector<float> output_fp32(M * N, {});
 
-        zedinfer::utils::bf16_to_fp32_batch(in_fp32.data(), in, M * K);
+        zedinfer::utils::bf16_to_fp32_batch(input_fp32.data(), input, M * K);
         zedinfer::utils::bf16_to_fp32_batch(weight_fp32.data(), weight, N * K);
 
         if (bias) {
@@ -69,31 +64,31 @@ void linear_(T *out, const T *in, const T *weight, const T *bias,
             zedinfer::utils::bf16_to_fp32_batch(bias_fp32.data(), bias, N);
 
             for (size_t i = 0; i < M; ++i) {
-                std::memcpy(out_fp32.data() + i * N, bias_fp32.data(), N * sizeof(float));
+                std::memcpy(output_fp32.data() + i * N, bias_fp32.data(), N * sizeof(float));
             }
         }
 
         if (M == 1) {
-            vecmul(in_fp32.data(), weight_fp32.data(), out_fp32.data(), N, K);
+            vecmul(input_fp32.data(), weight_fp32.data(), output_fp32.data(), N, K);
         } else {
-            matmul(in_fp32.data(), weight_fp32.data(), out_fp32.data(), M, N, K);
+            matmul(input_fp32.data(), weight_fp32.data(), output_fp32.data(), M, N, K);
         }
 
-        zedinfer::utils::fp32_to_bf16_batch(out, out_fp32.data(), M * N);
+        zedinfer::utils::fp32_to_bf16_batch(output, output_fp32.data(), M * N);
     }
 }
 
 namespace zedinfer::ops::cpu {
-void linear(std::byte *out, const std::byte *in, const std::byte *weight, const std::byte *bias, zedinferDataType_t type, size_t nrow, size_t ncol_out, size_t ncol_in) {
+void linear(std::byte *output, const std::byte *input, const std::byte *weight, const std::byte *bias, zedinferDataType_t type, size_t M, size_t N, size_t K) {
     switch (type) {
     case ZEDINFER_DTYPE_F32:
-        return linear_(reinterpret_cast<float *>(out), reinterpret_cast<const float *>(in), reinterpret_cast<const float *>(weight), reinterpret_cast<const float *>(bias), nrow, ncol_out, ncol_in);
+        return linear_(reinterpret_cast<float *>(output), reinterpret_cast<const float *>(input), reinterpret_cast<const float *>(weight), reinterpret_cast<const float *>(bias), M, N, K);
     case ZEDINFER_DTYPE_BF16:
-        return linear_(reinterpret_cast<zedinfer::bf16_t *>(out), reinterpret_cast<const zedinfer::bf16_t *>(in),
-                       reinterpret_cast<const zedinfer::bf16_t *>(weight), reinterpret_cast<const zedinfer::bf16_t *>(bias), nrow, ncol_out, ncol_in);
+        return linear_(reinterpret_cast<zedinfer::bf16_t *>(output), reinterpret_cast<const zedinfer::bf16_t *>(input),
+                       reinterpret_cast<const zedinfer::bf16_t *>(weight), reinterpret_cast<const zedinfer::bf16_t *>(bias), M, N, K);
     case ZEDINFER_DTYPE_F16:
-        return linear_(reinterpret_cast<zedinfer::fp16_t *>(out), reinterpret_cast<const zedinfer::fp16_t *>(in),
-                       reinterpret_cast<const zedinfer::fp16_t *>(weight), reinterpret_cast<const zedinfer::fp16_t *>(bias), nrow, ncol_out, ncol_in);
+        return linear_(reinterpret_cast<zedinfer::fp16_t *>(output), reinterpret_cast<const zedinfer::fp16_t *>(input),
+                       reinterpret_cast<const zedinfer::fp16_t *>(weight), reinterpret_cast<const zedinfer::fp16_t *>(bias), M, N, K);
     default:
         EXCEPTION_UNSUPPORTED_DATATYPE(type);
     }

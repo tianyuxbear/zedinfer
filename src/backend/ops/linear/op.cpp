@@ -1,6 +1,7 @@
 #include "backend/core/context/context.hpp"
 #include "backend/core/core.hpp"
 #include "backend/ops/linear/cpu/linear_cpu.hpp"
+#include "backend/ops/linear/nvidia/linear_nvidia.cuh"
 #include "backend/ops/ops.hpp"
 #include "utils/check.hpp"
 
@@ -37,8 +38,7 @@ void linear(tensor_t out, tensor_t in, tensor_t weight, tensor_t bias) {
         return cpu::linear(out->data(), in->data(), weight->data(), bias_data, out->dtype(), out->dim(0), out->dim(1), in->dim(1));
 #ifdef ENABLE_NVIDIA_API
     case ZEDINFER_DEVICE_NVIDIA:
-        TO_BE_IMPLEMENTED();
-        return;
+        return nvidia::linear(out->data(), in->data(), weight->data(), bias_data, out->dtype(), out->dim(0), out->dim(1), in->dim(1));
 #endif
     default:
         EXCEPTION_UNSUPPORTED_DEVICE;

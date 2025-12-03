@@ -2,6 +2,7 @@
 #include "backend/core/core.hpp"
 #include "backend/ops/ops.hpp"
 #include "backend/ops/swiglu/cpu/swiglu_cpu.hpp"
+#include "backend/ops/swiglu/nvidia/swiglu_nvidia.cuh"
 #include "utils/check.hpp"
 
 namespace zedinfer::ops {
@@ -24,8 +25,7 @@ void swiglu(tensor_t out, tensor_t gate, tensor_t up) {
         return cpu::swiglu(out->data(), gate->data(), up->data(), out->dtype(), out->numel());
 #ifdef ENABLE_NVIDIA_API
     case ZEDINFER_DEVICE_NVIDIA:
-        TO_BE_IMPLEMENTED();
-        return;
+        return nvidia::swiglu(out->data(), gate->data(), up->data(), out->dtype(), out->numel());
 #endif
     default:
         EXCEPTION_UNSUPPORTED_DEVICE;

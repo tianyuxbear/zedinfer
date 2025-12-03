@@ -1,5 +1,6 @@
 #pragma once
 
+#include "types.hpp" // IWYU pragma: keep
 #include <iostream>  // IWYU pragma: keep
 #include <stdexcept> // IWYU pragma: keep
 
@@ -15,7 +16,7 @@
 #define EXCEPTION_UNSUPPORTED_DATATYPE(DT__)              \
     do {                                                  \
         std::cerr << "[ERROR] Unsupported data type: "    \
-                  << zedinfer::utils::dtype_to_str(DT__)    \
+                  << zedinfer::utils::dtype_to_str(DT__)  \
                   << EXCEPTION_LOCATION_MSG << std::endl; \
         throw std::runtime_error("Unsupported device");   \
     } while (0)

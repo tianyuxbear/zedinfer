@@ -2,6 +2,9 @@ target("device")
     set_kind("static")
     add_deps("utils")
     add_deps("device-cpu")
+    if has_config("nv-gpu") then
+        add_deps("device-nvidia")
+    end
     add_files("../src/backend/device/*.cpp")
     on_install(function (target) end)
 target_end()
@@ -26,6 +29,9 @@ target_end()
 target("ops")
     set_kind("static")
     add_deps("ops-cpu")
+    if has_config("nv-gpu") then
+        add_deps("ops-nvidia")
+    end
     add_files("../src/backend/ops/*/*.cpp")
     on_install(function (target) end)
 target_end()
