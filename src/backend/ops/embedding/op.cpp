@@ -1,5 +1,6 @@
 #include "backend/core/context/context.hpp"
 #include "backend/ops/embedding/cpu/embedding_cpu.hpp"
+#include "backend/ops/embedding/nvidia/embedding_nvidia.cuh"
 #include "backend/ops/ops.hpp"
 
 #include "utils/check.hpp"
@@ -23,8 +24,7 @@ void embedding(tensor_t out, tensor_t index, tensor_t weight) {
         return cpu::embedding(out->data(), index->data(), weight->data(), out->dtype(), out->numel(), out->dim(1));
 #ifdef ENABLE_NVIDIA_API
     case ZEDINFER_DEVICE_NVIDIA:
-        TO_BE_IMPLEMENTED();
-        return;
+        return nvidia::embedding(out->data(), index->data(), weight->data(), out->dtype(), out->numel(), out->dim(1));
 #endif
     default:
         EXCEPTION_UNSUPPORTED_DEVICE;

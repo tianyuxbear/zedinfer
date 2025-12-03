@@ -6,6 +6,8 @@
 #include <cstdint>
 #include <omp.h>
 
+namespace zedinfer::ops::cpu {
+
 template <typename T>
 void argmax_(int64_t *max_idx, T *max_val, const T *vals, size_t numel) {
     if constexpr (std::is_same_v<T, zedinfer::bf16_t> || std::is_same_v<T, zedinfer::fp16_t>) {
@@ -53,17 +55,23 @@ void argmax_(int64_t *max_idx, T *max_val, const T *vals, size_t numel) {
     }
 }
 
-namespace zedinfer::ops::cpu {
 void argmax(std::byte *max_idx, std::byte *max_val, const std::byte *vals, zedinferDataType_t type, size_t numel) {
     switch (type) {
     case ZEDINFER_DTYPE_F32:
-        return argmax_(reinterpret_cast<int64_t *>(max_idx), reinterpret_cast<float *>(max_val), reinterpret_cast<const float *>(vals), numel);
-    case ZEDINFER_DTYPE_BF16:
-        return argmax_(reinterpret_cast<int64_t *>(max_idx), reinterpret_cast<zedinfer::bf16_t *>(max_val),
-                       reinterpret_cast<const zedinfer::bf16_t *>(vals), numel);
+        return argmax_(reinterpret_cast<int64_t *>(max_idx), 
+                       reinterpret_cast<float *>(max_val), 
+                       reinterpret_cast<const float *>(vals), 
+                       numel);
     case ZEDINFER_DTYPE_F16:
-        return argmax_(reinterpret_cast<int64_t *>(max_idx), reinterpret_cast<zedinfer::fp16_t *>(max_val),
-                       reinterpret_cast<const zedinfer::fp16_t *>(vals), numel);
+        return argmax_(reinterpret_cast<int64_t *>(max_idx), 
+                       reinterpret_cast<zedinfer::fp16_t *>(max_val),
+                       reinterpret_cast<const zedinfer::fp16_t *>(vals),
+                       numel);
+    case ZEDINFER_DTYPE_BF16:
+        return argmax_(reinterpret_cast<int64_t *>(max_idx), 
+                       reinterpret_cast<zedinfer::bf16_t *>(max_val),
+                       reinterpret_cast<const zedinfer::bf16_t *>(vals), 
+                       numel);
     default:
         EXCEPTION_UNSUPPORTED_DATATYPE(type);
     }
