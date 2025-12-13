@@ -32,10 +32,15 @@ tensor_t Tensor::create(const std::vector<size_t> &shape,
     size_t dtype_size = utils::dsize(dtype);
 
     if (is_mmap) {
-        ASSERT(device_type == ZEDINFER_DEVICE_CPU, "mmap-backed tensors must reside on CPU");
-        ASSERT(device_id == 0, "device_id must be 0 for CPU tensors");
-        auto storage = core::context().runtime().allocateMmapStorage(mmap_ptr, total_elems * dtype_size);
-        return std::shared_ptr<Tensor>(new Tensor(meta, storage));
+        if (device_type == ZEDINFER_DEVICE_CPU) {
+            ASSERT(device_id == 0, "device_id must be 0 for CPU tensors");
+            auto storage = core::context().runtime().allocateMmapStorage(mmap_ptr, total_elems * dtype_size);
+            return std::shared_ptr<Tensor>(new Tensor(meta, storage));
+        } else {
+            bool is_host = false;
+            auto storage = core::context().runtime().allocateMmapStorage(mmap_ptr, total_elems * dtype_size, is_host);
+            return std::shared_ptr<Tensor>(new Tensor(meta, storage));
+        }
     }
 
     if (device_type == ZEDINFER_DEVICE_CPU && core::context().runtime().deviceType() != ZEDINFER_DEVICE_CPU) {

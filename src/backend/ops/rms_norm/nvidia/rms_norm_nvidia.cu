@@ -246,9 +246,9 @@ __global__ void rmsnorm_kernel_warp_reduce_packed(
     }
 }
 
-void rms_norm(std::byte *output, const std::byte *input, const std::byte *weight, float eps, zedinferDataType_t type, size_t seqhidden_size, size_t hidden_size) {
+void rms_norm(std::byte *output, const std::byte *input, const std::byte *weight, float eps, zedinferDataType_t type, size_t seq_len, size_t hidden_size) {
     dim3 block(BLOCK_SIZE);
-    dim3 grid(hidden_size);
+    dim3 grid(seq_len);
 
     switch (type) {
     case ZEDINFER_DTYPE_F32:

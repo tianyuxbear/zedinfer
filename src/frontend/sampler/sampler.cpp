@@ -1,6 +1,7 @@
 #include "frontend/sampler/sampler.hpp"
 #include "backend/ops/ops.hpp"
 #include "zedinfer.h"
+#include "zedinfer/activation.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -67,7 +68,7 @@ int ArgmaxSampler::sample(tensor_t logits) {
     tensor_t max_idx = Tensor::create({1}, ZEDINFER_DTYPE_I64,
                                       last_logits->deviceType(),
                                       last_logits->deviceId());
-    tensor_t max_val = Tensor::create({1}, ZEDINFER_DTYPE_F32,
+    tensor_t max_val = Tensor::create({1}, exec_config_.data_type,
                                       last_logits->deviceType(),
                                       last_logits->deviceId());
 
@@ -255,11 +256,10 @@ int GeneralSampler::sampleFromProbs(const float *probs, size_t size) {
 // ============================================================================
 // Factory function
 // ============================================================================
-std::shared_ptr<Sampler> createSampler(SamplerType type,
-                                       const SamplerParams &params) {
+std::shared_ptr<Sampler> createSampler(ExecutorConfig exec_config, SamplerType type, const SamplerParams &params) {
     switch (type) {
     case SamplerType::ARGMAX:
-        return std::make_shared<ArgmaxSampler>();
+        return std::make_shared<ArgmaxSampler>(exec_config);
     case SamplerType::GENERAL:
         return std::make_shared<GeneralSampler>(params);
     default:

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "backend/tensor/tensor.hpp"
+#include "zedinfer/activation.hpp"
 
 #include <memory>
 #include <random>
@@ -59,11 +60,14 @@ protected:
 // Greedy sampling: always pick argmax
 class ArgmaxSampler : public Sampler {
 public:
-    ArgmaxSampler() = default;
+    ArgmaxSampler(ExecutorConfig exec_config) : exec_config_(exec_config) {};
 
     int sample(tensor_t logits) override;
     void setSeed(unsigned int /*seed*/) override {} // No randomness needed
     std::string name() const override { return "Argmax"; }
+
+private:
+    ExecutorConfig exec_config_;
 };
 
 // General sampler: supports temperature + top_k + top_p filtering
@@ -94,7 +98,6 @@ private:
 };
 
 // Factory function to create sampler instances
-std::shared_ptr<Sampler> createSampler(SamplerType sampler_type,
-                                       const SamplerParams &params = SamplerParams());
+std::shared_ptr<Sampler> createSampler(ExecutorConfig exec_config, SamplerType sampler_type, const SamplerParams &params = SamplerParams());
 
 } // namespace zedinfer::sampler

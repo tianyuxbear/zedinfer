@@ -44,7 +44,7 @@ public:
     // Device and host memory allocation.
     storage_t allocateDeviceStorage(size_t size);
     storage_t allocateHostStorage(size_t size);
-    storage_t allocateMmapStorage(std::byte *data_ptr, size_t size);
+    storage_t allocateMmapStorage(std::byte *data_ptr, size_t size, bool is_host = true);
     void freeStorage(Storage *storage);
 
     // Stream management.
