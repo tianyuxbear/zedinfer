@@ -23,7 +23,7 @@ int main() {
 
     auto start = std::chrono::high_resolution_clock::now();
 
-    device::Device device(ZEDINFER_DEVICE_CPU, 0);
+    device::Device device(ZEDINFER_DEVICE_NVIDIA, 0);
     size_t max_prefill_len = 128;
     std::shared_ptr<InferenceEngine> engine = InferenceEngine::create(model_path, device, max_prefill_len);
 
