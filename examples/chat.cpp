@@ -97,7 +97,7 @@ int main(int argc, char *argv[]) {
     std::string model_path = model_path_fs.string();
 
     // Initialize inference engine
-    device::Device device(ZEDINFER_DEVICE_CPU, 0);
+    device::Device device(ZEDINFER_DEVICE_NVIDIA, 0);
     size_t max_prefill_len = 128;
     std::shared_ptr<zedinfer::InferenceEngine>
         engine = zedinfer::InferenceEngine::create(model_path, device, max_prefill_len);
