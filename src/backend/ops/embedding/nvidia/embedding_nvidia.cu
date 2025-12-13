@@ -12,14 +12,14 @@ template <typename T>
 __global__ void embedding_lookup_scalar_kernel(
     T *output,
     const T *table,
-    const int64_t *indices,
+    const int *indices,
     size_t hidden_size) {
     // Each block processes one token in the sequence
     size_t seq_idx = blockIdx.x;
     size_t tid = threadIdx.x;
 
     // Resolve the target row index from the embedding table
-    int64_t table_idx = indices[seq_idx];
+    int table_idx = indices[seq_idx];
 
     // Calculate offsets (use size_t to prevent overflow)
     size_t table_offset = static_cast<size_t>(table_idx) * hidden_size;
@@ -39,14 +39,14 @@ template <typename T>
 __global__ void embedding_lookup_packed_kernel(
     T *output,
     const T *table,
-    const int64_t *indices,
+    const int *indices,
     size_t hidden_size) {
 
     constexpr int PackSize = PackedTraits<T>::size; // e.g., 4 for float, 8 for half
 
     size_t seq_idx = blockIdx.x;
     size_t tid = threadIdx.x;
-    int64_t table_idx = indices[seq_idx];
+    int table_idx = indices[seq_idx];
 
     // Base pointers for the current token
     size_t table_offset = static_cast<size_t>(table_idx) * hidden_size;
@@ -80,19 +80,19 @@ void embedding(std::byte *output, const std::byte *indices, const std::byte *wei
         return embedding_lookup_packed_kernel<<<grid, block>>>(
             reinterpret_cast<float *>(output),
             reinterpret_cast<const float *>(weight),
-            reinterpret_cast<const int64_t *>(indices),
+            reinterpret_cast<const int *>(indices),
             hidden_size);
     case ZEDINFER_DTYPE_F16:
         return embedding_lookup_packed_kernel<<<grid, block>>>(
             reinterpret_cast<half *>(output),
             reinterpret_cast<const half *>(weight),
-            reinterpret_cast<const int64_t *>(indices),
+            reinterpret_cast<const int *>(indices),
             hidden_size);
     case ZEDINFER_DTYPE_BF16:
         return embedding_lookup_packed_kernel<<<grid, block>>>(
             reinterpret_cast<cuda_bfloat16 *>(output),
             reinterpret_cast<const cuda_bfloat16 *>(weight),
-            reinterpret_cast<const int64_t *>(indices),
+            reinterpret_cast<const int *>(indices),
             hidden_size);
     default:
         EXCEPTION_UNSUPPORTED_DATATYPE(type);

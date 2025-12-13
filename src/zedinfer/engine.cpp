@@ -79,7 +79,7 @@ std::shared_ptr<InferenceEngine> InferenceEngine::create(
     LOGI << "[Engine] Executor created";
 
     // Create sampler (default: argmax)
-    auto sampler = sampler::createSampler(sampler::SamplerType::ARGMAX);
+    auto sampler = sampler::createSampler(exec_config, sampler::SamplerType::ARGMAX);
 
     // Construct engine instance
     auto engine = std::shared_ptr<InferenceEngine>(
