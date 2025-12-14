@@ -11,9 +11,9 @@
 #include <string>
 
 // For server1
-static const std::string model_path = "/mnt/hdd0/shared/models/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B";
+static const std::string model_path = "/mnt/hdd0/shared/models/deepseek-ai/DeepSeek-R1-0528-Qwen3-8B";
 // For server2/server3
-// static const std::string model_path = "/mnt/hdd/shared/models/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B";
+// static const std::string model_path = "/mnt/hdd/shared/models/deepseek-ai/DeepSeek-R1-0528-Qwen3-8B";
 
 using namespace zedinfer;
 
@@ -32,7 +32,7 @@ int main() {
     LOGI << "InferenceEngine::create took " << duration.count() << " ms\n";
 
     GenerationConfig gen_config;
-    gen_config.max_new_tokens = 128;
+    gen_config.max_new_tokens = 16384;
     gen_config.verbose = true;
     gen_config.print_stats = true;
 
