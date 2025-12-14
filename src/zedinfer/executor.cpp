@@ -181,6 +181,20 @@ void GraphExecutor::execute_node(
 
     std::vector<size_t> shape = node->get_output_shape_template().resolve(ctx);
 
+    // Special case: reshape RMS norm outputs to head-split layout
+    bool is_q_norm = node_name.find("q_norm") != std::string::npos;
+    bool is_k_norm = node_name.find("k_norm") != std::string::npos;
+    if (is_q_norm) {
+        size_t nhead = node->get_param<size_t>("nhead");
+        size_t head_dim = node->get_param<size_t>("head_dim");
+        shape = {ctx.seq_len * nhead, head_dim};
+    }
+    if (is_k_norm) {
+        size_t nkvhead = node->get_param<size_t>("nkvhead");
+        size_t head_dim = node->get_param<size_t>("head_dim");
+        shape = {ctx.seq_len * nkvhead, head_dim};
+    }
+
     if (write_to_kv_cache) {
         int layer_idx = extract_layer_idx(node_name);
 
@@ -195,8 +209,11 @@ void GraphExecutor::execute_node(
         output = activation_allocator->acquire(shape);
     }
 
-    // Reshape ROPE input to 3D format if needed
+    // Reshape inputs to 3D layout when required by ROPE or per-head RMS Norm
     if (node_name.find("rope") != std::string::npos) {
+        inputs[0] = inputs[0]->view(shape);
+    }
+    if (is_q_norm || is_k_norm) {
         inputs[0] = inputs[0]->view(shape);
     }
 
