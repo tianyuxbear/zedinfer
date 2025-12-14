@@ -1,5 +1,6 @@
 #include "frontend/loader/safetensors.hpp"
 #include "frontend/models/qwen2.hpp"
+#include "frontend/models/qwen3.hpp"
 #include "zedinfer.h"
 #ifdef DEBUG
 #include "utils/system_info.hpp"
@@ -36,6 +37,12 @@ std::shared_ptr<Model> Model::parse(const std::string &model_path, zedinferDevic
             throw std::logic_error("Config is not Qwen2Config");
         }
         return std::make_shared<Qwen2Model>(*qwen2_config, std::move(weights));
+    } else if (config->model_type == "qwen3") {
+        auto *qwen3_config = dynamic_cast<Qwen3Config *>(config.get());
+        if (!qwen3_config) {
+            throw std::logic_error("Config is not Qwen3Config");
+        }
+        return std::make_shared<Qwen3Model>(*qwen3_config, std::move(weights));
     }
 
     throw std::runtime_error("Unsupported model type: " + config->model_type);
@@ -84,6 +91,12 @@ std::unique_ptr<ModelConfig> Model::load_config(const std::string &config_path) 
         qwen2_config->max_window_layers = j.value("max_window_layers", 21);
         qwen2_config->use_sliding_window = j.value("use_sliding_window", false);
         return qwen2_config;
+    } else if (model_type == "qwen3") {
+        auto qwen3_config = std::make_unique<Qwen3Config>(base_config);
+        qwen3_config->sliding_window = 0;
+        qwen3_config->max_window_layers = j.value("max_window_layers", 36);
+        qwen3_config->use_sliding_window = j.value("use_sliding_window", false);
+        return qwen3_config;
     }
 
     throw std::runtime_error("Unsupported model type: " + model_type);
