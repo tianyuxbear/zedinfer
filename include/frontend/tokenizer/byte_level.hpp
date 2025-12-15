@@ -24,9 +24,6 @@ public:
     // Decode Unicode string back to original bytes.
     static std::string unicode_to_bytes(const std::string &text);
 
-    // Apply byte-level mapping in-place to an ICU UnicodeString.
-    static void apply_byte_level_mapping(icu::UnicodeString &uText);
-
 private:
     // Build static lookup tables.
     static std::unordered_map<unsigned char, std::string> create_byte_to_unicode_map();

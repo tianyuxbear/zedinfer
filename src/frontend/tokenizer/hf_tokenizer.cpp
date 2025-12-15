@@ -354,7 +354,6 @@ std::vector<std::string> HFTokenizer::pre_tokenize(const std::string &text) {
 
     while (matcher->find(status) && U_SUCCESS(status)) {
         icu::UnicodeString uMatch = matcher->group(status);
-        ByteLevel::apply_byte_level_mapping(uMatch);
         std::string word;
         uMatch.toUTF8String(word);
         words.push_back(word);
