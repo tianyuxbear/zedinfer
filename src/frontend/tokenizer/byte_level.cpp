@@ -124,12 +124,4 @@ std::string ByteLevel::unicode_to_bytes(const std::string &text) {
     return result;
 }
 
-void ByteLevel::apply_byte_level_mapping(icu::UnicodeString &uText) {
-    // Map common whitespace for pre-tokenization.
-    uText.findAndReplace(icu::UnicodeString(" "), icu::UnicodeString("Ġ"));  // space
-    uText.findAndReplace(icu::UnicodeString("\n"), icu::UnicodeString("Ċ")); // newline
-    uText.findAndReplace(icu::UnicodeString("\r"), icu::UnicodeString("č")); // carriage return
-    uText.findAndReplace(icu::UnicodeString("\t"), icu::UnicodeString("ĉ")); // tab
-}
-
 } // namespace zedinfer::tokenizer
