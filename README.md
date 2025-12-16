@@ -104,11 +104,19 @@ xmake run test-tensor
 ```
 > `test-tokenizer`和`test-loader`部分需要设置模型路径，详见代码。
 
-## ⚡ 性能参考
-| 模型         | 硬件             | Prefill 速度    | Decode 速度    |
-| ---------- | -------------- | ------------- | ------------ |
-| Qwen2-1.5B | Intel(R) Xeon(R) Silver 4310 | ≈75 tokens/s | ≈30 tokens/s |
-> 注：性能数据受硬件配置、线程数及散热限制影响，仅供参考。
+## ⚡性能测试 (Performance)
+本项目在单卡 NVIDIA GeForce RTX 4090 环境下进行了基准测试，对比了 ZedInfer 与 HuggingFace Transformers 在不同模型和上下文长度下的推理性能。测试结果显示，ZedInfer 在 Prefill（上下文处理）和 Decode（文本生成）阶段均展现出显著的性能优势。
+
+**测试环境 (Test Environment)**
+- GPU: NVIDIA GeForce RTX 4090 (24GB)
+- CPU: Intel Xeon Silver 4310 @ 3.30GHz
+- OS/CUDA: Ubuntu 24.04.3 LTS / CUDA 12.6
+
+**测试结果 (Test Result)**
+
+![DeepSeek-R1-Distill-Qwen-1.5B_perf_compare_base](https://cdn.jsdelivr.net/gh/tianyuxbear/images/zebra/DeepSeek-R1-Distill-Qwen-1.5B_perf_compare_base.png)
+
+![DeepSeek-R1-0528-Qwen3-8B_perf_compare_base](https://cdn.jsdelivr.net/gh/tianyuxbear/images/zebra/DeepSeek-R1-0528-Qwen3-8B_perf_compare_base.png)
 
 ## 🗺️ 路线图
 - [x] **核心架构**: 计算图与运行时分离，内存池实现。
