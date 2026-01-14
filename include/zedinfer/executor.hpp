@@ -62,9 +62,6 @@ private:
     graph::compute_graph_t graph_;
     ExecutorConfig config_;
 
-    // Phase-specific memory allocators
-    std::unique_ptr<PrefillArena> prefill_arena_;          // Batch processing arena
-    std::unique_ptr<DecodePool> decode_pool_;              // Token-level pooling
     std::unique_ptr<PositionIDsCache> position_ids_cache_; // Cached position embeddings
 
     // Internal execution helpers

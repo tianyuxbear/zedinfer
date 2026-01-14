@@ -37,8 +37,7 @@ InferenceEngine::InferenceEngine(
 
 std::shared_ptr<InferenceEngine> InferenceEngine::create(
     const std::string &model_path,
-    device::Device device,
-    size_t max_prefill_len) {
+    device::Device device) {
 
     if (model_path.empty()) {
         throw std::invalid_argument("Model path cannot be empty");
@@ -72,7 +71,6 @@ std::shared_ptr<InferenceEngine> InferenceEngine::create(
     exec_config.device_type = device.type();
     exec_config.device_id = device.id();
     exec_config.data_type = utils::str_to_dtype(model->config().torch_dtype);
-    exec_config.max_prefill_len = max_prefill_len;
     exec_config.max_seq_len = tokenizer->get_config().model_max_length;
 
     auto executor = GraphExecutor::create(graph, exec_config);
@@ -95,7 +93,7 @@ std::shared_ptr<InferenceEngine> InferenceEngine::create(
 
     // Warmup engine with reasonable defaults
     LOG_VERBOSE_(utils::BOTH) << "[Engine] Performing warmup...";
-    engine->warmup(std::min(max_prefill_len, size_t(32)), 8);
+    engine->warmup(128, 128);
     LOG_VERBOSE_(utils::BOTH) << "[Engine] Ready";
 
     return engine;

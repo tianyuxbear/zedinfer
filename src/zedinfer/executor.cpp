@@ -1,7 +1,6 @@
 #include "zedinfer/executor.hpp"
 #include "backend/kvcache/base.hpp"
 #include "backend/ops/ops.hpp"
-#include "utils/types.hpp"
 #include "zedinfer.h"
 #include "zedinfer/activation.hpp"
 
@@ -27,14 +26,6 @@ GraphExecutor::GraphExecutor(
     : graph_(graph),
       config_(config) {
 
-    // Allocate arena for prefill phase (batch processing)
-    const size_t per_token_bytes = graph_->get_per_token_activation_numel() * utils::dsize(config_.data_type);
-    const size_t capacity = per_token_bytes * config_.max_prefill_len;
-    prefill_arena_ = std::make_unique<PrefillArena>(config_, capacity);
-
-    // Allocate pool for decode phase (token-by-token)
-    decode_pool_ = std::make_unique<DecodePool>(config_);
-
     // Pre-allocate reusable position IDs tensor
     position_ids_cache_ = std::make_unique<PositionIDsCache>(config_);
 
@@ -49,9 +40,6 @@ std::shared_ptr<GraphExecutor> GraphExecutor::create(
     // Validate inputs
     if (!graph) {
         throw std::invalid_argument("Graph cannot be null");
-    }
-    if (config.max_prefill_len <= 0) {
-        throw std::invalid_argument("max_prefill_len must be positive");
     }
     if (config.max_seq_len <= 0) {
         throw std::invalid_argument("max_seq_len must be positive");
@@ -127,14 +115,10 @@ tensor_t GraphExecutor::forward(
         execute_node(kvcache, node, activations, ctx);
     }
 
-    // ===== Step 5: Reset memory allocators =====
-    prefill_arena_->reset();
-    decode_pool_->reset();
-
-    // ===== Step 6: Update KV cache length =====
+    // ===== Step 5: Update KV cache length =====
     kvcache.update_seq_len(seq_len);
 
-    // ===== Step 7: Return output logits =====
+    // ===== Step 6: Return output logits =====
     auto logits_node = graph_->get_output("logits");
     if (!logits_node) {
         throw std::runtime_error("Graph output 'logits' not found");
@@ -148,16 +132,6 @@ void GraphExecutor::execute_node(
     graph_node_t node,
     std::unordered_map<graph_node_t, tensor_t> &activations,
     ExecutionContext &ctx) {
-
-    // Select activation allocator based on phase
-    ActivationAllocator *activation_allocator;
-    if (ctx.seq_len == 1) {
-        // Decode: token-by-token
-        activation_allocator = decode_pool_.get();
-    } else {
-        // Prefill: batch processing
-        activation_allocator = prefill_arena_.get();
-    }
 
     // Gather input tensors for this node
     std::vector<tensor_t> inputs;
@@ -205,8 +179,14 @@ void GraphExecutor::execute_node(
 
         output = output->view(shape);
     } else {
-        // Allocate from memory pool/arena
-        output = activation_allocator->acquire(shape);
+        // Allocate from memory pool
+        output = Tensor::create(
+            shape,
+            config_.data_type,
+            config_.device_type,
+            config_.device_id,
+            false,
+            nullptr);
     }
 
     // Reshape inputs to 3D layout when required by ROPE or per-head RMS Norm
@@ -319,10 +299,6 @@ void GraphExecutor::print_stats() const {
 
     // Print graph stats
     LOGI << graph_->get_stats();
-
-    // Print memory pool statistics
-    LOGI << prefill_arena_->get_stats();
-    LOGI << decode_pool_->get_stats();
 }
 
 } // namespace zedinfer
