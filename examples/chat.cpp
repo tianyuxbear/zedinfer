@@ -5,7 +5,6 @@
 #include "zedinfer/engine.hpp"
 #include "zedinfer/session.hpp"
 
-#include <cstddef>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
@@ -98,9 +97,8 @@ int main(int argc, char *argv[]) {
 
     // Initialize inference engine
     device::Device device(ZEDINFER_DEVICE_NVIDIA, 0);
-    size_t max_prefill_len = 128;
     std::shared_ptr<zedinfer::InferenceEngine>
-        engine = zedinfer::InferenceEngine::create(model_path, device, max_prefill_len);
+        engine = zedinfer::InferenceEngine::create(model_path, device);
 
     // Configure generation parameters
     zedinfer::GenerationConfig gen_config;

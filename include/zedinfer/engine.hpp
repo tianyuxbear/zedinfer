@@ -28,13 +28,11 @@ public:
      * Factory method to create engine from model directory
      * @param model_path Directory containing config.json, weights, tokenizer
      * @param device Target device (CPU/CUDA)
-     * @param max_prefill_len Maximum prefill sequence length
      * @return Shared pointer to engine instance
      */
     static std::shared_ptr<InferenceEngine> create(
         const std::string &model_path,
-        device::Device device,
-        size_t max_prefill_len);
+        device::Device device);
 
     /**
      * Create new inference session with independent KV cache
