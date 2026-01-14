@@ -6,6 +6,7 @@
 #include "frontend/sampler/sampler.hpp"
 #include "frontend/tokenizer/hf_tokenizer.hpp"
 #include "utils/logging.hpp"
+#include "utils/random.hpp"
 #include "utils/types.hpp"
 #include "zedinfer/activation.hpp"
 #include "zedinfer/session.hpp"
@@ -93,7 +94,7 @@ std::shared_ptr<InferenceEngine> InferenceEngine::create(
 
     // Warmup engine with reasonable defaults
     LOG_VERBOSE_(utils::BOTH) << "[Engine] Performing warmup...";
-    engine->warmup(128, 128);
+    engine->warmup();
     LOG_VERBOSE_(utils::BOTH) << "[Engine] Ready";
 
     return engine;
@@ -304,7 +305,12 @@ void InferenceEngine::warmup(size_t prefill_len, size_t decode_steps) {
     auto temp_kvcache = kvcache::DynamicKVCache::create_dynamic_kvcache(kv_config);
 
     // Generate dummy input tokens
-    std::vector<int> dummy_input(prefill_len, 1); // Use token_id=1 as dummy
+    int min_id = 100;
+    int max_id = model_config.vocab_size - 100;
+    std::vector<int> dummy_input(prefill_len);
+    for (auto &token_id : dummy_input) {
+        token_id = utils::randint(min_id, max_id);
+    }
 
     // Warmup prefill phase
     int past_len = 0;
@@ -326,6 +332,64 @@ void InferenceEngine::warmup(size_t prefill_len, size_t decode_steps) {
                              .count();
 
     LOGI << "[Engine] Warmup complete in " << warmup_time << " ms";
+}
+
+std::pair<double, double> InferenceEngine::profile(size_t prefill_len, size_t decode_steps) {
+    LOGI << "[Engine] Profiling with prefill_len=" << prefill_len
+         << ", decode_steps=" << decode_steps;
+
+    // Initialize temporary KV cache
+    kvcache::DynamicKVCacheConfig kv_config;
+    const auto &model_config = model_->config();
+
+    kv_config.num_layers = model_config.num_hidden_layers;
+    kv_config.num_kv_heads = model_config.num_key_value_heads;
+    kv_config.head_dim = model_config.hidden_size / model_config.num_attention_heads;
+    kv_config.device_type = device_.type();
+    kv_config.device_id = device_.id();
+    kv_config.dtype = utils::str_to_dtype(model_config.torch_dtype);
+    kv_config.initial_capacity = prefill_len + decode_steps;
+    kv_config.model_max_seq_len = tokenizer_->get_config().model_max_length;
+
+    auto temp_kvcache = kvcache::DynamicKVCache::create_dynamic_kvcache(kv_config);
+
+    // Prepare dummy inputs
+    int min_id = 100;
+    int max_id = model_config.vocab_size - 100;
+    std::vector<int> dummy_input(prefill_len);
+    for (auto &token_id : dummy_input) {
+        token_id = utils::randint(min_id, max_id);
+    }
+
+    // Measure prefill latency
+    auto prefill_start = std::chrono::high_resolution_clock::now();
+
+    int past_len = 0;
+    tensor_t logits = executor_->forward(*temp_kvcache, dummy_input, past_len);
+    int next_token = sampler_->sample(logits);
+
+    auto prefill_end = std::chrono::high_resolution_clock::now();
+    double prefill_time = std::chrono::duration<double, std::milli>(
+                              prefill_end - prefill_start)
+                              .count();
+
+    past_len += prefill_len;
+
+    // Measure decode latency
+    auto decode_start = std::chrono::high_resolution_clock::now();
+
+    for (size_t i = 1; i < decode_steps; ++i) {
+        logits = executor_->forward(*temp_kvcache, {next_token}, past_len);
+        next_token = sampler_->sample(logits);
+        past_len++;
+    }
+
+    auto decode_end = std::chrono::high_resolution_clock::now();
+    double decode_time = std::chrono::duration<double, std::milli>(
+                             decode_end - decode_start)
+                             .count();
+
+    return {prefill_time, decode_time};
 }
 
 } // namespace zedinfer

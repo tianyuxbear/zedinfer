@@ -96,14 +96,22 @@ private:
     void update_stats_prefill(double time_ms, int num_tokens);
     void update_stats_decode(double time_ms);
 
-private:
+public:
     /**
      * Warm up engine by running dummy inference
      * Should be called after create() to initialize execution paths
      * @param prefill_len Prefill sequence length for warmup
      * @param decode_steps Number of decode steps to warmup
      */
-    void warmup(size_t prefill_len = 32, size_t decode_steps = 8);
+    void warmup(size_t prefill_len = 128, size_t decode_steps = 128);
+
+    /**
+     * Profile engine performance with specified sequence parameters.
+     * @param prefill_len Prefill sequence length for profiling
+     * @param decode_steps Number of decode steps to profile
+     * @return std::pair<double, double> Performance metrics (e.g., prefill latency, decode latency)
+     */
+    std::pair<double, double> profile(size_t prefill_len = 128, size_t decode_steps = 128);
 };
 
 } // namespace zedinfer
