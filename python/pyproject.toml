@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zedinfer"
+version = "0.1.0"
+description = "Python bindings for the ZedInfer inference engine"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy",
+    "torch",
+    "pybind11-stubgen",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["zedinfer*"]
+
+[tool.setuptools.package-data]
+zedinfer = ["*.so", "*.pyi"]

@@ -11,9 +11,9 @@
 #include <string>
 
 // For server1
-static const std::string model_path = "/mnt/hdd0/shared/models/deepseek-ai/DeepSeek-R1-0528-Qwen3-8B";
+// static const std::string model_path = "/mnt/hdd0/shared/models/deepseek-ai/DeepSeek-R1-0528-Qwen3-8B";
 // For server2/server3
-// static const std::string model_path = "/mnt/hdd/shared/models/deepseek-ai/DeepSeek-R1-0528-Qwen3-8B";
+static const std::string model_path = "/mnt/hdd/shared/models/deepseek-ai/DeepSeek-R1-0528-Qwen3-8B";
 
 using namespace zedinfer;
 

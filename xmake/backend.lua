@@ -33,6 +33,8 @@ target("ops")
         add_deps("ops-nvidia")
     end
     add_files("../src/backend/ops/*/*.cpp")
+    -- rearrange/op.cpp is already compiled in the tensor target
+    remove_files("../src/backend/ops/rearrange/*.cpp")
     on_install(function (target) end)
 target_end()
 

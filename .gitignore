@@ -1,4 +1,19 @@
+# Build & Cache
 .cache/
 .xmake/
 build/
+__pycache__/
+
+# Virtual Env & Pkg
+.venv
+.venv/
+*.egg-info/
+
+# Binaries
+*.so
+
+# Generated Type Stubs
+*.pyi
+
+# Logs
 *.log

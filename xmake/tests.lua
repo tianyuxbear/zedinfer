@@ -1,5 +1,3 @@
-add_requires("gtest", { configs = { main = true } })
-
 target("test-tokenizer")
     set_kind("binary")
     set_group("test")
