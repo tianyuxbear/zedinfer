@@ -1,5 +1,8 @@
 #pragma once
 
+// BF16 WMMA requires compute capability 8.0+ (Ampere and above)
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 800
+
 #include "utils/nvidia/memory.cuh"
 #include <cstdint>
 #include <mma.h>
@@ -1759,3 +1762,5 @@ __global__ void linear_bf16_kernel_32x64(
     }
     __syncwarp();
 }
+
+#endif // __CUDA_ARCH__ >= 800

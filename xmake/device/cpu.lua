@@ -14,6 +14,8 @@ target("ops-cpu")
     add_ldflags("-fopenmp", {force = true})
 
     add_files("../../src/backend/ops/*/cpu/*.cpp")
+    -- rearrange/cpu/*.cpp is already compiled in the tensor target
+    remove_files("../../src/backend/ops/rearrange/cpu/*.cpp")
 
     on_install(function (target) end)
 target_end()

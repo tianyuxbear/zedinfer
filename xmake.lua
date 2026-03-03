@@ -29,7 +29,11 @@ end
 -- Enable compiler warnings
 add_cxxflags("-Wall", "-Wextra")
 
+-- Deps: Unicode processing & interactive CLI
 add_requires("icu4c", "readline")
+
+-- Deps: Google Test framework (enable default main function)
+add_requires("gtest", { configs = { main = true } })
 
 -- Device implementations
 includes("xmake/device/cpu.lua")
@@ -44,6 +48,18 @@ option_end()
 if has_config("nv-gpu") then
     add_defines("ENABLE_NVIDIA_API")
     includes("xmake/device/nvidia.lua")
+end
+
+-- Python operator test bindings (optional)
+option("pytest")
+    set_default(false)
+    set_showmenu(true)
+    set_description("Build Python operator test bindings (requires pybind11)")
+option_end()
+
+if has_config("pytest") then
+    add_requires("pybind11")
+    includes("xmake/pytests.lua")
 end
 
 -- Test and example modules

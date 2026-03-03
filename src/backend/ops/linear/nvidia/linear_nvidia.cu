@@ -12,6 +12,10 @@
 
 namespace zedinfer::ops::nvidia {
 
+// bf16 WMMA kernels require Ampere+ (sm_80). Guard the host-side dispatch
+// function so that it is only compiled when the target arch supports bf16.
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 800
+
 /**
  * @brief Auto-tuned host function for dynamic Linear Kernel dispatch.
  * * Strategy derived from profiling data:
@@ -115,6 +119,8 @@ void launch_linear_bf16_kernel_autotuned(
     }
 }
 
+#endif // __CUDA_ARCH__ >= 800
+
 void linear(std::byte *output, const std::byte *input, const std::byte *weight, const std::byte *bias, zedinferDataType_t type, size_t M, size_t N, size_t K) {
     dim3 blockDim(BLOCK_SIZE);
 
@@ -183,12 +189,16 @@ void linear(std::byte *output, const std::byte *input, const std::byte *weight, 
                 M, N, K);
         } break;
         case ZEDINFER_DTYPE_BF16: {
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 800
             launch_linear_bf16_kernel_autotuned(
                 reinterpret_cast<cuda_bfloat16 *>(output),
                 reinterpret_cast<const cuda_bfloat16 *>(input),
                 reinterpret_cast<const cuda_bfloat16 *>(weight),
                 reinterpret_cast<const cuda_bfloat16 *>(bias),
                 M, N, K);
+#else
+            EXCEPTION_UNSUPPORTED_DATATYPE(type);
+#endif
         } break;
         default:
             EXCEPTION_UNSUPPORTED_DATATYPE(type);

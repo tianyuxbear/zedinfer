@@ -8,14 +8,18 @@
 namespace zedinfer::ops::cpu {
 
 template <typename T>
-void embedding_(T *output, const int *indices, const T *weight, size_t numel, size_t hidden_size) {
-    const size_t seqlen = numel / hidden_size;
+void embedding_(T *out, const int *index, const T *weight, size_t numel, size_t len) {
+    const size_t nlen = numel / len;
 
-    // Avoid OpenMP for memory-bound operations;
-    // single-threaded memcpy is faster due to CPU optimizations (SIMD/prefetch) and avoids thread scheduling overhead.
-    for (size_t i = 0; i < seqlen; ++i) {
-        const int64_t idx = indices[i];
-        std::memcpy(output + (i * hidden_size), weight + (idx * hidden_size), hidden_size * sizeof(T));
+    // Threshold to avoid threading overhead on small workloads
+    const bool use_omp = nlen > 64;
+
+// Parallelize to hide memory latency from random access (gather pattern).
+// 'static' schedule is optimal due to uniform copy sizes.
+#pragma omp parallel for schedule(static) if (use_omp)
+    for (size_t i = 0; i < nlen; ++i) {
+        const int64_t idx = index[i];
+        std::memcpy(out + (i * len), weight + (idx * len), len * sizeof(T));
     }
 }
 
