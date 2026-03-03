@@ -50,6 +50,9 @@ end
 includes("xmake/tests.lua")
 includes("xmake/examples.lua")
 
+-- Python operator test bindings (optional)
+includes("xmake/pytests.lua")
+
 -- Frontend and backend modules
 includes("xmake/frontend.lua")
 includes("xmake/backend.lua")
