@@ -1,6 +1,6 @@
 target("tokenizer")
     set_kind("static")
-    add_packages("icu4c")
+    add_packages("icu4c", {public = true})
     add_files("../src/frontend/tokenizer/*.cpp")
     on_install(function (target) end)
 target_end()
