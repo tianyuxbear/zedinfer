@@ -3,23 +3,22 @@
 #include <immintrin.h>
 #include <omp.h>
 
-// Performance tuning thresholds - adjust based on actual hardware benchmarking
 #ifndef SIMD_THRESHOLD
-#define SIMD_THRESHOLD 64 // Below this: use pure scalar (fastest for tiny data)
+#define SIMD_THRESHOLD 64
 #endif
 
 #ifndef PARALLEL_THRESHOLD
-#define PARALLEL_THRESHOLD 16384 // Below this: use single-threaded SIMD
+#define PARALLEL_THRESHOLD 16384
 #endif
 
-// Force inline to eliminate function call overhead
 #define FORCE_INLINE __attribute__((always_inline)) inline
 
-// Fast path for tiny data - optimized for shapes like (2,3)
+// ============================================================================
+// Tiny scalar path (< SIMD_THRESHOLD elements, all dtypes)
+// ============================================================================
+
 template <typename T>
 FORCE_INLINE void scalar_add_tiny(T *c, const T *a, const T *b, size_t numel) {
-    // Simplest loop - let compiler optimize
-    // For <64 elements, this is faster than any SIMD approach
     for (size_t i = 0; i < numel; ++i) {
         float f_a = zedinfer::utils::cast<float>(a[i]);
         float f_b = zedinfer::utils::cast<float>(b[i]);
@@ -27,310 +26,236 @@ FORCE_INLINE void scalar_add_tiny(T *c, const T *a, const T *b, size_t numel) {
     }
 }
 
-void add_bf16(zedinfer::bf16_t *c, const zedinfer::bf16_t *a, const zedinfer::bf16_t *b, size_t numel) {
-    // Fast path: tiny data - avoid all vectorization overhead
-    if (numel <= SIMD_THRESHOLD) {
-        scalar_add_tiny(c, a, b, numel);
-        return;
+// ============================================================================
+// BF16 add
+// ============================================================================
+
+// AVX2 BF16 add: process 8 elements per iteration
+// BF16 -> shift left 16 to get FP32 -> add -> shift right 16 to get BF16
+#if defined(__AVX2__) && !defined(__AVX512F__)
+static void add_bf16_avx2_loop(zedinfer::bf16_t *c, const zedinfer::bf16_t *a,
+                                const zedinfer::bf16_t *b, size_t start, size_t end) {
+    constexpr size_t vec_size = 8;
+    size_t i = start;
+    size_t aligned_end = start + ((end - start) / vec_size) * vec_size;
+    for (; i < aligned_end; i += vec_size) {
+        __m128i a_raw = _mm_loadu_si128(reinterpret_cast<const __m128i *>(a + i));
+        __m128i b_raw = _mm_loadu_si128(reinterpret_cast<const __m128i *>(b + i));
+        __m256i a_int = _mm256_cvtepu16_epi32(a_raw);
+        __m256i b_int = _mm256_cvtepu16_epi32(b_raw);
+        __m256 a_f32 = _mm256_castsi256_ps(_mm256_slli_epi32(a_int, 16));
+        __m256 b_f32 = _mm256_castsi256_ps(_mm256_slli_epi32(b_int, 16));
+        __m256 c_f32 = _mm256_add_ps(a_f32, b_f32);
+        // Pack back: shift right 16, then truncate 32->16 via shuffle+pack
+        __m256i c_int = _mm256_srli_epi32(_mm256_castps_si256(c_f32), 16);
+        // Extract low and high 128-bit lanes, pack 32->16
+        __m128i lo = _mm256_castsi256_si128(c_int);
+        __m128i hi = _mm256_extracti128_si256(c_int, 1);
+        __m128i packed = _mm_packus_epi32(lo, hi);
+        _mm_storeu_si128(reinterpret_cast<__m128i *>(c + i), packed);
     }
-
-#if defined(__AVX512F__)
-    const size_t vec_size = 16;
-    size_t align = numel & ~(vec_size - 1); // Bit-wise modulo, faster than % operator
-
-    // Medium scale: single-threaded SIMD (avoid OpenMP thread creation overhead)
-    if (numel < PARALLEL_THRESHOLD) {
-        size_t i = 0;
-
-        // Main loop: process 16 bf16 elements at once (converted to fp32 for addition)
-        for (; i < align; i += vec_size) {
-            // Load 16 bf16 values (each 2 bytes) as 256-bit integer vector
-            __m256i a_vec = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(a + i));
-            __m256i b_vec = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(b + i));
-
-            // Convert 16x bf16 (uint16_t) to 16x int32_t (zero-extended)
-            __m512i a_int = _mm512_cvtepu16_epi32(a_vec);
-            __m512i b_int = _mm512_cvtepu16_epi32(b_vec);
-
-            // Shift left by 16 bits to convert bf16 to fp32 format (implicit mantissa alignment)
-            // Reinterpret as float vectors for IEEE 754 arithmetic
-            __m512 a_f32 = _mm512_castsi512_ps(_mm512_slli_epi32(a_int, 16));
-            __m512 b_f32 = _mm512_castsi512_ps(_mm512_slli_epi32(b_int, 16));
-
-            // Perform floating-point addition
-            __m512 c_f32 = _mm512_add_ps(a_f32, b_f32);
-
-            // Convert result back to bf16: cast to int, right-shift 16 bits, then truncate to uint16_t
-            __m256i c_vec = _mm512_cvtepi32_epi16(_mm512_srli_epi32(_mm512_castps_si512(c_f32), 16));
-
-            // Store 16 bf16 results back to memory
-            _mm256_storeu_si256(reinterpret_cast<__m256i *>(c + i), c_vec);
-        }
-
-        // Handle remaining elements (< 16) using scalar conversion
-        for (; i < numel; ++i) {
-            float f_a = zedinfer::utils::cast<float>(a[i]);
-            float f_b = zedinfer::utils::cast<float>(b[i]);
-            c[i] = zedinfer::utils::cast<zedinfer::bf16_t>(f_a + f_b);
-        }
-        return;
-    }
-
-// Large scale: multi-threaded SIMD
-// Manual thread partitioning for better cache locality (static scheduling)
-#pragma omp parallel
-    {
-        int tid = omp_get_thread_num();
-        int nthreads = omp_get_num_threads();
-
-        // Manual chunking: ensure each thread processes multiples of vec_size
-        size_t chunk_size = align / nthreads;
-        chunk_size = (chunk_size / vec_size) * vec_size;
-
-        size_t start = tid * chunk_size;
-        size_t end = (tid == nthreads - 1) ? align : start + chunk_size;
-
-        for (size_t i = start; i < end; i += vec_size) {
-            // Load 16 bf16 values (each 2 bytes) as 256-bit integer vector
-            __m256i a_vec = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(a + i));
-            __m256i b_vec = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(b + i));
-
-            // Convert 16x bf16 (uint16_t) to 16x int32_t (zero-extended)
-            __m512i a_int = _mm512_cvtepu16_epi32(a_vec);
-            __m512i b_int = _mm512_cvtepu16_epi32(b_vec);
-
-            // Shift left by 16 bits to convert bf16 to fp32 format
-            // Reinterpret as float vectors for IEEE 754 arithmetic
-            __m512 a_f32 = _mm512_castsi512_ps(_mm512_slli_epi32(a_int, 16));
-            __m512 b_f32 = _mm512_castsi512_ps(_mm512_slli_epi32(b_int, 16));
-
-            // Perform floating-point addition
-            __m512 c_f32 = _mm512_add_ps(a_f32, b_f32);
-
-            // Convert result back to bf16: cast to int, right-shift 16 bits, then truncate
-            __m256i c_vec = _mm512_cvtepi32_epi16(_mm512_srli_epi32(_mm512_castps_si512(c_f32), 16));
-
-            // Store 16 bf16 results back to memory
-            _mm256_storeu_si256(reinterpret_cast<__m256i *>(c + i), c_vec);
-        }
-    }
-
-    // Single-threaded tail processing for remaining elements
-    for (size_t i = align; i < numel; ++i) {
+    for (; i < end; ++i) {
         float f_a = zedinfer::utils::cast<float>(a[i]);
         float f_b = zedinfer::utils::cast<float>(b[i]);
         c[i] = zedinfer::utils::cast<zedinfer::bf16_t>(f_a + f_b);
     }
-
-#else
-    // Fallback: scalar implementation with OpenMP parallelization for general CPUs
-    if (numel < PARALLEL_THRESHOLD) {
-        for (size_t i = 0; i < numel; ++i) {
-            float f_a = zedinfer::utils::cast<float>(a[i]);
-            float f_b = zedinfer::utils::cast<float>(b[i]);
-            c[i] = zedinfer::utils::cast<zedinfer::bf16_t>(f_a + f_b);
-        }
-    } else {
-#pragma omp parallel for schedule(static)
-        for (size_t i = 0; i < numel; ++i) {
-            float f_a = zedinfer::utils::cast<float>(a[i]);
-            float f_b = zedinfer::utils::cast<float>(b[i]);
-            c[i] = zedinfer::utils::cast<zedinfer::bf16_t>(f_a + f_b);
-        }
-    }
-#endif
 }
+#endif
 
-void add_f16(zedinfer::fp16_t *c, const zedinfer::fp16_t *a, const zedinfer::fp16_t *b, size_t numel) {
-    // Fast path: tiny data
-    if (numel <= SIMD_THRESHOLD) {
-        scalar_add_tiny(c, a, b, numel);
-        return;
+#if defined(__AVX512F__)
+static void add_bf16_avx512_loop(zedinfer::bf16_t *c, const zedinfer::bf16_t *a,
+                                  const zedinfer::bf16_t *b, size_t start, size_t end) {
+    constexpr size_t vec_size = 16;
+    size_t i = start;
+    size_t aligned_end = start + ((end - start) / vec_size) * vec_size;
+    for (; i < aligned_end; i += vec_size) {
+        __m256i a_raw = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(a + i));
+        __m256i b_raw = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(b + i));
+        __m512i a_int = _mm512_cvtepu16_epi32(a_raw);
+        __m512i b_int = _mm512_cvtepu16_epi32(b_raw);
+        __m512 a_f32 = _mm512_castsi512_ps(_mm512_slli_epi32(a_int, 16));
+        __m512 b_f32 = _mm512_castsi512_ps(_mm512_slli_epi32(b_int, 16));
+        __m512 c_f32 = _mm512_add_ps(a_f32, b_f32);
+        __m256i c_vec = _mm512_cvtepi32_epi16(_mm512_srli_epi32(_mm512_castps_si512(c_f32), 16));
+        _mm256_storeu_si256(reinterpret_cast<__m256i *>(c + i), c_vec);
     }
-
-#if defined(__AVX512F__) && defined(__F16C__)
-    const size_t vec_size = 16;
-    size_t align = numel & ~(vec_size - 1); // Bit-wise modulo
-
-    // Medium scale: single-threaded SIMD
-    if (numel < PARALLEL_THRESHOLD) {
-        size_t i = 0;
-
-        // Process 16 fp16 elements in parallel using native conversion
-        for (; i < align; i += vec_size) {
-            // Load 16 fp16 values (32 bytes) as 256-bit integer vector
-            __m256i a_vec = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(a + i));
-            __m256i b_vec = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(b + i));
-
-            // Convert 16x fp16 to 16x fp32 using F16C intrinsic (hardware-accelerated)
-            __m512 a_f32 = _mm512_cvtph_ps(a_vec);
-            __m512 b_f32 = _mm512_cvtph_ps(b_vec);
-
-            // Perform floating-point addition
-            __m512 c_f32 = _mm512_add_ps(a_f32, b_f32);
-
-            // Convert result back to fp16 with round-to-nearest-even (IEEE 754 compliant)
-            __m256i c_vec = _mm512_cvtps_ph(c_f32, _MM_FROUND_TO_NEAREST_INT);
-
-            // Store 16 fp16 results back to memory
-            _mm256_storeu_si256(reinterpret_cast<__m256i *>(c + i), c_vec);
-        }
-
-        // Handle remaining elements (< 16) with scalar fallback
-        for (; i < numel; ++i) {
-            float f_a = zedinfer::utils::cast<float>(a[i]);
-            float f_b = zedinfer::utils::cast<float>(b[i]);
-            c[i] = zedinfer::utils::cast<zedinfer::fp16_t>(f_a + f_b);
-        }
-        return;
-    }
-
-// Large scale: multi-threaded SIMD with manual partitioning
-#pragma omp parallel
-    {
-        int tid = omp_get_thread_num();
-        int nthreads = omp_get_num_threads();
-
-        // Manual chunking for cache-friendly access patterns
-        size_t chunk_size = align / nthreads;
-        chunk_size = (chunk_size / vec_size) * vec_size;
-
-        size_t start = tid * chunk_size;
-        size_t end = (tid == nthreads - 1) ? align : start + chunk_size;
-
-        for (size_t i = start; i < end; i += vec_size) {
-            // Load 16 fp16 values (32 bytes) as 256-bit integer vector
-            __m256i a_vec = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(a + i));
-            __m256i b_vec = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(b + i));
-
-            // Convert 16x fp16 to 16x fp32 using F16C intrinsic
-            __m512 a_f32 = _mm512_cvtph_ps(a_vec);
-            __m512 b_f32 = _mm512_cvtph_ps(b_vec);
-
-            // Perform floating-point addition
-            __m512 c_f32 = _mm512_add_ps(a_f32, b_f32);
-
-            // Convert result back to fp16 with round-to-nearest-even
-            __m256i c_vec = _mm512_cvtps_ph(c_f32, _MM_FROUND_TO_NEAREST_INT);
-
-            // Store 16 fp16 results back to memory
-            _mm256_storeu_si256(reinterpret_cast<__m256i *>(c + i), c_vec);
-        }
-    }
-
-    // Single-threaded tail processing
-    for (size_t i = align; i < numel; ++i) {
+    for (; i < end; ++i) {
         float f_a = zedinfer::utils::cast<float>(a[i]);
         float f_b = zedinfer::utils::cast<float>(b[i]);
-        c[i] = zedinfer::utils::cast<zedinfer::fp16_t>(f_a + f_b);
+        c[i] = zedinfer::utils::cast<zedinfer::bf16_t>(f_a + f_b);
     }
-
-#else
-    // Fallback: scalar implementation with OpenMP parallelization for platforms without F16C support
-    if (numel < PARALLEL_THRESHOLD) {
-        for (size_t i = 0; i < numel; ++i) {
-            float f_a = zedinfer::utils::cast<float>(a[i]);
-            float f_b = zedinfer::utils::cast<float>(b[i]);
-            c[i] = zedinfer::utils::cast<zedinfer::fp16_t>(f_a + f_b);
-        }
-    } else {
-#pragma omp parallel for schedule(static)
-        for (size_t i = 0; i < numel; ++i) {
-            float f_a = zedinfer::utils::cast<float>(a[i]);
-            float f_b = zedinfer::utils::cast<float>(b[i]);
-            c[i] = zedinfer::utils::cast<zedinfer::fp16_t>(f_a + f_b);
-        }
-    }
+}
 #endif
+
+void add_bf16(zedinfer::bf16_t *c, const zedinfer::bf16_t *a, const zedinfer::bf16_t *b, size_t numel) {
+    if (numel <= SIMD_THRESHOLD) { scalar_add_tiny(c, a, b, numel); return; }
+
+#if defined(__AVX512F__)
+    auto loop = add_bf16_avx512_loop;
+#elif defined(__AVX2__)
+    auto loop = add_bf16_avx2_loop;
+#else
+    auto loop = [](zedinfer::bf16_t *c, const zedinfer::bf16_t *a, const zedinfer::bf16_t *b, size_t s, size_t e) {
+        for (size_t i = s; i < e; ++i) { c[i] = zedinfer::utils::cast<zedinfer::bf16_t>(zedinfer::utils::cast<float>(a[i]) + zedinfer::utils::cast<float>(b[i])); }
+    };
+#endif
+
+    if (numel < PARALLEL_THRESHOLD) {
+        loop(c, a, b, 0, numel);
+    } else {
+#pragma omp parallel
+        {
+            int tid = omp_get_thread_num();
+            int nt = omp_get_num_threads();
+            size_t chunk = numel / nt;
+            size_t start = tid * chunk;
+            size_t end = (tid == nt - 1) ? numel : start + chunk;
+            loop(c, a, b, start, end);
+        }
+    }
 }
 
-void add_f32(float *c, const float *a, const float *b, size_t numel) {
-    // Fast path: tiny data - pure scalar is fastest
-    if (numel <= SIMD_THRESHOLD) {
-        for (size_t i = 0; i < numel; ++i) {
-            c[i] = a[i] + b[i];
+// ============================================================================
+// FP16 add
+// ============================================================================
+
+#if defined(__AVX2__) && defined(__F16C__) && !defined(__AVX512F__)
+static void add_f16_avx2_loop(zedinfer::fp16_t *c, const zedinfer::fp16_t *a,
+                                const zedinfer::fp16_t *b, size_t start, size_t end) {
+    constexpr size_t vec_size = 8;
+    size_t i = start;
+    size_t aligned_end = start + ((end - start) / vec_size) * vec_size;
+    for (; i < aligned_end; i += vec_size) {
+        __m128i a_raw = _mm_loadu_si128(reinterpret_cast<const __m128i *>(a + i));
+        __m128i b_raw = _mm_loadu_si128(reinterpret_cast<const __m128i *>(b + i));
+        __m256 a_f32 = _mm256_cvtph_ps(a_raw);
+        __m256 b_f32 = _mm256_cvtph_ps(b_raw);
+        __m256 c_f32 = _mm256_add_ps(a_f32, b_f32);
+        __m128i c_raw = _mm256_cvtps_ph(c_f32, _MM_FROUND_TO_NEAREST_INT);
+        _mm_storeu_si128(reinterpret_cast<__m128i *>(c + i), c_raw);
+    }
+    for (; i < end; ++i) {
+        c[i] = zedinfer::utils::cast<zedinfer::fp16_t>(zedinfer::utils::cast<float>(a[i]) + zedinfer::utils::cast<float>(b[i]));
+    }
+}
+#endif
+
+#if defined(__AVX512F__) && defined(__F16C__)
+static void add_f16_avx512_loop(zedinfer::fp16_t *c, const zedinfer::fp16_t *a,
+                                  const zedinfer::fp16_t *b, size_t start, size_t end) {
+    constexpr size_t vec_size = 16;
+    size_t i = start;
+    size_t aligned_end = start + ((end - start) / vec_size) * vec_size;
+    for (; i < aligned_end; i += vec_size) {
+        __m256i a_raw = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(a + i));
+        __m256i b_raw = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(b + i));
+        __m512 a_f32 = _mm512_cvtph_ps(a_raw);
+        __m512 b_f32 = _mm512_cvtph_ps(b_raw);
+        __m512 c_f32 = _mm512_add_ps(a_f32, b_f32);
+        __m256i c_raw = _mm512_cvtps_ph(c_f32, _MM_FROUND_TO_NEAREST_INT);
+        _mm256_storeu_si256(reinterpret_cast<__m256i *>(c + i), c_raw);
+    }
+    for (; i < end; ++i) {
+        c[i] = zedinfer::utils::cast<zedinfer::fp16_t>(zedinfer::utils::cast<float>(a[i]) + zedinfer::utils::cast<float>(b[i]));
+    }
+}
+#endif
+
+void add_f16(zedinfer::fp16_t *c, const zedinfer::fp16_t *a, const zedinfer::fp16_t *b, size_t numel) {
+    if (numel <= SIMD_THRESHOLD) { scalar_add_tiny(c, a, b, numel); return; }
+
+#if defined(__AVX512F__) && defined(__F16C__)
+    auto loop = add_f16_avx512_loop;
+#elif defined(__AVX2__) && defined(__F16C__)
+    auto loop = add_f16_avx2_loop;
+#else
+    auto loop = [](zedinfer::fp16_t *c, const zedinfer::fp16_t *a, const zedinfer::fp16_t *b, size_t s, size_t e) {
+        for (size_t i = s; i < e; ++i) { c[i] = zedinfer::utils::cast<zedinfer::fp16_t>(zedinfer::utils::cast<float>(a[i]) + zedinfer::utils::cast<float>(b[i])); }
+    };
+#endif
+
+    if (numel < PARALLEL_THRESHOLD) {
+        loop(c, a, b, 0, numel);
+    } else {
+#pragma omp parallel
+        {
+            int tid = omp_get_thread_num();
+            int nt = omp_get_num_threads();
+            size_t chunk = numel / nt;
+            size_t start = tid * chunk;
+            size_t end = (tid == nt - 1) ? numel : start + chunk;
+            loop(c, a, b, start, end);
         }
+    }
+}
+
+// ============================================================================
+// FP32 add
+// ============================================================================
+
+#if defined(__AVX2__) && !defined(__AVX512F__)
+static void add_f32_avx2_loop(float *c, const float *a, const float *b, size_t start, size_t end) {
+    constexpr size_t vec_size = 8;
+    size_t i = start;
+    size_t aligned_end = start + ((end - start) / vec_size) * vec_size;
+    for (; i + 15 < aligned_end; i += 16) {
+        __m256 va0 = _mm256_loadu_ps(a + i);
+        __m256 vb0 = _mm256_loadu_ps(b + i);
+        _mm256_storeu_ps(c + i, _mm256_add_ps(va0, vb0));
+        __m256 va1 = _mm256_loadu_ps(a + i + 8);
+        __m256 vb1 = _mm256_loadu_ps(b + i + 8);
+        _mm256_storeu_ps(c + i + 8, _mm256_add_ps(va1, vb1));
+    }
+    for (; i < aligned_end; i += vec_size) {
+        _mm256_storeu_ps(c + i, _mm256_add_ps(_mm256_loadu_ps(a + i), _mm256_loadu_ps(b + i)));
+    }
+    for (; i < end; ++i) { c[i] = a[i] + b[i]; }
+}
+#endif
+
+#if defined(__AVX512F__)
+static void add_f32_avx512_loop(float *c, const float *a, const float *b, size_t start, size_t end) {
+    constexpr size_t vec_size = 16;
+    size_t i = start;
+    size_t aligned_end = start + ((end - start) / vec_size) * vec_size;
+    for (; i + 31 < aligned_end; i += 32) {
+        _mm512_storeu_ps(c + i, _mm512_add_ps(_mm512_loadu_ps(a + i), _mm512_loadu_ps(b + i)));
+        _mm512_storeu_ps(c + i + 16, _mm512_add_ps(_mm512_loadu_ps(a + i + 16), _mm512_loadu_ps(b + i + 16)));
+    }
+    for (; i < aligned_end; i += vec_size) {
+        _mm512_storeu_ps(c + i, _mm512_add_ps(_mm512_loadu_ps(a + i), _mm512_loadu_ps(b + i)));
+    }
+    for (; i < end; ++i) { c[i] = a[i] + b[i]; }
+}
+#endif
+
+void add_f32(float *c, const float *a, const float *b, size_t numel) {
+    if (numel <= SIMD_THRESHOLD) {
+        for (size_t i = 0; i < numel; ++i) { c[i] = a[i] + b[i]; }
         return;
     }
 
 #if defined(__AVX512F__)
-    const size_t vec_size = 16;
-    size_t align = numel & ~(vec_size - 1); // Bit-wise modulo
-
-    // Medium scale: single-threaded SIMD
-    if (numel < PARALLEL_THRESHOLD) {
-        size_t i = 0;
-
-        // Optional: 2x loop unrolling to reduce branch prediction overhead
-        for (; i + 31 < align; i += 32) {
-            // Process first 16 elements
-            __m512 va1 = _mm512_loadu_ps(a + i);  // Load 16 unaligned floats
-            __m512 vb1 = _mm512_loadu_ps(b + i);  // Load 16 unaligned floats
-            __m512 vc1 = _mm512_add_ps(va1, vb1); // Vectorized addition
-            _mm512_storeu_ps(c + i, vc1);         // Store result back
-
-            // Process second 16 elements
-            __m512 va2 = _mm512_loadu_ps(a + i + 16);
-            __m512 vb2 = _mm512_loadu_ps(b + i + 16);
-            __m512 vc2 = _mm512_add_ps(va2, vb2);
-            _mm512_storeu_ps(c + i + 16, vc2);
-        }
-
-        // Process remaining 16-element blocks
-        for (; i < align; i += vec_size) {
-            __m512 va = _mm512_loadu_ps(a + i);
-            __m512 vb = _mm512_loadu_ps(b + i);
-            __m512 vc = _mm512_add_ps(va, vb);
-            _mm512_storeu_ps(c + i, vc);
-        }
-
-        // Handle remaining elements (< 16) with scalar fallback
-        for (; i < numel; ++i) {
-            c[i] = a[i] + b[i];
-        }
-        return;
-    }
-
-// Large scale: multi-threaded SIMD with manual partitioning
-#pragma omp parallel
-    {
-        int tid = omp_get_thread_num();
-        int nthreads = omp_get_num_threads();
-
-        // Manual chunking: ensure each thread processes multiples of vec_size
-        size_t chunk_size = align / nthreads;
-        chunk_size = (chunk_size / vec_size) * vec_size;
-
-        size_t start = tid * chunk_size;
-        size_t end = (tid == nthreads - 1) ? align : start + chunk_size;
-
-        // Process 16 single-precision floats per iteration
-        for (size_t i = start; i < end; i += vec_size) {
-            __m512 va = _mm512_loadu_ps(a + i); // Load 16 unaligned floats
-            __m512 vb = _mm512_loadu_ps(b + i); // Load 16 unaligned floats
-            __m512 vc = _mm512_add_ps(va, vb);  // Vectorized addition
-            _mm512_storeu_ps(c + i, vc);        // Store result back
-        }
-    }
-
-    // Single-threaded tail processing
-    for (size_t i = align; i < numel; ++i) {
-        c[i] = a[i] + b[i];
-    }
-
+    auto loop = add_f32_avx512_loop;
+#elif defined(__AVX2__)
+    auto loop = add_f32_avx2_loop;
 #else
-    // Fallback: scalar loop with OpenMP SIMD directive for automatic vectorization
-    // Compiler will auto-vectorize if target supports SSE/AVX and optimizations enabled
+    auto loop = [](float *c, const float *a, const float *b, size_t s, size_t e) {
+        for (size_t i = s; i < e; ++i) { c[i] = a[i] + b[i]; }
+    };
+#endif
+
     if (numel < PARALLEL_THRESHOLD) {
-#pragma omp simd
-        for (size_t i = 0; i < numel; ++i) {
-            c[i] = a[i] + b[i];
-        }
+        loop(c, a, b, 0, numel);
     } else {
-#pragma omp parallel for schedule(static) simd
-        for (size_t i = 0; i < numel; ++i) {
-            c[i] = a[i] + b[i];
+#pragma omp parallel
+        {
+            int tid = omp_get_thread_num();
+            int nt = omp_get_num_threads();
+            size_t chunk = numel / nt;
+            size_t start = tid * chunk;
+            size_t end = (tid == nt - 1) ? numel : start + chunk;
+            loop(c, a, b, start, end);
         }
     }
-#endif
 }

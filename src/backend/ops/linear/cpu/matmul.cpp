@@ -1,5 +1,7 @@
 #include "backend/ops/linear/cpu/matmul.hpp"
 
+#ifdef __AVX512F__
+
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
@@ -171,3 +173,14 @@ void matmul(const float *A, const float *B, float *C, int M, int N, int K) {
         }
     }
 }
+
+#else // !__AVX512F__
+
+#include <stdexcept>
+
+// AVX-512 not available. This function requires oneDNN (--onednn=y) on non-AVX-512 CPUs.
+void matmul(const float * /*A*/, const float * /*B*/, float * /*C*/, int /*M*/, int /*N*/, int /*K*/) {
+    throw std::runtime_error("matmul requires AVX-512. Use --onednn=y on this CPU.");
+}
+
+#endif // __AVX512F__

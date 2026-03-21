@@ -1,5 +1,7 @@
 #include "backend/ops/linear/cpu/vecmul.hpp"
 
+#ifdef __AVX512F__
+
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -129,3 +131,14 @@ void vecmul(const float *a, const float *B, float *c, int N, int K) {
         }
     }
 }
+
+#else // !__AVX512F__
+
+#include <stdexcept>
+
+// AVX-512 not available. This function requires oneDNN (--onednn=y) on non-AVX-512 CPUs.
+void vecmul(const float * /*a*/, const float * /*B*/, float * /*c*/, int /*N*/, int /*K*/) {
+    throw std::runtime_error("vecmul requires AVX-512. Use --onednn=y on this CPU.");
+}
+
+#endif // __AVX512F__

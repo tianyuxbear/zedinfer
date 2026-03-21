@@ -267,8 +267,12 @@ void fp32_to_bf16_batch_avx2(bf16_t *dst, const float *src, size_t count) {
         // 2. Shift right by 16 bits to extract upper 16 bits as BF16
         __m256i bf16_shifted = _mm256_srli_epi32(fp32_int, 16);
 
-        // 3. Pack 32-bit integers into 16-bit values
-        __m128i bf16_vec = _mm256_cvtepi32_epi16(bf16_shifted);
+        // 3. Pack 32-bit to 16-bit using AVX2 (no AVX-512VL needed)
+        //    _mm256_packus_epi32 packs with saturation across 128-bit lanes,
+        //    then _mm256_permute4x64_epi64 fixes the cross-lane ordering.
+        __m256i packed = _mm256_packus_epi32(bf16_shifted, _mm256_setzero_si256());
+        packed = _mm256_permute4x64_epi64(packed, 0xD8); // [0,2,1,3] -> fix lane order
+        __m128i bf16_vec = _mm256_castsi256_si128(packed);
 
         // Store 8 BF16 results to destination array
         _mm_storeu_si128(reinterpret_cast<__m128i *>(dst + i), bf16_vec);
