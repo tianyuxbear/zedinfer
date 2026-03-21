@@ -90,12 +90,20 @@ __global__ void self_attention_decode_kernel(
     for (int i = tid; i < d; i += blockDim.x) s_q[i] = to_float(q_ptr[i]);
     __syncthreads();
 
+    // Each thread owns one dv dimension for V aggregation.
+    // With BLOCK_SIZE > dv, multiple threads map to the same dv index.
+    // They split the KV tile range and reduce at the end.
+    const int dv_idx = tid % dv;
+    const int dv_group = blockDim.x / dv;  // how many threads share each dv index
+    const int dv_rank = tid / dv;           // which group member am I (0..dv_group-1)
+
     float prev_max = -FLT_MAX, prev_sum = 0.0f, acc_out = 0.0f;
 
     for (int kv_start = 0; kv_start < total_len; kv_start += TILE_KV) {
         const int tile_len = min(TILE_KV, total_len - kv_start);
         float warp_max = -FLT_MAX;
 
+        // Q*K scoring (unchanged — all threads participate via warps)
         for (int j_base = 0; j_base < tile_len; j_base += NUM_WARPS) {
             const int j_local = j_base + warp_id;
             float score = -FLT_MAX;
@@ -129,20 +137,40 @@ __global__ void self_attention_decode_kernel(
         prev_sum = prev_sum * alpha + tile_sum * beta;
         acc_out *= alpha;
 
-        if (tid < dv) {
+        // V aggregation: ALL threads participate.
+        // Each thread handles dv_idx, iterating over a strided subset of tile positions.
+        {
             float weighted_v = 0.0f;
 #pragma unroll 4
-            for (int j = 0; j < tile_len; ++j) {
-                weighted_v += s_scores[j] * to_float(V[(kv_start + j) * nkvhead * dv + kvh * dv + tid]);
+            for (int j = dv_rank; j < tile_len; j += dv_group) {
+                weighted_v += s_scores[j] * to_float(V[(kv_start + j) * nkvhead * dv + kvh * dv + dv_idx]);
             }
             acc_out += beta * weighted_v;
         }
+
         prev_max = new_max;
         __syncthreads();
     }
 
-    if (tid < dv)
-        attn_out[h * dv + tid] = from_float<T>(acc_out / prev_sum);
+    // Reduce across threads that share the same dv_idx
+    // Use shared memory: s_scores is free here (tile loop done)
+    if (dv_group > 1) {
+        // Store partial results
+        s_scores[tid] = acc_out;
+        __syncthreads();
+
+        // Thread 0..dv-1 reduce across their group
+        if (dv_rank == 0) {
+            float sum = s_scores[tid];
+            for (int g = 1; g < dv_group; ++g) {
+                sum += s_scores[g * dv + dv_idx];
+            }
+            attn_out[h * dv + dv_idx] = from_float<T>(sum / prev_sum);
+        }
+    } else {
+        if (tid < dv)
+            attn_out[h * dv + tid] = from_float<T>(acc_out / prev_sum);
+    }
 }
 
 // ============================================================================
