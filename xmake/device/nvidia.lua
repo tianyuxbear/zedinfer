@@ -22,5 +22,8 @@ target("ops-nvidia")
 
     add_files("../../src/backend/ops/*/nvidia/*.cu")
 
+    -- cuBLAS for optimized linear (GEMM/GEMV)
+    add_links("cublas", "cublasLt")
+
     on_install(function (target) end)
 target_end()
