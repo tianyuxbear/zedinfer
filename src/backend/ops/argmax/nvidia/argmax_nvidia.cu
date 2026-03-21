@@ -265,13 +265,22 @@ __global__ void argmax_reduce_block_scope(
     }
 }
 
+// Pre-allocated device buffer for argmax reduction (8 bytes, allocated once)
+static unsigned long long *get_packed_res_buf() {
+    static unsigned long long *buf = []() {
+        unsigned long long *p = nullptr;
+        CUDA_CHECK(cudaMalloc(&p, sizeof(unsigned long long)));
+        return p;
+    }();
+    return buf;
+}
+
 void argmax(std::byte *max_idx, std::byte *max_val, const std::byte *vals, zedinferDataType_t type, size_t numel) {
     dim3 block(BLOCK_SIZE);
     dim3 grid(BLOCK_SIZE);
 
     unsigned long long h_packed_res = pack(-std::numeric_limits<float>::infinity(), UINT32_MAX);
-    unsigned long long *d_packed_res;
-    CUDA_CHECK(cudaMalloc(&d_packed_res, sizeof(unsigned long long)));
+    unsigned long long *d_packed_res = get_packed_res_buf();
     CUDA_CHECK(cudaMemcpy(d_packed_res, &h_packed_res, sizeof(unsigned long long), cudaMemcpyHostToDevice));
 
     switch (type) {
