@@ -50,6 +50,18 @@ if has_config("nv-gpu") then
     includes("xmake/device/nvidia.lua")
 end
 
+-- oneDNN for optimized CPU linear (optional)
+option("onednn")
+    set_default(false)
+    set_showmenu(true)
+    set_description("Use oneDNN for optimized CPU linear (GEMM/GEMV)")
+option_end()
+
+if has_config("onednn") then
+    add_requires("onednn")
+    add_defines("USE_ONEDNN")
+end
+
 -- Python operator test bindings (optional)
 option("pytest")
     set_default(false)

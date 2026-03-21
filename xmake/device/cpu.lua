@@ -17,5 +17,10 @@ target("ops-cpu")
     -- rearrange/cpu/*.cpp is already compiled in the tensor target
     remove_files("../../src/backend/ops/rearrange/cpu/*.cpp")
 
+    -- oneDNN support (optional)
+    if has_config("onednn") then
+        add_packages("onednn")
+    end
+
     on_install(function (target) end)
 target_end()
