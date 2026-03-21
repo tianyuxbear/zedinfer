@@ -190,6 +190,44 @@ static std::shared_ptr<CachedGraph> get_or_build(
 }
 
 // ============================================================================
+// Pre-allocated transpose buffer pool
+// Grows on demand, never shrinks. Eliminates cudaMalloc/cudaFree per call.
+// ============================================================================
+
+struct TransposeBuffers {
+    std::byte *q = nullptr, *k = nullptr, *v = nullptr, *o = nullptr;
+    void *stats = nullptr;
+    size_t q_cap = 0, kv_cap = 0, stats_cap = 0;
+
+    void ensure(size_t q_bytes, size_t kv_bytes, size_t stats_bytes) {
+        if (q_bytes > q_cap) {
+            if (q) cudaFree(q);
+            if (o) cudaFree(o);
+            cudaMalloc(&q, q_bytes);
+            cudaMalloc(&o, q_bytes);
+            q_cap = q_bytes;
+        }
+        if (kv_bytes > kv_cap) {
+            if (k) cudaFree(k);
+            if (v) cudaFree(v);
+            cudaMalloc(&k, kv_bytes);
+            cudaMalloc(&v, kv_bytes);
+            kv_cap = kv_bytes;
+        }
+        if (stats_bytes > stats_cap) {
+            if (stats) cudaFree(stats);
+            cudaMalloc(&stats, stats_bytes);
+            stats_cap = stats_bytes;
+        }
+    }
+};
+
+static TransposeBuffers &get_buffers() {
+    static TransposeBuffers bufs;
+    return bufs;
+}
+
+// ============================================================================
 // Public API: accepts seq-major, transposes internally
 // ============================================================================
 
@@ -198,63 +236,54 @@ bool flash_attention_prefill(
     float scale, zedinferDataType_t type,
     int seqlen, int nhead, int head_dim, int total_len, int nkvhead) {
 
-    // Try to build cuDNN graph — returns nullptr if unsupported on this GPU
     auto cached = get_or_build(seqlen, total_len, nhead, nkvhead, head_dim, type, scale);
-    if (!cached) return false;  // signal caller to use fallback kernel
+    if (!cached) return false;
 
     size_t elem = (type == ZEDINFER_DTYPE_F16 || type == ZEDINFER_DTYPE_BF16) ? 2 : 4;
     size_t q_bytes = (size_t)seqlen * nhead * head_dim * elem;
     size_t kv_bytes = (size_t)total_len * nkvhead * head_dim * elem;
+    size_t stats_bytes = (size_t)seqlen * nhead * sizeof(float);
 
-    std::byte *q_t, *k_t, *v_t, *o_t;
-    cudaMalloc(&q_t, q_bytes);
-    cudaMalloc(&k_t, kv_bytes);
-    cudaMalloc(&v_t, kv_bytes);
-    cudaMalloc(&o_t, q_bytes);
+    auto &bufs = get_buffers();
+    bufs.ensure(q_bytes, kv_bytes, stats_bytes);
 
     constexpr int BLK = 256;
     int q_n = seqlen * nhead * head_dim;
     int kv_n = total_len * nkvhead * head_dim;
 
-    // Transpose [seqlen, nhead, hd] -> [nhead, seqlen, hd]
     if (type == ZEDINFER_DTYPE_BF16) {
         transpose_seq_to_head<<<(q_n + BLK - 1) / BLK, BLK>>>(
-            (__nv_bfloat16 *)q_t, (const __nv_bfloat16 *)q, seqlen, nhead, head_dim);
+            (__nv_bfloat16 *)bufs.q, (const __nv_bfloat16 *)q, seqlen, nhead, head_dim);
         transpose_seq_to_head<<<(kv_n + BLK - 1) / BLK, BLK>>>(
-            (__nv_bfloat16 *)k_t, (const __nv_bfloat16 *)k, total_len, nkvhead, head_dim);
+            (__nv_bfloat16 *)bufs.k, (const __nv_bfloat16 *)k, total_len, nkvhead, head_dim);
         transpose_seq_to_head<<<(kv_n + BLK - 1) / BLK, BLK>>>(
-            (__nv_bfloat16 *)v_t, (const __nv_bfloat16 *)v, total_len, nkvhead, head_dim);
+            (__nv_bfloat16 *)bufs.v, (const __nv_bfloat16 *)v, total_len, nkvhead, head_dim);
     } else {
         transpose_seq_to_head<<<(q_n + BLK - 1) / BLK, BLK>>>(
-            (half *)q_t, (const half *)q, seqlen, nhead, head_dim);
+            (half *)bufs.q, (const half *)q, seqlen, nhead, head_dim);
         transpose_seq_to_head<<<(kv_n + BLK - 1) / BLK, BLK>>>(
-            (half *)k_t, (const half *)k, total_len, nkvhead, head_dim);
+            (half *)bufs.k, (const half *)k, total_len, nkvhead, head_dim);
         transpose_seq_to_head<<<(kv_n + BLK - 1) / BLK, BLK>>>(
-            (half *)v_t, (const half *)v, total_len, nkvhead, head_dim);
+            (half *)bufs.v, (const half *)v, total_len, nkvhead, head_dim);
     }
 
-    void *stats_buf = nullptr;
-    cudaMalloc(&stats_buf, (size_t)seqlen * nhead * sizeof(float));
-
     std::unordered_map<int64_t, void *> variant_pack = {
-        {1, q_t}, {2, k_t}, {3, v_t}, {4, o_t}, {5, stats_buf}
+        {1, bufs.q}, {2, bufs.k}, {3, bufs.v}, {4, bufs.o}, {5, bufs.stats}
     };
 
     auto &handle = get_handle();
     bool ok = cached->graph->execute(handle, variant_pack, cached->workspace).is_good();
 
     if (ok) {
-        // Transpose O back: [nhead, seqlen, hd] -> [seqlen, nhead, hd]
         if (type == ZEDINFER_DTYPE_BF16) {
             transpose_head_to_seq<<<(q_n + BLK - 1) / BLK, BLK>>>(
-                (__nv_bfloat16 *)output, (const __nv_bfloat16 *)o_t, seqlen, nhead, head_dim);
+                (__nv_bfloat16 *)output, (const __nv_bfloat16 *)bufs.o, seqlen, nhead, head_dim);
         } else {
             transpose_head_to_seq<<<(q_n + BLK - 1) / BLK, BLK>>>(
-                (half *)output, (const half *)o_t, seqlen, nhead, head_dim);
+                (half *)output, (const half *)bufs.o, seqlen, nhead, head_dim);
         }
     }
 
-    cudaFree(q_t); cudaFree(k_t); cudaFree(v_t); cudaFree(o_t); cudaFree(stats_buf);
     return ok;
 }
 
