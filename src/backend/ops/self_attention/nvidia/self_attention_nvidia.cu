@@ -297,20 +297,28 @@ void self_attention(std::byte *attn_val, const std::byte *q, const std::byte *k,
         return;
     }
 
-    // Prefill: try cuDNN FlashAttention for FP16/BF16 (2-4x faster)
-    // Falls back to custom kernel if cuDNN doesn't support this GPU/config
+    // Prefill: try cuDNN FlashAttention for FP16/BF16
 #ifdef USE_CUDNN_FLASH
     if (type == ZEDINFER_DTYPE_F16 || type == ZEDINFER_DTYPE_BF16) {
         if (cudnn_flash::flash_attention_prefill(
                 attn_val, q, k, v, scale, type,
                 seqlen, nhead, d, total_len, nkvhead)) {
-            return;  // cuDNN succeeded
+            static bool logged = false;
+            if (!logged) {
+                fprintf(stderr, "[zedinfer] Prefill attention: cuDNN FlashAttention\n");
+                logged = true;
+            }
+            return;
         }
-        // cuDNN unsupported on this GPU — fall through to custom kernel
+        static bool logged = false;
+        if (!logged) {
+            fprintf(stderr, "[zedinfer] Prefill attention: custom kernel (cuDNN unsupported for this config)\n");
+            logged = true;
+        }
     }
 #endif
 
-    // Prefill fallback: custom kernel (FP32, unsupported GPU, or no cuDNN)
+    // Prefill fallback: custom kernel
     {
         dim3 block(BLOCK_SIZE);
         dim3 grid(seqlen, nhead);
