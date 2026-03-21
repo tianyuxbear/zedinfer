@@ -62,6 +62,20 @@ if has_config("onednn") then
     add_defines("USE_ONEDNN")
 end
 
+-- cuDNN FlashAttention for optimized GPU prefill attention (optional)
+option("cudnn-flash")
+    set_default(false)
+    set_showmenu(true)
+    set_description("Use cuDNN FlashAttention for optimized GPU prefill attention")
+option_end()
+
+if has_config("cudnn-flash") then
+    -- cudnn_frontend: header-only, cloned to third_party/cudnn-frontend
+    -- Install: git clone --depth 1  https://github.com/NVIDIA/cudnn-frontend.git third_party/cudnn-frontend
+    add_includedirs("third_party/cudnn-frontend/include")
+    add_defines("USE_CUDNN_FLASH")
+end
+
 -- Python operator test bindings (optional)
 option("pytest")
     set_default(false)
