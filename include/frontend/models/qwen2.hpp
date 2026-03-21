@@ -37,6 +37,12 @@ public:
     std::string model_type() const override { return "qwen2"; };
     size_t num_parameters() const override { return num_params_; };
 
+    tensor_t forward(
+        const std::vector<int> &input_ids,
+        int past_len,
+        kvcache::KVCache &kvcache,
+        const ExecutorConfig &exec_config) override;
+
 private:
     size_t calculate_num_parameters() const;
 

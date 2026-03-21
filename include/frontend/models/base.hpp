@@ -9,6 +9,13 @@
 #include <unordered_map>
 #include <vector>
 
+namespace zedinfer {
+struct ExecutorConfig;
+namespace kvcache {
+class KVCache;
+}
+} // namespace zedinfer
+
 namespace zedinfer::model {
 
 using json = nlohmann::json;
@@ -81,6 +88,20 @@ public:
     // Model metadata
     virtual std::string model_type() const = 0;
     virtual size_t num_parameters() const = 0;
+
+    /**
+     * Direct forward pass.
+     * @param input_ids   Token IDs (prefill: many tokens, decode: 1 token)
+     * @param past_len    Number of tokens already in kvcache
+     * @param kvcache     Session KV cache (read history, write new K/V)
+     * @param exec_config Device, dtype, max_seq_len
+     * @return Logits tensor [seq_len, vocab_size]
+     */
+    virtual tensor_t forward(
+        const std::vector<int> &input_ids,
+        int past_len,
+        kvcache::KVCache &kvcache,
+        const ExecutorConfig &exec_config) = 0;
 
 private:
     std::string model_path_;

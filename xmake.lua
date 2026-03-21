@@ -85,7 +85,6 @@ target("frontend")
     add_deps("sampler")
     add_deps("loader")
     add_deps("models")
-    add_deps("graph")
     on_install(function (target) end)
 target_end()
 
