@@ -3,55 +3,69 @@
 #include "utils/types.hpp"
 
 #include <cmath>
+#include <omp.h>
 #include <vector>
 
 namespace zedinfer::ops::cpu {
 
 template <typename T>
-void rope_(T *output, const T *input, const int64_t *pos_ids, size_t seq_len, size_t num_heads, size_t head_dim, const std::vector<float> &inv_theta) {
+void rope_(T *output, const T *input, const int64_t *pos_ids,
+           size_t seq_len, size_t num_heads, size_t head_dim,
+           const std::vector<float> &inv_theta) {
 
-    size_t half_dim = head_dim / 2;
+    const size_t half_dim = head_dim / 2;
+
+    // Pre-allocate per-thread sin/cos buffers
+    const int max_threads = omp_get_max_threads();
+    std::vector<std::vector<float>> thread_cos(max_threads);
+    std::vector<std::vector<float>> thread_sin(max_threads);
+    for (int t = 0; t < max_threads; ++t) {
+        thread_cos[t].resize(half_dim);
+        thread_sin[t].resize(half_dim);
+    }
+
 #pragma omp parallel for schedule(static)
     for (size_t i = 0; i < seq_len; ++i) {
-        std::vector<float> cos_cache(half_dim);
-        std::vector<float> sin_cache(half_dim);
-        int64_t p_i = pos_ids[i];
+        const int tid = omp_get_thread_num();
+        float *cos_buf = thread_cos[tid].data();
+        float *sin_buf = thread_sin[tid].data();
+        const int64_t p_i = pos_ids[i];
 
-#pragma omp simd
         for (size_t k = 0; k < half_dim; ++k) {
-            float angle = static_cast<float>(p_i * inv_theta[k]);
+            float angle = static_cast<float>(p_i) * inv_theta[k];
 #ifdef __linux__
-            sincosf(angle, &sin_cache[k], &cos_cache[k]);
+            sincosf(angle, &sin_buf[k], &cos_buf[k]);
 #else
-            cos_cache[k] = std::cos(angle);
-            sin_cache[k] = std::sin(angle);
+            cos_buf[k] = std::cos(angle);
+            sin_buf[k] = std::sin(angle);
 #endif
         }
 
         for (size_t j = 0; j < num_heads; ++j) {
-            T *output_t = output + (i * num_heads + j) * head_dim;
-            const T *input_t = input + (i * num_heads + j) * head_dim;
+            T *out_head = output + (i * num_heads + j) * head_dim;
+            const T *in_head = input + (i * num_heads + j) * head_dim;
 
 #pragma omp simd
             for (size_t k = 0; k < half_dim; ++k) {
-                float cos_val = cos_cache[k];
-                float sin_val = sin_cache[k];
-                float a = zedinfer::utils::cast<float>(input_t[k]);
-                float b = zedinfer::utils::cast<float>(input_t[k + half_dim]);
-                output_t[k] = zedinfer::utils::cast<T>(a * cos_val - b * sin_val);
-                output_t[k + half_dim] = zedinfer::utils::cast<T>(b * cos_val + a * sin_val);
+                float a = zedinfer::utils::cast<float>(in_head[k]);
+                float b = zedinfer::utils::cast<float>(in_head[k + half_dim]);
+                out_head[k] = zedinfer::utils::cast<T>(a * cos_buf[k] - b * sin_buf[k]);
+                out_head[k + half_dim] = zedinfer::utils::cast<T>(b * cos_buf[k] + a * sin_buf[k]);
             }
         }
     }
 }
 
-void rope(std::byte *output, const std::byte *input, const std::byte *pos_ids, float theta, zedinferDataType_t type, size_t seq_len, size_t num_heads, size_t head_dim) {
+void rope(std::byte *output, const std::byte *input, const std::byte *pos_ids,
+          float theta, zedinferDataType_t type,
+          size_t seq_len, size_t num_heads, size_t head_dim) {
 
-    size_t half_dim = head_dim / 2;
+    // Pre-compute inverse theta frequencies (once per call, tiny cost)
+    const size_t half_dim = head_dim / 2;
     std::vector<float> inv_theta(half_dim);
     for (size_t k = 0; k < half_dim; ++k) {
         float expo = static_cast<float>(2 * k) / static_cast<float>(head_dim);
-        inv_theta[k] = 1.0 / std::pow(theta, expo);
+        inv_theta[k] = 1.0f / std::pow(theta, expo);
     }
 
     switch (type) {
@@ -74,4 +88,5 @@ void rope(std::byte *output, const std::byte *input, const std::byte *pos_ids, f
         EXCEPTION_UNSUPPORTED_DATATYPE(type);
     }
 }
+
 } // namespace zedinfer::ops::cpu

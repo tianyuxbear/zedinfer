@@ -12,62 +12,74 @@
 namespace zedinfer::ops::cpu {
 
 template <typename T>
-void rms_norm_(T *output, const T *input, const T *weight, float eps, size_t seq_len, size_t hidden_size) {
+void rms_norm_(T *output, const T *input, const T *weight, float eps,
+               size_t seq_len, size_t hidden_size) {
+
+    if constexpr (std::is_same_v<T, float>) {
+        // FP32 path: no conversion needed
 #pragma omp parallel for
-    for (size_t i = 0; i < seq_len; ++i) {
-        T *output_t = output + i * hidden_size;
-        const T *input_t = input + i * hidden_size;
+        for (size_t i = 0; i < seq_len; ++i) {
+            const float *in_row = input + i * hidden_size;
+            float *out_row = output + i * hidden_size;
 
+            float sq_sum = sdot(in_row, in_row, hidden_size);
+            float rstd = 1.0f / std::sqrt(sq_sum / static_cast<float>(hidden_size) + eps);
+
+            for (size_t j = 0; j < hidden_size; ++j) {
+                out_row[j] = weight[j] * in_row[j] * rstd;
+            }
+        }
+    } else {
+        // BF16/FP16 path: pre-allocate per-thread conversion buffers
+        const int max_threads = omp_get_max_threads();
+        std::vector<std::vector<float>> thread_in(max_threads);
+        std::vector<std::vector<float>> thread_out(max_threads);
+        for (int t = 0; t < max_threads; ++t) {
+            thread_in[t].resize(hidden_size);
+            thread_out[t].resize(hidden_size);
+        }
+
+        // Convert weight once (shared, read-only)
+        std::vector<float> weight_f32(hidden_size);
         if constexpr (std::is_same_v<T, zedinfer::bf16_t>) {
-            float rms{}, square_sum{}, avg_square_sum{};
-            std::vector<float> in_f32(hidden_size);
-            std::vector<float> weight_f32(hidden_size);
-            std::vector<float> output_f32(hidden_size);
-
-            zedinfer::utils::bf16_to_fp32_batch(in_f32.data(), input_t, hidden_size);
             zedinfer::utils::bf16_to_fp32_batch(weight_f32.data(), weight, hidden_size);
-
-            square_sum = sdot(in_f32.data(), in_f32.data(), hidden_size);
-            avg_square_sum = square_sum / static_cast<float>(hidden_size);
-            rms = std::sqrt(avg_square_sum + eps);
-
-            for (size_t j = 0; j < hidden_size; ++j) {
-                output_f32[j] = weight_f32[j] * in_f32[j] / rms;
-            }
-            zedinfer::utils::fp32_to_bf16_batch(output_t, output_f32.data(), hidden_size);
-
-        } else if constexpr (std::is_same_v<T, zedinfer::fp16_t>) {
-            float rms{}, square_sum{}, avg_square_sum{};
-            std::vector<float> in_f32(hidden_size);
-            std::vector<float> weight_f32(hidden_size);
-            std::vector<float> output_f32(hidden_size);
-
-            zedinfer::utils::fp16_to_fp32_batch_f16c(in_f32.data(), input_t, hidden_size);
-            zedinfer::utils::fp16_to_fp32_batch_f16c(weight_f32.data(), weight, hidden_size);
-
-            square_sum = sdot(in_f32.data(), in_f32.data(), hidden_size);
-            avg_square_sum = square_sum / static_cast<float>(hidden_size);
-            rms = std::sqrt(avg_square_sum + eps);
-
-            for (size_t j = 0; j < hidden_size; ++j) {
-                output_f32[j] = weight_f32[j] * in_f32[j] / rms;
-            }
-            zedinfer::utils::fp32_to_fp16_batch_f16c(output_t, output_f32.data(), hidden_size);
-
         } else {
-            T rms{}, square_sum{}, avg_square_sum{};
-            square_sum = sdot(input_t, input_t, hidden_size);
-            avg_square_sum = square_sum / static_cast<T>(hidden_size);
-            rms = std::sqrt(avg_square_sum + eps);
+            zedinfer::utils::fp16_to_fp32_batch_f16c(weight_f32.data(), weight, hidden_size);
+        }
+
+#pragma omp parallel for
+        for (size_t i = 0; i < seq_len; ++i) {
+            const int tid = omp_get_thread_num();
+            float *in_f32 = thread_in[tid].data();
+            float *out_f32 = thread_out[tid].data();
+
+            const T *in_row = input + i * hidden_size;
+            T *out_row = output + i * hidden_size;
+
+            if constexpr (std::is_same_v<T, zedinfer::bf16_t>) {
+                zedinfer::utils::bf16_to_fp32_batch(in_f32, in_row, hidden_size);
+            } else {
+                zedinfer::utils::fp16_to_fp32_batch_f16c(in_f32, in_row, hidden_size);
+            }
+
+            float sq_sum = sdot(in_f32, in_f32, hidden_size);
+            float rstd = 1.0f / std::sqrt(sq_sum / static_cast<float>(hidden_size) + eps);
 
             for (size_t j = 0; j < hidden_size; ++j) {
-                output_t[j] = weight[j] * input_t[j] / rms;
+                out_f32[j] = weight_f32[j] * in_f32[j] * rstd;
+            }
+
+            if constexpr (std::is_same_v<T, zedinfer::bf16_t>) {
+                zedinfer::utils::fp32_to_bf16_batch(out_row, out_f32, hidden_size);
+            } else {
+                zedinfer::utils::fp32_to_fp16_batch_f16c(out_row, out_f32, hidden_size);
             }
         }
     }
 }
 
-void rms_norm(std::byte *output, const std::byte *input, const std::byte *weight, float eps, zedinferDataType_t type, size_t seq_len, size_t hidden_size) {
+void rms_norm(std::byte *output, const std::byte *input, const std::byte *weight,
+              float eps, zedinferDataType_t type, size_t seq_len, size_t hidden_size) {
     switch (type) {
     case ZEDINFER_DTYPE_F32:
         return rms_norm_(reinterpret_cast<float *>(output),
@@ -88,4 +100,5 @@ void rms_norm(std::byte *output, const std::byte *input, const std::byte *weight
         EXCEPTION_UNSUPPORTED_DATATYPE(type);
     }
 }
+
 } // namespace zedinfer::ops::cpu
