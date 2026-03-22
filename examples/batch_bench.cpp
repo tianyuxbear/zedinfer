@@ -87,9 +87,7 @@ int main(int argc, char *argv[]) {
     printf("Config: batch_size=%d, prefill=%d, decode=%d, rounds=%d\n",
            batch_size, prefill_len, decode_len, rounds);
 
-    // Get vocab size for random token generation
-    int vocab_size = static_cast<int>(engine->profile(1, 1).first); // dummy call
-    // Use random tokens for input
+    // Random token range for input
     int min_id = 100, max_id = 30000;
 
     double total_time_ms = 0.0;
@@ -140,9 +138,7 @@ int main(int argc, char *argv[]) {
     double avg_tokens = static_cast<double>(total_generated_tokens) / rounds;
     double throughput_tps = avg_tokens / avg_time_ms * 1000.0;
 
-    // Per-request metrics
     double avg_per_request_ms = avg_time_ms / batch_size;
-    double per_request_tps = static_cast<double>(decode_len) / avg_per_request_ms * 1000.0;
 
     printf("\n============ Batch Performance Report ============\n");
     printf("Batch size     : %d requests\n", batch_size);

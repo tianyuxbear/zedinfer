@@ -32,8 +32,8 @@ struct AttentionParams {
     const AttentionConfig &config;
 
     // Output and query
-    tensor_t out;
-    tensor_t q;
+    tensor_t out = nullptr;
+    tensor_t q = nullptr;
 
     // === Contiguous mode (warmup/profile) ===
     tensor_t k_contiguous = nullptr;
