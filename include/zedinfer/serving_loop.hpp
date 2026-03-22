@@ -5,8 +5,11 @@
 #include "zedinfer/request.hpp"
 #include "zedinfer/scheduler.hpp"
 
+#include <atomic>
+#include <condition_variable>
 #include <future>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -16,7 +19,9 @@ class InferenceEngine;
 
 /**
  * Serving loop: owns the Scheduler and drives synchronous/batched generation.
- * Separated from InferenceEngine to isolate serving logic from resource management.
+ *
+ * For HTTP API: submit_async() from HTTP threads, run_serving() on engine thread.
+ * run_serving() sleeps when idle, wakes on new submissions.
  */
 class ServingLoop {
 public:
@@ -31,14 +36,30 @@ public:
                                      const std::vector<int> &input_ids,
                                      const GenerationConfig &config);
 
-    // Async batch mode (used by HTTP API and batch_bench)
+    // Async batch mode
     std::future<GenerationResult> submit_async(std::unique_ptr<InferenceRequest> request);
+
+    // Single iteration (non-blocking). Returns true if work was done.
     bool step();
+
+    // Run until all current work is done (offline batch mode, e.g. batch_bench).
     void run_loop();
+
+    // Run continuously until stop() is called (serving mode, e.g. HTTP API).
+    // Sleeps when idle, wakes on new submissions.
+    void run_serving();
+
+    // Signal the serving loop to stop. Safe to call from any thread.
+    void stop();
 
 private:
     std::shared_ptr<InferenceEngine> engine_;
     Scheduler scheduler_;
+
+    // Thread synchronization for serving mode
+    std::mutex work_mutex_;
+    std::condition_variable work_cv_;
+    std::atomic<bool> running_{false};
 
     std::unique_ptr<InferenceRequest> build_request(
         const std::vector<int> &input_ids,

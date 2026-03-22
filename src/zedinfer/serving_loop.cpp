@@ -96,6 +96,8 @@ std::future<GenerationResult> ServingLoop::submit_async(
     std::unique_ptr<InferenceRequest> request) {
     auto future = request->result_promise.get_future();
     scheduler_.submit(std::move(request));
+    // Wake the serving loop if it's waiting
+    work_cv_.notify_one();
     return future;
 }
 
@@ -120,6 +122,38 @@ void ServingLoop::run_loop() {
     while (scheduler_.has_work()) {
         step();
     }
+}
+
+void ServingLoop::run_serving() {
+    running_ = true;
+    LOGI << "[ServingLoop] Started";
+
+    while (running_) {
+        // Process all pending work
+        while (scheduler_.has_work() && running_) {
+            step();
+        }
+
+        // No work — wait for new submissions or stop signal
+        if (running_) {
+            std::unique_lock<std::mutex> lock(work_mutex_);
+            work_cv_.wait(lock, [this] {
+                return scheduler_.has_work() || !running_;
+            });
+        }
+    }
+
+    // Drain remaining work before exit
+    while (scheduler_.has_work()) {
+        step();
+    }
+
+    LOGI << "[ServingLoop] Stopped";
+}
+
+void ServingLoop::stop() {
+    running_ = false;
+    work_cv_.notify_one();
 }
 
 } // namespace zedinfer
