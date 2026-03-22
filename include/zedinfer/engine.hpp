@@ -56,6 +56,8 @@ public:
     }
     bool step() { return serving_loop_->step(); }
     void run_loop() { serving_loop_->run_loop(); }
+    void run_serving() { serving_loop_->run_serving(); }
+    void stop_serving() { serving_loop_->stop(); }
 
     // Delegation to Profiler
     void warmup(size_t pl = 128, size_t ds = 128) { profiler_->warmup(pl, ds); }
