@@ -57,25 +57,70 @@ void PagedKVCache::ensure_write_capacity(int seq_len) {
 
 tensor_t PagedKVCache::get_k_cache_slice(int layer_idx, int past_len, int seq_len) {
     validate_layer_idx(layer_idx);
-    ensure_write_capacity(seq_len);
 
-    // Track pending write for scatter in update_seq_len()
-    if (pending_write_past_len_ < 0) {
-        pending_write_past_len_ = past_len;
+    // Decode (single token): return tensor backed by block memory directly.
+    // Model writes K into block, paged attention reads it — zero copy.
+    if (seq_len == 1) {
+        ensure_blocks_for_tokens(past_len + 1);
+        int bs = allocator_.block_size();
+        int block_idx = past_len / bs;
+        int offset = past_len % bs;
+        size_t token_bytes = allocator_.pool().config().token_bytes();
+        std::byte *ptr = static_cast<std::byte *>(
+            allocator_.pool().block_data(block_table_.k_blocks[layer_idx][block_idx]))
+            + offset * token_bytes;
+
+        // Mark pending write for gather path (prefill reads) and update_seq_len
+        if (pending_write_past_len_ < 0) pending_write_past_len_ = past_len;
+        pending_write_seq_len_ = 1;
+        direct_write_to_blocks_ = true;
+
+        return Tensor::create(
+            {1, static_cast<size_t>(config_.num_kv_heads),
+             static_cast<size_t>(config_.head_dim)},
+            config_.dtype, config_.device_type, config_.device_id,
+            true, ptr);
     }
+
+    // Prefill (multi-token): use write buffer
+    ensure_write_capacity(seq_len);
+    if (pending_write_past_len_ < 0) pending_write_past_len_ = past_len;
     pending_write_seq_len_ = seq_len;
+    direct_write_to_blocks_ = false;
 
     return write_k_bufs_[layer_idx]->slice(0, 0, seq_len);
 }
 
 tensor_t PagedKVCache::get_v_cache_slice(int layer_idx, int past_len, int seq_len) {
     validate_layer_idx(layer_idx);
-    ensure_write_capacity(seq_len);
 
-    if (pending_write_past_len_ < 0) {
-        pending_write_past_len_ = past_len;
+    // Decode (single token): return tensor backed by block memory directly.
+    if (seq_len == 1) {
+        ensure_blocks_for_tokens(past_len + 1);
+        int bs = allocator_.block_size();
+        int block_idx = past_len / bs;
+        int offset = past_len % bs;
+        size_t token_bytes = allocator_.pool().config().token_bytes();
+        std::byte *ptr = static_cast<std::byte *>(
+            allocator_.pool().block_data(block_table_.v_blocks[layer_idx][block_idx]))
+            + offset * token_bytes;
+
+        if (pending_write_past_len_ < 0) pending_write_past_len_ = past_len;
+        pending_write_seq_len_ = 1;
+        direct_write_to_blocks_ = true;
+
+        return Tensor::create(
+            {1, static_cast<size_t>(config_.num_kv_heads),
+             static_cast<size_t>(config_.head_dim)},
+            config_.dtype, config_.device_type, config_.device_id,
+            true, ptr);
     }
+
+    // Prefill (multi-token): use write buffer
+    ensure_write_capacity(seq_len);
+    if (pending_write_past_len_ < 0) pending_write_past_len_ = past_len;
     pending_write_seq_len_ = seq_len;
+    direct_write_to_blocks_ = false;
 
     return write_v_bufs_[layer_idx]->slice(0, 0, seq_len);
 }
@@ -215,6 +260,39 @@ void PagedKVCache::scatter_to_blocks(int past_len, int new_tokens) {
     }
 }
 
+void PagedKVCache::scatter_layer_to_blocks(int layer_idx) {
+    if (pending_write_seq_len_ <= 0 || pending_write_past_len_ < 0) return;
+
+    int past_len = pending_write_past_len_;
+    int new_tokens = pending_write_seq_len_;
+    int total_after = past_len + new_tokens;
+
+    ensure_blocks_for_tokens(total_after);
+
+    const int bs = allocator_.block_size();
+    const size_t token_bytes = allocator_.pool().config().token_bytes();
+    const auto &pool = allocator_.pool();
+
+    auto *k_src = static_cast<const std::byte *>(write_k_bufs_[layer_idx]->data());
+    auto *v_src = static_cast<const std::byte *>(write_v_bufs_[layer_idx]->data());
+
+    for (int t = 0; t < new_tokens; ++t) {
+        int global_pos = past_len + t;
+        int block_idx = global_pos / bs;
+        int offset_in_block = global_pos % bs;
+
+        void *k_dst = static_cast<std::byte *>(
+            pool.block_data(block_table_.k_blocks[layer_idx][block_idx]))
+            + offset_in_block * token_bytes;
+        copy_region(k_dst, k_src + t * token_bytes, token_bytes);
+
+        void *v_dst = static_cast<std::byte *>(
+            pool.block_data(block_table_.v_blocks[layer_idx][block_idx]))
+            + offset_in_block * token_bytes;
+        copy_region(v_dst, v_src + t * token_bytes, token_bytes);
+    }
+}
+
 void PagedKVCache::update_seq_len(int new_tokens) {
     if (new_tokens <= 0) return;
 
@@ -223,9 +301,11 @@ void PagedKVCache::update_seq_len(int new_tokens) {
     // Ensure we have enough blocks for the new total
     ensure_blocks_for_tokens(total_after);
 
-    // Scatter write buffer data into blocks
-    int past_len = (pending_write_past_len_ >= 0) ? pending_write_past_len_ : current_length_;
-    scatter_to_blocks(past_len, new_tokens);
+    // Scatter write buffer data into blocks (skip if decode wrote directly to blocks)
+    if (!direct_write_to_blocks_) {
+        int past_len = (pending_write_past_len_ >= 0) ? pending_write_past_len_ : current_length_;
+        scatter_to_blocks(past_len, new_tokens);
+    }
 
     // Update state
     current_length_ += new_tokens;
@@ -262,6 +342,29 @@ float PagedKVCache::utilization() const {
     int capacity = allocated_capacity();
     if (capacity == 0) return 0.0f;
     return static_cast<float>(current_length_) / capacity;
+}
+
+// --- Paged attention interface ---
+
+void *PagedKVCache::k_pool_data() const {
+    return allocator_.pool().block_data(0);
+}
+
+void *PagedKVCache::v_pool_data() const {
+    // K and V share the same pool. The block IDs distinguish them.
+    return allocator_.pool().block_data(0);
+}
+
+const int *PagedKVCache::k_block_ids(int layer_idx) const {
+    return block_table_.k_blocks[layer_idx].data();
+}
+
+const int *PagedKVCache::v_block_ids(int layer_idx) const {
+    return block_table_.v_blocks[layer_idx].data();
+}
+
+int PagedKVCache::block_size() const {
+    return allocator_.block_size();
 }
 
 void PagedKVCache::copy_region(void *dst, const void *src, size_t bytes) {

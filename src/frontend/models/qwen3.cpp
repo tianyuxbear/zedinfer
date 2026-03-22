@@ -115,7 +115,17 @@ tensor_t Qwen3Model::forward(
         ops::rope(k_slot->view({sl, nkvhead, head_dim}), k_normed->view({sl, nkvhead, head_dim}), pos_ids, cfg.rope_theta);
 
         auto attn = make({sl, nhead, head_dim});
-        ops::self_attention(attn, q_rope, kvcache.get_k_cache_slice(L, past_len + sl), kvcache.get_v_cache_slice(L, past_len + sl), scale);
+        if (sl == 1 && kvcache.is_paged()) {
+            ops::paged_attention_decode(
+                attn->view({nhead, head_dim}), q_rope->view({nhead, head_dim}),
+                kvcache.k_pool_data(),
+                kvcache.k_block_ids(L), kvcache.v_block_ids(L),
+                past_len + 1,
+                scale, exec_config.data_type, exec_config.device_type, exec_config.device_id,
+                nhead, nkvhead, head_dim, kvcache.block_size());
+        } else {
+            ops::self_attention(attn, q_rope, kvcache.get_k_cache_slice(L, past_len + sl), kvcache.get_v_cache_slice(L, past_len + sl), scale);
+        }
 
         auto o = make({sl, hidden_size});
         ops::linear(o, attn->view({sl, hidden_size}), W(p + "self_attn.o_proj.weight"), nullptr);
