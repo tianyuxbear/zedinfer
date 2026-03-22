@@ -1,11 +1,14 @@
 #pragma once
 
+#include "backend/tensor/tensor.hpp"
 #include "zedinfer/activation.hpp"
+#include "zedinfer/batch_context.hpp"
 #include "zedinfer/request.hpp"
 
 #include <cstdint>
 #include <deque>
 #include <memory>
+#include <mutex>
 #include <vector>
 
 namespace zedinfer {
@@ -15,6 +18,7 @@ class Model;
 }
 namespace kvcache {
 class KVCache;
+class BlockAllocator;
 }
 namespace sampler {
 class Sampler;
@@ -25,8 +29,6 @@ class Tokenizer;
 
 /**
  * Configuration for the scheduler.
- * In single-request mode only max_queue_size is enforced.
- * Other fields are defined for PR-7 (continuous batching).
  */
 struct SchedulerConfig {
     int max_batch_tokens = 2048;
@@ -35,40 +37,54 @@ struct SchedulerConfig {
     int max_queue_size = 256;
 
     // KV cache memory management
-    float gpu_memory_utilization = 0.9f; // fraction of free VRAM for KV cache block pool
-    int kv_block_size = 16;              // tokens per KV cache block
-    bool use_paged_kvcache = true;       // false = fallback to DynamicKVCache
+    float gpu_memory_utilization = 0.9f;
+    int kv_block_size = 16;
+    bool use_paged_kvcache = true;
 };
 
 /**
  * Request scheduler for inference engine.
  *
- * Single-request mode (PR-6): processes one request at a time via run_one().
- * Batched mode (PR-7): assembles multi-sequence batches via schedule().
+ * Single-request mode: run_one() processes one request at a time.
+ * Batched mode: schedule() assembles multi-sequence batches,
+ * process_results() advances request state after forward.
  */
 class Scheduler {
 public:
     explicit Scheduler(SchedulerConfig config = {});
 
+    // Set block allocator for batched mode (called after engine creates block pool)
+    void set_block_allocator(kvcache::BlockAllocator *allocator);
+
     /**
-     * Submit a new request to the waiting queue.
-     * Assigns a unique request_id. Throws if queue is full.
+     * Submit a new request. Thread-safe (can be called from HTTP threads).
      */
     void submit(std::unique_ptr<InferenceRequest> request);
 
     /** True if there are pending or active requests. */
     bool has_work() const;
-
-    /** Number of requests in the waiting queue. */
     int pending_count() const;
-
-    /** Number of currently active requests (0 or 1 in single-request mode). */
     int active_count() const;
 
     /**
-     * Run one request to completion (single-request mode).
-     * Pops the front request from the queue, runs prefill + decode,
-     * and returns the result.
+     * Schedule next batch for one forward pass.
+     * Decode-first: all active decode requests, then admit new prefills.
+     */
+    ScheduledBatch schedule();
+
+    /**
+     * Process results after model forward.
+     * Samples tokens, advances state, completes finished requests.
+     */
+    void process_results(
+        ScheduledBatch &batch,
+        tensor_t logits,
+        sampler::Sampler &sampler,
+        tokenizer::Tokenizer &tokenizer,
+        const std::vector<int> &stop_token_ids);
+
+    /**
+     * Single-request mode (backward compat for bench/chat/ping).
      */
     GenerationResult run_one(
         model::Model &model,
@@ -80,9 +96,17 @@ public:
 
 private:
     SchedulerConfig config_;
+    kvcache::BlockAllocator *block_allocator_ = nullptr;
+    std::mutex submit_mutex_;
+
     std::deque<std::unique_ptr<InferenceRequest>> waiting_queue_;
-    InferenceRequest *active_request_ = nullptr;
+    std::vector<std::unique_ptr<InferenceRequest>> active_requests_; // decode phase
+    std::vector<std::unique_ptr<InferenceRequest>> completing_;      // just completed
+
     uint64_t next_request_id_ = 1;
+
+    bool can_admit(const InferenceRequest &req) const;
+    void complete_request(InferenceRequest &req);
 };
 
 } // namespace zedinfer

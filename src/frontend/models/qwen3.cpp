@@ -123,6 +123,15 @@ tensor_t Qwen3Model::forward(
                 past_len + 1,
                 scale, exec_config.data_type, exec_config.device_type, exec_config.device_id,
                 nhead, nkvhead, head_dim, kvcache.block_size());
+        } else if (kvcache.is_paged()) {
+            kvcache.scatter_layer_to_blocks(L);
+            ops::paged_attention_prefill(
+                attn, q_rope,
+                kvcache.k_pool_data(),
+                kvcache.k_block_ids(L), kvcache.v_block_ids(L),
+                sl, past_len,
+                scale, exec_config.data_type, exec_config.device_type, exec_config.device_id,
+                nhead, nkvhead, head_dim, kvcache.block_size());
         } else {
             ops::self_attention(attn, q_rope, kvcache.get_k_cache_slice(L, past_len + sl), kvcache.get_v_cache_slice(L, past_len + sl), scale);
         }

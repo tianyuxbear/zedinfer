@@ -1,10 +1,12 @@
 #include "zedinfer/scheduler.hpp"
+#include "backend/kvcache/block_pool.hpp"
 #include "frontend/models/base.hpp"
 #include "frontend/sampler/sampler.hpp"
 #include "frontend/tokenizer/base.hpp"
 #include "backend/kvcache/base.hpp"
 #include "utils/logging.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <plog/Log.h>
 #include <stdexcept>
@@ -20,7 +22,12 @@ static bool is_stop_token(int token_id, const std::vector<int> &stop_ids) {
 
 Scheduler::Scheduler(SchedulerConfig config) : config_(config) {}
 
+void Scheduler::set_block_allocator(kvcache::BlockAllocator *allocator) {
+    block_allocator_ = allocator;
+}
+
 void Scheduler::submit(std::unique_ptr<InferenceRequest> request) {
+    std::lock_guard<std::mutex> lock(submit_mutex_);
     if (static_cast<int>(waiting_queue_.size()) >= config_.max_queue_size) {
         throw std::runtime_error("[Scheduler] Queue full (max_queue_size=" +
                                  std::to_string(config_.max_queue_size) + ")");
@@ -31,7 +38,7 @@ void Scheduler::submit(std::unique_ptr<InferenceRequest> request) {
 }
 
 bool Scheduler::has_work() const {
-    return !waiting_queue_.empty() || active_request_ != nullptr;
+    return !waiting_queue_.empty() || !active_requests_.empty();
 }
 
 int Scheduler::pending_count() const {
@@ -39,8 +46,175 @@ int Scheduler::pending_count() const {
 }
 
 int Scheduler::active_count() const {
-    return active_request_ != nullptr ? 1 : 0;
+    return static_cast<int>(active_requests_.size());
 }
+
+bool Scheduler::can_admit(const InferenceRequest &req) const {
+    if (!block_allocator_) return true;
+    int prompt_len = static_cast<int>(req.input_ids.size());
+    int bs = block_allocator_->block_size();
+    int est_tokens = prompt_len + std::min(req.config.max_new_tokens, 256);
+    int blocks_per_layer = (est_tokens + bs - 1) / bs;
+    int blocks_needed = blocks_per_layer * 2; // rough per-layer estimate
+    return block_allocator_->available_blocks() >= blocks_needed;
+}
+
+// ============================================================================
+// Batched Scheduling
+// ============================================================================
+
+ScheduledBatch Scheduler::schedule() {
+    ScheduledBatch batch;
+    int token_budget = config_.max_batch_tokens;
+
+    // 1. Decode-first: all active decode requests (1 token each)
+    for (auto &req_ptr : active_requests_) {
+        if (token_budget <= 0) break;
+        batch.decode_requests.push_back(req_ptr.get());
+        token_budget--;
+    }
+
+    // 2. Admit new prefill requests
+    int prefill_budget = std::min(token_budget, config_.max_prefill_tokens);
+
+    // Lock for queue access (submit may be concurrent)
+    std::lock_guard<std::mutex> lock(submit_mutex_);
+
+    while (!waiting_queue_.empty() && prefill_budget > 0) {
+        auto *req = waiting_queue_.front().get();
+
+        if (static_cast<int>(active_requests_.size()) +
+            static_cast<int>(batch.prefill_requests.size()) >= config_.max_batch_requests)
+            break;
+
+        if (!can_admit(*req))
+            break;
+
+        // Allocate blocks for new request
+        if (block_allocator_ && req->block_table.num_layers == 0) {
+            int est_tokens = std::min(
+                static_cast<int>(req->input_ids.size()) + 256,
+                static_cast<int>(req->input_ids.size()) + req->config.max_new_tokens);
+            req->block_table = block_allocator_->allocate_sequence(est_tokens);
+        }
+
+        // Chunked prefill
+        int remaining_prompt = static_cast<int>(req->input_ids.size()) - req->prefill_progress;
+        int chunk = std::min(remaining_prompt, prefill_budget);
+
+        batch.prefill_requests.push_back(req);
+        batch.prefill_chunk_sizes.push_back(chunk);
+        prefill_budget -= chunk;
+
+        req->prefill_progress += chunk;
+        req->phase = RequestPhase::PREFILL;
+
+        bool prefill_complete = (req->prefill_progress >= static_cast<int>(req->input_ids.size()));
+
+        if (prefill_complete) {
+            // Move ownership to active list, then pop from queue
+            active_requests_.push_back(std::move(waiting_queue_.front()));
+            waiting_queue_.pop_front();
+        } else {
+            // Chunked: request stays in queue for next iteration
+            break;
+        }
+    }
+
+    return batch;
+}
+
+void Scheduler::process_results(
+    ScheduledBatch &batch,
+    tensor_t logits,
+    sampler::Sampler &sampler,
+    tokenizer::Tokenizer &tokenizer,
+    const std::vector<int> &stop_token_ids) {
+
+    int offset = 0;
+
+    // Process decode results
+    for (auto *req : batch.decode_requests) {
+        // Sample from this request's logit position
+        auto req_logits = logits->slice(0, offset, offset + 1);
+        int token = sampler.sample(req_logits);
+
+        req->output_ids.push_back(token);
+        req->last_token = token;
+        req->generated_count++;
+        req->block_table.seq_len++;
+
+        if (is_stop_token(token, stop_token_ids) ||
+            req->generated_count >= req->config.max_new_tokens) {
+            complete_request(*req);
+        } else if (req->config.stream && req->stream_callback) {
+            req->stream_callback(tokenizer.decode({token}));
+        }
+        offset++;
+    }
+
+    // Process prefill results
+    for (size_t i = 0; i < batch.prefill_requests.size(); ++i) {
+        auto *req = batch.prefill_requests[i];
+        int chunk = batch.prefill_chunk_sizes[i];
+
+        // Update block table seq_len (tokens now in KV cache)
+        req->block_table.seq_len += chunk;
+
+        // If prefill complete, sample first token
+        if (req->phase == RequestPhase::DECODE ||
+            req->prefill_progress >= static_cast<int>(req->input_ids.size())) {
+            req->phase = RequestPhase::DECODE;
+            // Sample from last token of this prefill chunk
+            auto req_logits = logits->slice(0, offset + chunk - 1, offset + chunk);
+            int token = sampler.sample(req_logits);
+
+            req->output_ids.push_back(token);
+            req->last_token = token;
+            req->generated_count = 1;
+            req->stats.prompt_tokens = req->input_ids.size();
+
+            if (is_stop_token(token, stop_token_ids)) {
+                complete_request(*req);
+            } else if (req->config.stream && req->stream_callback) {
+                req->stream_callback(tokenizer.decode({token}));
+            }
+        }
+        offset += chunk;
+    }
+
+    // Remove completed requests from active list
+    active_requests_.erase(
+        std::remove_if(active_requests_.begin(), active_requests_.end(),
+            [](const auto &ptr) { return ptr->phase == RequestPhase::COMPLETE; }),
+        active_requests_.end());
+}
+
+void Scheduler::complete_request(InferenceRequest &req) {
+    req.phase = RequestPhase::COMPLETE;
+
+    // Free blocks
+    if (block_allocator_ && req.block_table.num_layers > 0) {
+        block_allocator_->free_sequence(req.block_table);
+    }
+
+    // Fulfill promise for async callers
+    GenerationResult result;
+    result.output_ids = std::move(req.output_ids);
+    result.stats = req.stats;
+    result.stats.generated_tokens = result.output_ids.size();
+    result.stats.total_tokens = result.stats.prompt_tokens + result.stats.generated_tokens;
+
+    try {
+        req.result_promise.set_value(std::move(result));
+    } catch (...) {
+        // Promise may already be satisfied or broken
+    }
+}
+
+// ============================================================================
+// Single-Request Mode (backward compatibility)
+// ============================================================================
 
 GenerationResult Scheduler::run_one(
     model::Model &model,
@@ -50,23 +224,23 @@ GenerationResult Scheduler::run_one(
     tokenizer::Tokenizer &tokenizer,
     const std::vector<int> &stop_token_ids) {
 
-    if (waiting_queue_.empty()) {
-        throw std::runtime_error("[Scheduler] No pending requests");
+    std::unique_ptr<InferenceRequest> request_ptr;
+    {
+        std::lock_guard<std::mutex> lock(submit_mutex_);
+        if (waiting_queue_.empty()) {
+            throw std::runtime_error("[Scheduler] No pending requests");
+        }
+        request_ptr = std::move(waiting_queue_.front());
+        waiting_queue_.pop_front();
     }
 
-    // Pop front request
-    auto request_ptr = std::move(waiting_queue_.front());
-    waiting_queue_.pop_front();
     InferenceRequest &req = *request_ptr;
-    active_request_ = &req;
-
     GenerationStats &stats = req.stats;
     stats.prompt_tokens = req.input_ids.size();
     req.output_ids.reserve(req.config.max_new_tokens);
 
     // Prefill
     req.phase = RequestPhase::PREFILL;
-
     auto t0 = std::chrono::high_resolution_clock::now();
 
     int past_len = kvcache.current_length();
@@ -85,7 +259,6 @@ GenerationResult Scheduler::run_one(
         req.phase = RequestPhase::COMPLETE;
         stats.generated_tokens = req.output_ids.size();
         stats.total_tokens = stats.prompt_tokens + stats.generated_tokens;
-        active_request_ = nullptr;
         return GenerationResult{std::move(req.output_ids), stats};
     }
 
@@ -130,10 +303,7 @@ GenerationResult Scheduler::run_one(
     req.phase = RequestPhase::COMPLETE;
     stats.generated_tokens = req.output_ids.size();
     stats.total_tokens = stats.prompt_tokens + stats.generated_tokens;
-
-    GenerationResult result{std::move(req.output_ids), stats};
-    active_request_ = nullptr;
-    return result;
+    return GenerationResult{std::move(req.output_ids), stats};
 }
 
 } // namespace zedinfer

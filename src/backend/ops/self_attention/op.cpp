@@ -70,4 +70,65 @@ void paged_attention_decode(
     }
 }
 
+void paged_attention_prefill(
+    tensor_t attn_val, tensor_t q,
+    const void *pool_base,
+    const int *k_block_table, const int *v_block_table,
+    int seqlen_q, int past_len,
+    float scale,
+    zedinferDataType_t dtype,
+    zedinferDeviceType_t device_type,
+    int device_id,
+    int nhead, int nkvhead, int head_dim, int block_size) {
+
+    zedinfer::core::context().setDevice(device_type, device_id);
+
+    switch (device_type) {
+    case ZEDINFER_DEVICE_CPU:
+        // CPU prefill: fall back to gather + self_attention (no paged prefill kernel for CPU yet)
+        ASSERT(false, "CPU paged prefill not implemented — use gather path");
+        break;
+#ifdef ENABLE_NVIDIA_API
+    case ZEDINFER_DEVICE_NVIDIA:
+        return nvidia::paged_attention_prefill(
+            attn_val->data(), q->data(),
+            reinterpret_cast<const std::byte *>(pool_base),
+            k_block_table, v_block_table,
+            seqlen_q, past_len, scale, dtype,
+            nhead, nkvhead, head_dim, block_size);
+#endif
+    default:
+        EXCEPTION_UNSUPPORTED_DEVICE;
+    }
+}
+
+void paged_attention_decode_batched(
+    tensor_t attn_val, tensor_t q,
+    const void *pool_base,
+    const int *k_block_tables, const int *v_block_tables,
+    const int *seq_lens,
+    int num_reqs, int max_blocks_per_seq,
+    float scale,
+    zedinferDataType_t dtype,
+    zedinferDeviceType_t device_type,
+    int device_id,
+    int nhead, int nkvhead, int head_dim, int block_size) {
+
+    zedinfer::core::context().setDevice(device_type, device_id);
+
+    switch (device_type) {
+#ifdef ENABLE_NVIDIA_API
+    case ZEDINFER_DEVICE_NVIDIA:
+        return nvidia::paged_attention_decode_batched(
+            attn_val->data(), q->data(),
+            reinterpret_cast<const std::byte *>(pool_base),
+            k_block_tables, v_block_tables, seq_lens,
+            num_reqs, max_blocks_per_seq,
+            scale, dtype, nhead, nkvhead, head_dim, block_size);
+#endif
+    default:
+        EXCEPTION_UNSUPPORTED_DEVICE;
+    }
+}
+
 } // namespace zedinfer::ops

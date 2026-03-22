@@ -1,10 +1,12 @@
 #pragma once
 
 #include "zedinfer/generation_types.hpp"
+#include "backend/kvcache/block_pool.hpp"
 
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <future>
 #include <string>
 #include <vector>
 
@@ -52,6 +54,11 @@ struct InferenceRequest {
     // Timing
     std::chrono::steady_clock::time_point arrival_time;
     GenerationStats stats;
+
+    // Continuous batching fields
+    int prefill_progress = 0;                        // tokens already prefilled (chunked prefill)
+    kvcache::SequenceBlockTable block_table;          // per-request KV block ownership
+    std::promise<GenerationResult> result_promise;    // async result delivery for serving mode
 };
 
 } // namespace zedinfer

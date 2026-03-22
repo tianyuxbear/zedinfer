@@ -9,10 +9,12 @@
 #include "zedinfer/activation.hpp"
 #include "zedinfer/generation_types.hpp"
 #include "zedinfer/chat_template.hpp"
+#include "zedinfer/batch_context.hpp"
 #include "zedinfer/request.hpp"
 #include "zedinfer/scheduler.hpp"
 
 #include <cstddef>
+#include <future>
 #include <memory>
 #include <string>
 #include <vector>
@@ -46,6 +48,24 @@ public:
 
     void warmup(size_t prefill_len = 128, size_t decode_steps = 128);
     std::pair<double, double> profile(size_t prefill_len = 128, size_t decode_steps = 128);
+
+    /**
+     * Submit a request to the scheduler for batched processing.
+     * Returns a future that will be fulfilled when generation completes.
+     */
+    std::future<GenerationResult> submit_async(std::unique_ptr<InferenceRequest> request);
+
+    /**
+     * Run one iteration of the batched engine loop.
+     * Returns true if work was done, false if idle.
+     */
+    bool step();
+
+    /**
+     * Run the batched engine loop until all work is done.
+     * For serving mode (PR-10), this runs on a dedicated thread.
+     */
+    void run_loop();
 
 private:
     InferenceEngine(

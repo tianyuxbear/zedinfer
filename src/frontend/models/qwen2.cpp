@@ -119,8 +119,19 @@ tensor_t Qwen2Model::forward(
                 past_len + 1, // seq_len in KV cache (past + current token)
                 scale, exec_config.data_type, exec_config.device_type, exec_config.device_id,
                 nhead, nkvhead, head_dim, kvcache.block_size());
+        } else if (kvcache.is_paged()) {
+            // Paged prefill: scatter this layer's write buffer to blocks,
+            // then read K/V directly from blocks (no gather copy).
+            kvcache.scatter_layer_to_blocks(L);
+            ops::paged_attention_prefill(
+                attn, q_rope,
+                kvcache.k_pool_data(),
+                kvcache.k_block_ids(L), kvcache.v_block_ids(L),
+                sl, past_len,
+                scale, exec_config.data_type, exec_config.device_type, exec_config.device_id,
+                nhead, nkvhead, head_dim, kvcache.block_size());
         } else {
-            // Prefill or non-paged: use contiguous gather + standard attention
+            // Non-paged: contiguous KV + standard attention
             ops::self_attention(attn, q_rope, kvcache.get_k_cache_slice(L, past_len + sl), kvcache.get_v_cache_slice(L, past_len + sl), scale);
         }
 

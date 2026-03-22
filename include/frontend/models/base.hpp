@@ -11,8 +11,10 @@
 
 namespace zedinfer {
 struct ExecutorConfig;
+struct BatchContext;
 namespace kvcache {
 class KVCache;
+class BlockAllocator;
 }
 } // namespace zedinfer
 
@@ -103,6 +105,16 @@ public:
         int past_len,
         kvcache::KVCache &kvcache,
         const ExecutorConfig &exec_config) = 0;
+
+    /**
+     * Batched forward pass for continuous batching.
+     * Processes multiple requests in one pass (concat tokens, no padding).
+     * Default: not implemented (single-request models).
+     */
+    virtual tensor_t forward_batch(
+        const BatchContext &batch,
+        kvcache::BlockAllocator &allocator,
+        const ExecutorConfig &exec_config);
 
 private:
     std::string model_path_;
