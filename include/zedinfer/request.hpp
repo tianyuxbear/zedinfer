@@ -2,7 +2,9 @@
 
 #include "zedinfer/generation_types.hpp"
 
+#include <chrono>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -30,7 +32,7 @@ enum class RequestPhase {
 
 /**
  * A single inference request.
- * Data definition for future scheduler integration.
+ * Consumed by Scheduler to drive the generate loop.
  */
 struct InferenceRequest {
     uint64_t request_id = 0;
@@ -43,6 +45,13 @@ struct InferenceRequest {
     int last_token = -1;
 
     std::vector<int> output_ids;
+
+    // Stream callback forwarded from GenerationConfig at request construction
+    std::function<void(const std::string &)> stream_callback;
+
+    // Timing
+    std::chrono::steady_clock::time_point arrival_time;
+    GenerationStats stats;
 };
 
 } // namespace zedinfer

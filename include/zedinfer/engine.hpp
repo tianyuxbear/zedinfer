@@ -9,6 +9,7 @@
 #include "zedinfer/generation_types.hpp"
 #include "zedinfer/chat_template.hpp"
 #include "zedinfer/request.hpp"
+#include "zedinfer/scheduler.hpp"
 
 #include <cstddef>
 #include <memory>
@@ -61,9 +62,13 @@ private:
     ExecutorConfig exec_config_;
     ChatTemplate chat_template_;
     std::vector<int> stop_token_ids_; // All token IDs that end generation
+    Scheduler scheduler_;
 
     void build_stop_token_ids();
     bool should_stop(int token_id) const;
+    std::unique_ptr<InferenceRequest> build_request(
+        const std::vector<int> &input_ids,
+        const GenerationConfig &config);
 };
 
 } // namespace zedinfer
