@@ -15,7 +15,7 @@
 // For server2/server3
 // static const std::string model_path = "/mnt/hdd/shared/models/deepseek-ai/DeepSeek-R1-0528-Qwen3-8B";
 // For NVIDIA server
-static const std::string model_path = "/home/scratch.trt_llm_data_ci/llm-models/DeepSeek-R1-Distill-Qwen-1.5B";
+static const std::string model_path = "/home/tianyux/data/models/DeepSeek-R1-Distill-Qwen-1.5B";
 using namespace zedinfer;
 
 int main() {

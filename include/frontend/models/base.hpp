@@ -27,8 +27,9 @@ struct ModelConfig {
     std::string hidden_act;                 // Activation function used in hidden layers
     std::string torch_dtype;                // Data type used in original PyTorch weights
 
-    size_t bos_token_id; // Beginning-of-sequence token ID
-    size_t eos_token_id; // End-of-sequence token size_t
+    size_t bos_token_id;            // Beginning-of-sequence token ID
+    size_t eos_token_id;            // Primary end-of-sequence token ID
+    std::vector<int> eos_token_ids; // All EOS token IDs (may include <|im_end|>, <|endoftext|>, etc.)
 
     size_t hidden_size;             // Dimensionality of hidden states
     size_t intermediate_size;       // Size of feed-forward network

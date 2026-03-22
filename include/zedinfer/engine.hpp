@@ -7,6 +7,7 @@
 #include "frontend/tokenizer/base.hpp"
 #include "zedinfer/activation.hpp"
 #include "zedinfer/generation_types.hpp"
+#include "zedinfer/chat_template.hpp"
 #include "zedinfer/request.hpp"
 
 #include <cstddef>
@@ -50,14 +51,18 @@ private:
         std::shared_ptr<tokenizer::Tokenizer> tokenizer,
         std::shared_ptr<sampler::Sampler> sampler,
         device::Device device,
-        ExecutorConfig exec_config);
+        ExecutorConfig exec_config,
+        ChatTemplate chat_template);
 
     std::shared_ptr<model::Model> model_;
     std::shared_ptr<tokenizer::Tokenizer> tokenizer_;
     std::shared_ptr<sampler::Sampler> sampler_;
     device::Device device_;
     ExecutorConfig exec_config_;
+    ChatTemplate chat_template_;
+    std::vector<int> stop_token_ids_; // All token IDs that end generation
 
+    void build_stop_token_ids();
     bool should_stop(int token_id) const;
 };
 

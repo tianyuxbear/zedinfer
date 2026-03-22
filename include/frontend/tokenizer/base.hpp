@@ -28,6 +28,9 @@ public:
     virtual int get_pad_token_id() const { return -1; }
     virtual int get_unk_token_id() const { return -1; }
 
+    // Lookup a special token's ID by its string form. Returns -1 if not found.
+    virtual int get_special_token_id(const std::string & /*token*/) const { return -1; }
+
     // Access tokenizer config.
     virtual const Config &get_config() const = 0;
 

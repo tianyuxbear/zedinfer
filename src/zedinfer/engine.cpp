@@ -18,12 +18,14 @@ InferenceEngine::InferenceEngine(
     std::shared_ptr<tokenizer::Tokenizer> tokenizer,
     std::shared_ptr<sampler::Sampler> sampler,
     device::Device device,
-    ExecutorConfig exec_config)
+    ExecutorConfig exec_config,
+    ChatTemplate chat_template)
     : model_(std::move(model)),
       tokenizer_(std::move(tokenizer)),
       sampler_(std::move(sampler)),
       device_(device),
-      exec_config_(exec_config) {}
+      exec_config_(exec_config),
+      chat_template_(std::move(chat_template)) {}
 
 std::shared_ptr<InferenceEngine> InferenceEngine::create(
     const std::string &model_path,
@@ -54,13 +56,18 @@ std::shared_ptr<InferenceEngine> InferenceEngine::create(
 
     auto sampler = sampler::createSampler(exec_config, sampler::SamplerType::ARGMAX);
 
+    auto chat_template = ChatTemplate::load(model_path, model->model_type());
+
     auto engine = std::shared_ptr<InferenceEngine>(
         new InferenceEngine(
             std::move(model),
             std::move(tokenizer),
             std::move(sampler),
             device,
-            exec_config));
+            exec_config,
+            std::move(chat_template)));
+
+    engine->build_stop_token_ids();
 
     LOGI << "[Engine] Initialization complete";
 
@@ -92,7 +99,7 @@ std::unique_ptr<InferenceSession> InferenceEngine::create_session(
          << ", memory=" << kv_cache->memory_usage() / (1024.0 * 1024.0) << " MB";
 
     return std::unique_ptr<InferenceSession>(
-        new InferenceSession(shared_from_this(), std::move(kv_cache), config));
+        new InferenceSession(shared_from_this(), std::move(kv_cache), config, chat_template_));
 }
 
 std::string InferenceEngine::generate(
@@ -161,14 +168,14 @@ GenerationResult InferenceEngine::generate_tokens(
 
     result.output_ids.push_back(next_token);
 
-    if (config.stream && config.stream_callback) {
-        config.stream_callback(tokenizer_->decode({next_token}));
-    }
-
     if (should_stop(next_token)) {
         stats.generated_tokens = result.output_ids.size();
         stats.total_tokens = stats.prompt_tokens + stats.generated_tokens;
         return result;
+    }
+
+    if (config.stream && config.stream_callback) {
+        config.stream_callback(tokenizer_->decode({next_token}));
     }
 
     // Decode
@@ -188,11 +195,11 @@ GenerationResult InferenceEngine::generate_tokens(
         result.output_ids.push_back(next_token);
         past_len++;
 
+        if (should_stop(next_token)) break;
+
         if (config.stream && config.stream_callback) {
             config.stream_callback(tokenizer_->decode({next_token}));
         }
-
-        if (should_stop(next_token)) break;
 
         if (past_len >= static_cast<int>(tokenizer_->get_config().model_max_length)) {
             if (config.verbose) {
@@ -207,8 +214,41 @@ GenerationResult InferenceEngine::generate_tokens(
     return result;
 }
 
+void InferenceEngine::build_stop_token_ids() {
+    auto add_unique = [this](int id) {
+        if (id >= 0) {
+            for (int existing : stop_token_ids_)
+                if (existing == id) return;
+            stop_token_ids_.push_back(id);
+        }
+    };
+
+    // 1. Tokenizer's EOS
+    add_unique(tokenizer_->get_eos_token_id());
+
+    // 2. All model config EOS token IDs (handles array eos_token_id)
+    for (int eos_id : model_->config().eos_token_ids) {
+        add_unique(eos_id);
+    }
+
+    // 3. Resolve ChatTemplate eos_token string to ID (e.g., <|im_end|> for ChatML)
+    if (!chat_template_.eos_token.empty()) {
+        add_unique(tokenizer_->get_special_token_id(chat_template_.eos_token));
+    }
+
+    std::string ids_str;
+    for (int id : stop_token_ids_) {
+        if (!ids_str.empty()) ids_str += ", ";
+        ids_str += std::to_string(id);
+    }
+    LOGI << "[Engine] Stop token IDs: [" << ids_str << "]";
+}
+
 bool InferenceEngine::should_stop(int token_id) const {
-    return token_id == tokenizer_->get_eos_token_id();
+    for (int stop_id : stop_token_ids_) {
+        if (token_id == stop_id) return true;
+    }
+    return false;
 }
 
 void InferenceEngine::warmup(size_t prefill_len, size_t decode_steps) {

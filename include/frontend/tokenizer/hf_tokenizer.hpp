@@ -1,6 +1,7 @@
 #pragma once
 
 #include "base.hpp"
+#include "zedinfer/chat_template.hpp"
 
 #include <unicode/regex.h>
 #include <unordered_map>
@@ -18,6 +19,7 @@ public:
     // Apply chat template to message list.
     std::string apply_chat_template(
         const std::vector<std::pair<std::string, std::string>> &messages,
+        const ChatTemplate &tmpl,
         bool add_generation_prompt = false);
 
     // Vocabulary size.
@@ -28,6 +30,10 @@ public:
     int get_eos_token_id() const override { return special_tokens_.eos_token_id; }
     int get_pad_token_id() const override { return special_tokens_.pad_token_id; }
     int get_unk_token_id() const override { return special_tokens_.unk_token_id; }
+    int get_special_token_id(const std::string &token) const override {
+        auto it = special_tokens_.token_to_id.find(token);
+        return it != special_tokens_.token_to_id.end() ? it->second : -1;
+    }
 
     // Access tokenizer config.
     const Config &get_config() const override { return config_; }

@@ -168,7 +168,7 @@ int main(int argc, char *argv[]) {
 
         // Process chat message
         try {
-            std::cout << "🤖 \033[1;34mAssistant:\033[0m <think> ";
+            std::cout << "🤖 \033[1;34mAssistant:\033[0m ";
             session->chat(user_input);
             std::cout << "\n";
         } catch (const std::exception &e) {
