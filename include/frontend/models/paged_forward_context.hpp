@@ -60,6 +60,23 @@ private:
     // Helpers
     void scatter_slot_kv(const Slot &slot, int layer, tensor_t k, tensor_t v);
     void copy_to_block(const void *src, size_t bytes, void *dst);
+    void build_decode_cache(const ExecutorConfig &exec_config);
+
+    // Cached GPU block tables for batched decode (built once, reused across layers)
+    // Block tables are identical across layers since K/V block IDs are per-layer
+    // but the physical layout [num_reqs, max_blocks] doesn't change.
+    // However, the actual block IDs DO differ per layer, so we cache the
+    // host-side vectors and per-layer GPU tensors on first use.
+    struct DecodeCacheEntry {
+        tensor_t k_bt_gpu;
+        tensor_t v_bt_gpu;
+    };
+    tensor_t seq_lens_gpu_;
+    std::vector<DecodeCacheEntry> decode_layer_cache_;
+    int cached_num_decode_ = 0;
+    int cached_max_blocks_ = 0;
+    int cached_decode_start_ = -1;
+    bool decode_cache_built_ = false;
 };
 
 } // namespace zedinfer::model
