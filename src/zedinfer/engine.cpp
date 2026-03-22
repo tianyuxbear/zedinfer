@@ -149,69 +149,23 @@ GenerationResult InferenceEngine::generate_tokens(
     const std::vector<int> &input_ids,
     const GenerationConfig &config) {
 
-    GenerationResult result;
-    GenerationStats &stats = result.stats;
-    stats.prompt_tokens = input_ids.size();
+    auto request = build_request(input_ids, config);
+    scheduler_.submit(std::move(request));
+    return scheduler_.run_one(
+        *model_, kvcache, exec_config_,
+        *sampler_, *tokenizer_, stop_token_ids_);
+}
 
-    result.output_ids.reserve(config.max_new_tokens);
+std::unique_ptr<InferenceRequest> InferenceEngine::build_request(
+    const std::vector<int> &input_ids,
+    const GenerationConfig &config) {
 
-    // Prefill
-    auto t0 = std::chrono::high_resolution_clock::now();
-
-    int past_len = kvcache.current_length();
-    tensor_t logits = model_->forward(input_ids, past_len, kvcache, exec_config_);
-    int next_token = sampler_->sample(logits);
-
-    auto t1 = std::chrono::high_resolution_clock::now();
-    stats.prefill_time_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-    stats.total_time_ms += stats.prefill_time_ms;
-
-    result.output_ids.push_back(next_token);
-
-    if (should_stop(next_token)) {
-        stats.generated_tokens = result.output_ids.size();
-        stats.total_tokens = stats.prompt_tokens + stats.generated_tokens;
-        return result;
-    }
-
-    if (config.stream && config.stream_callback) {
-        config.stream_callback(tokenizer_->decode({next_token}));
-    }
-
-    // Decode
-    past_len += input_ids.size();
-
-    for (int i = 1; i < config.max_new_tokens; ++i) {
-        auto s0 = std::chrono::high_resolution_clock::now();
-
-        logits = model_->forward({next_token}, past_len, kvcache, exec_config_);
-        next_token = sampler_->sample(logits);
-
-        auto s1 = std::chrono::high_resolution_clock::now();
-        double step_ms = std::chrono::duration<double, std::milli>(s1 - s0).count();
-        stats.decode_time_ms += step_ms;
-        stats.total_time_ms += step_ms;
-
-        result.output_ids.push_back(next_token);
-        past_len++;
-
-        if (should_stop(next_token)) break;
-
-        if (config.stream && config.stream_callback) {
-            config.stream_callback(tokenizer_->decode({next_token}));
-        }
-
-        if (past_len >= static_cast<int>(tokenizer_->get_config().model_max_length)) {
-            if (config.verbose) {
-                LOGI << "[Inference] Reached max sequence length";
-            }
-            break;
-        }
-    }
-
-    stats.generated_tokens = result.output_ids.size();
-    stats.total_tokens = stats.prompt_tokens + stats.generated_tokens;
-    return result;
+    auto req = std::make_unique<InferenceRequest>();
+    req->input_ids = input_ids;
+    req->config = config;
+    req->stream_callback = config.stream ? config.stream_callback : nullptr;
+    req->arrival_time = std::chrono::steady_clock::now();
+    return req;
 }
 
 void InferenceEngine::build_stop_token_ids() {
