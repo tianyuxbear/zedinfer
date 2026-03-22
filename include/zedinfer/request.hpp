@@ -57,8 +57,17 @@ struct InferenceRequest {
 
     // Continuous batching fields
     int prefill_progress = 0;                        // tokens already prefilled (chunked prefill)
-    kvcache::SequenceBlockTable block_table;          // per-request KV block ownership
-    std::promise<GenerationResult> result_promise;    // async result delivery for serving mode
+    kvcache::SequenceBlockTable block_table;          // owned block table (batch mode)
+    kvcache::SequenceBlockTable *block_table_ref = nullptr; // borrowed block table (session mode)
+    std::promise<GenerationResult> result_promise;    // async result delivery
+
+    // Access the active block table (borrowed if set, otherwise owned)
+    kvcache::SequenceBlockTable &active_block_table() {
+        return block_table_ref ? *block_table_ref : block_table;
+    }
+    const kvcache::SequenceBlockTable &active_block_table() const {
+        return block_table_ref ? *block_table_ref : block_table;
+    }
 };
 
 } // namespace zedinfer

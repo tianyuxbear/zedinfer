@@ -37,7 +37,7 @@ PagedForwardContext::PagedForwardContext(
 
     for (const auto &s : batch.slots) {
         bool is_decode = !s.is_prefill;
-        slots_.push_back({&s.request->block_table, s.token_offset,
+        slots_.push_back({&s.request->active_block_table(), s.token_offset,
                           s.num_tokens, s.past_len, is_decode});
     }
 }
@@ -271,16 +271,7 @@ tensor_t PagedForwardContext::attend(
 // ============================================================================
 
 void PagedForwardContext::finalize() {
-    // Update block_table.seq_len for single-request mode.
-    // In batch mode, scheduler handles this in process_results().
-    if (slots_.size() == 1 && !slots_[0].is_decode) {
-        // Single prefill: update seq_len
-        slots_[0].block_table->seq_len += slots_[0].num_tokens;
-    } else if (slots_.size() == 1 && slots_[0].is_decode) {
-        // Single decode: update seq_len
-        slots_[0].block_table->seq_len += 1;
-    }
-    // Multi-slot (batch): scheduler updates in process_results()
+    // No-op: seq_len is updated by Scheduler::process_results() for all paths.
 }
 
 } // namespace zedinfer::model
