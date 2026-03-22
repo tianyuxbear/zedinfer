@@ -42,15 +42,36 @@ PR-3b  oneDNN for CPU linear               > parallelizable
 PR-4   Stateless engine & request types
 PR-5   Chat template extraction
 PR-6   Scheduler (single-request)
-PR-7   Continuous batching
-PR-8   Paged KV cache
-PR-9   Paged attention kernels
+PR-7   Paged KV cache & block pool (single-request)
+PR-8   Paged attention kernels (single-request)
+PR-9   Continuous batching
 PR-10  HTTP / OpenAPI server
 PR-11  INT8 quantization
 PR-12  INT4 quantization
 PR-13  Heterogeneous inference & pinned memory
 PR-14  MoE model support & expert offloading
 ```
+
+### Reordering: Paged KV before Continuous Batching
+
+The original plan had continuous batching (PR-7) before paged KV cache (PR-8)
+and paged attention (PR-9). We reorder to: paged KV (PR-7) -> paged attention
+(PR-8) -> continuous batching (PR-9), for three reasons:
+
+1. **Avoid throwaway kernel work.** If continuous batching comes first, the
+   batched attention kernel is written for contiguous KV cache, then rewritten
+   for paged blocks. By implementing paged attention first (single-request),
+   the kernel is written once and later extended for batching.
+
+2. **Static memory budget.** On a single GPU, KV cache VRAM is a fixed budget
+   (total VRAM - model weights - scratch buffers). Implementing the block pool
+   first establishes a predictable memory model. The scheduler (PR-9) can then
+   use block availability for admission control, which is its natural design.
+
+3. **Simpler incremental testing.** Single-request paged attention is easy to
+   validate: bit-identical output vs contiguous `DynamicKVCache`. Continuous
+   batching adds multi-sequence complexity on top of a proven paged kernel,
+   rather than introducing two unknowns (batching + paging) simultaneously.
 
 ---
 
@@ -562,12 +583,224 @@ Remove scheduler, revert engine to direct generate loop.
 
 ---
 
-## PR-7: Continuous Batching
+## PR-7: Paged KV Cache and Block Pool (Single-Request)
+
+### Objective
+
+Implement block-based KV cache with fixed-size blocks, a block pool, and a block
+allocator. On a single GPU, the KV cache VRAM budget is deterministic
+(`total VRAM - model weights - scratch buffers`), so the block pool size is
+statically configured at engine init time. The scheduler allocates/frees blocks
+per request.
+
+Attention kernels in this PR still use a **contiguous gather** fallback
+(copy blocks into a temp contiguous buffer before attention). True paged
+attention kernels come in PR-8.
+
+### Rationale for Ordering
+
+Paged KV cache before continuous batching because:
+1. The static block pool establishes a predictable memory model.
+2. The scheduler can use block availability for admission control.
+3. Single-request paged KV is easy to test (bit-identical vs `DynamicKVCache`).
+4. Avoids writing a batched contiguous attention kernel that gets thrown away.
+
+### Affected Files
+
+| Action | File |
+|--------|------|
+| New | `include/backend/kvcache/block_pool.hpp` — `BlockConfig`, `BlockPool` |
+| New | `src/backend/kvcache/block_pool.cpp` |
+| New | `include/backend/kvcache/paged.hpp` — `PagedKVCache`, `SequenceKVMeta`, `BlockAllocator` |
+| New | `src/backend/kvcache/paged.cpp` |
+| Modify | `src/zedinfer/scheduler.cpp` — allocate blocks on admit, free on complete |
+| Modify | `src/zedinfer/engine.cpp` — create `BlockPool` at init with static VRAM budget |
+
+### Interfaces Added / Changed / Removed
+
+**Added:**
+
+```cpp
+struct BlockConfig {
+    int block_size = 16;     // tokens per block
+    int num_kv_heads;
+    int head_dim;
+    int num_layers;
+    zedinferDataType_t dtype;
+};
+
+class BlockPool {
+    // Statically allocated pool of KV cache blocks
+    BlockPool(BlockConfig config, int num_blocks, zedinferDeviceType_t device, int device_id);
+    int allocate();                        // returns block_id, -1 if full
+    void free(int block_id);
+    std::byte* block_ptr(int block_id) const;
+    int total_blocks() const;
+    int free_blocks() const;
+};
+
+class BlockAllocator {
+    BlockAllocator(BlockPool &pool, int num_layers);
+    SequenceKVMeta allocate_initial(int estimated_tokens);
+    int allocate_block();
+    void free_sequence(SequenceKVMeta &meta);
+    int available_blocks() const;
+};
+
+struct SequenceKVMeta {
+    std::vector<std::vector<int>> k_block_table;  // [layer][block_idx]
+    std::vector<std::vector<int>> v_block_table;
+    int seq_len = 0;
+};
+
+class PagedKVCache : public KVCache {
+    // Implements KVCache interface using block pool
+    void append(int layer, tensor_t k_new, tensor_t v_new, SequenceKVMeta &meta);
+    // Contiguous gather fallback (for non-paged attention kernels)
+    tensor_t gather_contiguous_k(int layer, const SequenceKVMeta &meta);
+    tensor_t gather_contiguous_v(int layer, const SequenceKVMeta &meta);
+};
+```
+
+**Existing `DynamicKVCache` is NOT removed.** Sessions can use either.
+
+### Static VRAM Budget Calculation
+
+At engine init:
+```
+1. Load model weights -> measure VRAM used
+2. Allocate scratch buffers -> measure VRAM used
+3. remaining = total_vram - used - safety_margin (e.g., 256 MB)
+4. block_bytes = block_size * num_kv_heads * head_dim * 2(K+V) * num_layers * dtype_size
+5. num_blocks = remaining / block_bytes
+6. BlockPool pool(config, num_blocks, device)
+```
+
+### Dependency
+
+PR-6 (scheduler foundation).
+
+### Correctness Tests
+
+- Block pool: allocate all, free all, re-allocate. Verify no leaks.
+- PagedKVCache: append tokens, gather contiguous, compare against `DynamicKVCache` slice.
+- E2E with paged cache (via contiguous gather): output identical to non-paged.
+
+### Regression Tests
+
+Existing `DynamicKVCache` path still works.
+
+### Benchmarks
+
+Config D (long context). Measure peak memory vs `DynamicKVCache`.
+Expected: ~30 % less peak memory (no over-allocation / growth copies).
+
+### Risks
+
+- Contiguous gather fallback negates latency benefit. Acceptable because
+  PR-8 adds true paged attention.
+- Block fragmentation with many short sequences.
+
+### Rollback
+
+Engine config flag `use_paged_kvcache = false` reverts to `DynamicKVCache`.
+
+---
+
+## PR-8: Paged Attention Kernels (Single-Request)
+
+### Objective
+
+Implement attention kernels that read K/V directly from block-table-indexed
+memory, eliminating the contiguous gather in PR-7. Separate decode and
+prefill attention paths. Still single-request at this stage.
+
+This is the kernel that PR-9 (continuous batching) will extend for
+multi-sequence execution. By writing it for paged blocks from the start,
+the kernel is written once and later extended for batching (loop over sequences).
+
+### Affected Files
+
+| Action | File |
+|--------|------|
+| New | `include/backend/ops/self_attention/paged.hpp` — paged attention declarations |
+| New | `src/backend/ops/self_attention/cpu/paged_attention_cpu.cpp` |
+| New | `src/backend/ops/self_attention/nvidia/paged_attention_nvidia.cu` |
+| Modify | `include/backend/ops/ops.hpp` — add `paged_attention_decode`, `paged_attention_prefill` |
+| Modify | `src/frontend/models/qwen2_forward.cpp` — use paged attention when paged KV cache is active |
+| Modify | `src/frontend/models/qwen3_forward.cpp` — same |
+| Modify | `src/backend/kvcache/paged.cpp` — contiguous gather kept as debug fallback |
+
+### Interfaces Added / Changed / Removed
+
+**Added:**
+
+```cpp
+// Single-sequence paged attention (PR-8, extended for batching in PR-9)
+void paged_attention_decode(
+    tensor_t out,            // [1, nhead, head_dim]
+    tensor_t query,          // [1, nhead, head_dim]
+    tensor_t k_cache_pool,   // [total_blocks * block_size, nkvhead, head_dim]
+    tensor_t v_cache_pool,
+    tensor_t block_table,    // [max_blocks_per_seq] int32
+    int seq_len,
+    float scale,
+    int block_size);
+
+void paged_attention_prefill(
+    tensor_t out,
+    tensor_t query,
+    tensor_t k_cache_pool,
+    tensor_t v_cache_pool,
+    tensor_t block_table,    // [max_blocks] int32
+    int seq_len,
+    int past_len,
+    float scale,
+    int block_size);
+```
+
+### Dependency
+
+PR-7 (paged KV cache, block tables).
+
+### Correctness Tests
+
+- Paged decode: compare output against non-paged `self_attention` with same Q/K/V data.
+- Paged prefill: same comparison.
+- E2E with fully paged pipeline: output identical to non-paged reference.
+
+### Regression Tests
+
+Non-paged attention path still works (DynamicKVCache + original self_attention).
+
+### Benchmarks
+
+Config A (decode-heavy), Config D (long context).
+Expected: no latency regression on decode; significant memory improvement.
+
+### Risks
+
+- GPU paged attention kernel is complex. Consider adapting vLLM paged attention
+  kernels (Apache-2.0) for initial implementation.
+- CPU paged attention may be slower than contiguous due to indirect access.
+  Mitigated by block-iterating loop that processes one block at a time for cache locality.
+
+### Rollback
+
+Engine flag reverts to non-paged attention + contiguous gather.
+
+---
+
+## PR-9: Continuous Batching
 
 ### Objective
 
 Extend the scheduler to assemble multi-sequence batches. Add `Model::forward_batch()`
-and batch-aware attention. Decode-first scheduling with chunked prefill.
+and batch-aware paged attention. Decode-first scheduling with chunked prefill.
+
+This PR builds on the paged KV cache (PR-7) and paged attention kernels (PR-8).
+The paged attention kernels are extended from single-sequence to multi-sequence
+by looping over sequences, each with its own block table.
 
 This is the largest single PR. It may be split further during implementation.
 
@@ -580,11 +813,11 @@ This is the largest single PR. It may be split further during implementation.
 | Modify | `include/frontend/models/base.hpp` — add `virtual forward_batch()` |
 | New | `src/frontend/models/qwen2_forward_batch.cpp` |
 | New | `src/frontend/models/qwen3_forward_batch.cpp` |
-| Modify | `include/zedinfer/scheduler.hpp` — `schedule()` returns `ScheduledBatch` |
-| Modify | `src/zedinfer/scheduler.cpp` — batch assembly, decode-first, chunked prefill |
-| Modify | `src/backend/ops/self_attention/cpu/self_attention_cpu.cpp` — batched attention (multi-sequence with offsets) |
-| Modify | `src/backend/ops/self_attention/nvidia/self_attention_nvidia.cu` — batched attention |
-| Modify | `include/backend/ops/ops.hpp` — add `self_attention_batched()` |
+| Modify | `include/zedinfer/scheduler.hpp` — `schedule()` returns `ScheduledBatch`, block-based admission |
+| Modify | `src/zedinfer/scheduler.cpp` — batch assembly, decode-first, chunked prefill, block allocation |
+| Modify | `src/backend/ops/self_attention/cpu/paged_attention_cpu.cpp` — extend for multi-sequence |
+| Modify | `src/backend/ops/self_attention/nvidia/paged_attention_nvidia.cu` — extend for multi-sequence |
+| Modify | `include/backend/ops/ops.hpp` — add batched variants of paged attention |
 
 ### Interfaces Added / Changed / Removed
 
@@ -607,16 +840,21 @@ struct BatchContext {
     std::vector<int> token_ids;          // flattened
     struct SlotInfo { int request_idx; int start_pos; int seq_len; int past_len; bool is_prefill; };
     std::vector<SlotInfo> slots;
+    // Block tables for all sequences (from paged KV cache)
+    std::vector<std::vector<int>> block_tables;  // [seq_idx] -> block IDs
     int total_tokens() const;
 };
 
-// ops.hpp
-void self_attention_batched(
-    tensor_t out, tensor_t q,
-    const std::vector<tensor_t> &k_caches,
-    const std::vector<tensor_t> &v_caches,
-    const std::vector<int> &seq_lens,
-    float scale);
+// Batched paged attention (extends PR-8 single-sequence kernels)
+void paged_attention_decode_batched(
+    tensor_t out,            // [num_seqs, nhead, head_dim]
+    tensor_t query,          // [num_seqs, nhead, head_dim]
+    tensor_t k_cache_pool,
+    tensor_t v_cache_pool,
+    tensor_t block_tables,   // [num_seqs, max_blocks_per_seq] int32
+    tensor_t seq_lens,       // [num_seqs] int32
+    float scale,
+    int block_size);
 ```
 
 ```cpp
@@ -624,19 +862,25 @@ void self_attention_batched(
 virtual tensor_t forward_batch(const BatchContext &batch, ...) = 0;
 ```
 
+**Changed:**
+
+- `Scheduler::schedule()` returns `ScheduledBatch` (replaces `run_one()` for batched mode).
+- `Scheduler::submit()` gains thread-safety (mutex) for HTTP handler concurrency.
+- Admission control uses `BlockAllocator::available_blocks()`.
+
 ### Dependency
 
-PR-6 (scheduler foundation), PR-2 (direct forward), PR-3a/3b (fast linear for meaningful batch benchmarks).
+PR-8 (paged attention kernels), PR-6 (scheduler foundation), PR-3a/3b (fast linear).
 
 ### Correctness Tests
 
 - Run 4 requests concurrently with different prompts. Verify each output matches
   the single-request reference for that prompt.
-- Compare batched attention output against sequential per-request attention.
+- Compare batched paged attention output against sequential single-request paged attention.
 
 ### Regression Tests
 
-Single-request path must still produce identical output (batch size 1 = no regression).
+Single-request path must still produce identical output (`run_one()` still works).
 
 ### Benchmarks
 
@@ -645,180 +889,14 @@ Expected: 2-4x throughput improvement vs sequential.
 
 ### Risks
 
-- Batched attention correctness with variable sequence lengths.
+- Batched paged attention correctness with variable sequence lengths and block tables.
 - Prefill/decode mixing in a single forward pass.
 - Memory for scratch buffers scales with `max_batch_tokens`.
+- Thread safety of `submit()` when HTTP handlers call concurrently.
 
 ### Rollback
 
 Scheduler falls back to `run_one()` (single-request mode).
-
----
-
-## PR-8: Paged KV Cache
-
-### Objective
-
-Implement block-based KV cache with fixed-size blocks, a block pool, and a block
-allocator. The scheduler allocates/frees blocks per request.
-Attention kernels in this PR still use a **contiguous gather** fallback
-(copy blocks into a temp contiguous buffer before attention). True paged
-attention kernels come in PR-9.
-
-### Affected Files
-
-| Action | File |
-|--------|------|
-| New | `include/backend/kvcache/block_pool.hpp` — `BlockConfig`, `BlockPool` |
-| New | `src/backend/kvcache/block_pool.cpp` |
-| New | `include/backend/kvcache/paged.hpp` — `PagedKVCache`, `SequenceKVMeta`, `BlockAllocator` |
-| New | `src/backend/kvcache/paged.cpp` |
-| Modify | `src/zedinfer/scheduler.cpp` — allocate blocks on admit, free on complete |
-| Modify | `src/zedinfer/engine.cpp` — create `BlockAllocator` at init |
-
-### Interfaces Added / Changed / Removed
-
-**Added:**
-
-```cpp
-struct BlockConfig { int block_size; int num_kv_heads; int head_dim; ... };
-
-class BlockPool {
-    int allocate();
-    void free(int block_id);
-    std::byte* block_ptr(int block_id) const;
-    int free_blocks() const;
-};
-
-class BlockAllocator {
-    SequenceKVMeta allocate_initial(int num_layers, int estimated_tokens);
-    int allocate_block();
-    void free_sequence(SequenceKVMeta &meta);
-    int available_blocks() const;
-};
-
-struct SequenceKVMeta {
-    std::vector<std::vector<int>> k_block_table;  // [layer][block_idx]
-    std::vector<std::vector<int>> v_block_table;
-    int seq_len;
-};
-
-class PagedKVCache {
-    void append(int layer, tensor_t k_new, tensor_t v_new, SequenceKVMeta &meta);
-    tensor_t gather_contiguous_k(int layer, const SequenceKVMeta &meta);
-    tensor_t gather_contiguous_v(int layer, const SequenceKVMeta &meta);
-};
-```
-
-**Existing `DynamicKVCache` is NOT removed.** Sessions can use either.
-
-### Dependency
-
-PR-7 (scheduler manages per-request KV state).
-
-### Correctness Tests
-
-- Block pool: allocate all, free all, re-allocate. Verify no leaks.
-- PagedKVCache: append tokens, gather contiguous, compare against `DynamicKVCache` slice.
-- E2E with paged cache (via contiguous gather): output identical to non-paged.
-
-### Regression Tests
-
-Existing `DynamicKVCache` path still works.
-
-### Benchmarks
-
-Config D (long context). Measure peak memory vs `DynamicKVCache`.
-Expected: ~30 % less peak memory (no over-allocation / growth copies).
-
-### Risks
-
-- Contiguous gather fallback negates most of the latency benefit. Acceptable because
-  PR-9 adds true paged attention.
-- Block fragmentation with many short sequences.
-
-### Rollback
-
-Engine config flag `use_paged_kvcache = false` reverts to `DynamicKVCache`.
-
----
-
-## PR-9: Paged Attention Kernels
-
-### Objective
-
-Implement attention kernels that read K/V directly from block-table-indexed
-memory, eliminating the contiguous gather in PR-8. Separate decode and
-prefill attention paths.
-
-### Affected Files
-
-| Action | File |
-|--------|------|
-| New | `include/backend/ops/self_attention/paged.hpp` — paged attention declarations |
-| New | `src/backend/ops/self_attention/cpu/paged_attention_cpu.cpp` |
-| New | `src/backend/ops/self_attention/nvidia/paged_attention_nvidia.cu` |
-| Modify | `include/backend/ops/ops.hpp` — add `paged_attention_decode`, `paged_attention_prefill` |
-| Modify | `src/frontend/models/qwen2_forward_batch.cpp` — use paged attention |
-| Modify | `src/frontend/models/qwen3_forward_batch.cpp` — same |
-| Modify | `src/backend/kvcache/paged.cpp` — remove contiguous gather methods (or keep as debug fallback) |
-
-### Interfaces Added / Changed / Removed
-
-**Added:**
-
-```cpp
-void paged_attention_decode(
-    tensor_t out,            // [num_seqs, nhead, head_dim]
-    tensor_t query,          // [num_seqs, nhead, head_dim]
-    tensor_t k_cache_pool,   // [total_blocks * block_size, nkvhead, head_dim]
-    tensor_t v_cache_pool,
-    tensor_t block_tables,   // [num_seqs, max_blocks_per_seq] int32
-    tensor_t seq_lens,       // [num_seqs] int32
-    float scale,
-    int block_size);
-
-void paged_attention_prefill(
-    tensor_t out,
-    tensor_t query,
-    tensor_t k_cache_pool,
-    tensor_t v_cache_pool,
-    tensor_t block_table,    // [max_blocks] int32
-    int seq_len,
-    int past_len,
-    float scale,
-    int block_size);
-```
-
-### Dependency
-
-PR-8 (paged KV cache, block tables).
-
-### Correctness Tests
-
-- Paged decode: compare output against non-paged `self_attention` with same Q/K/V data.
-- Paged prefill: same comparison.
-- E2E with fully paged pipeline: output identical to non-paged reference.
-
-### Regression Tests
-
-Non-paged attention path still works for single-request mode.
-
-### Benchmarks
-
-Config A (decode-heavy), Config D (long context).
-Expected: no latency regression on decode; significant memory improvement.
-
-### Risks
-
-- GPU paged attention kernel is complex. Consider adapting vLLM paged attention
-  kernels (Apache-2.0) for initial implementation.
-- CPU paged attention may be slower than contiguous due to indirect access.
-  Mitigated by block-iterating loop that processes one block at a time for cache locality.
-
-### Rollback
-
-Engine flag reverts to non-paged attention + contiguous gather.
 
 ---
 
@@ -858,7 +936,7 @@ Endpoints: `POST /v1/chat/completions`, `GET /v1/models`, `GET /health`.
 
 ### Dependency
 
-PR-7 (scheduler with batching).
+PR-9 (scheduler with batching).
 
 ### Correctness Tests
 
@@ -1131,7 +1209,7 @@ struct MoEConfig {
 
 ### Dependency
 
-PR-13 (pinned memory), PR-12 (INT4 to fit model), PR-7 (continuous batching for multi-user).
+PR-13 (pinned memory), PR-12 (INT4 to fit model), PR-9 (continuous batching for multi-user).
 
 ### Correctness Tests
 
@@ -1169,9 +1247,11 @@ PR-1 ──> PR-2 ──> PR-4 ──> PR-6 ──> PR-7 ──> PR-8 ──> PR
               PR-5 (can merge anytime after PR-4)
 ```
 
-PRs 3a and 3b can proceed in parallel with each other and with PR-4/5.
+The critical path is: PR-1 -> PR-2 -> PR-4 -> PR-6 -> PR-7 (paged KV) -> PR-8 (paged attention) -> PR-9 (batching) -> PR-10 (HTTP).
+
+PRs 3a and 3b can proceed in parallel with each other and with PR-4/5/6.
 PR-5 can be merged any time after PR-4.
-PR-10 (HTTP) can merge any time after PR-7.
+PR-10 (HTTP) can merge any time after PR-9.
 PR-11/12 (quantization) can proceed independently once PR-3a/3b and PR-2 are in.
 PR-13/14 (heterogeneous/MoE) depend on quantization and batching.
 
@@ -1186,11 +1266,11 @@ PR-13/14 (heterogeneous/MoE) depend on quantization and batching.
 | 4 | Stateless engine & request types | Low | PR-2 |
 | 5 | Chat template extraction | Low | PR-4 |
 | 6 | Scheduler (single-request) | Medium | PR-4 |
-| 7 | Continuous batching | High | PR-6 |
-| 8 | Paged KV cache | Medium-High | PR-7 |
-| 9 | Paged attention kernels | High | PR-8 |
-| 10 | HTTP / OpenAPI server | Medium | PR-7 |
+| 7 | Paged KV cache & block pool | Medium-High | PR-6 |
+| 8 | Paged attention kernels | High | PR-7 |
+| 9 | Continuous batching | High | PR-8 |
+| 10 | HTTP / OpenAPI server | Medium | PR-9 |
 | 11 | INT8 quantization | Medium | PR-3a, PR-3b |
 | 12 | INT4 quantization | Medium | PR-11 |
 | 13 | Heterogeneous inference | Medium | PR-2 |
-| 14 | MoE expert offloading | High | PR-13, PR-12, PR-7 |
+| 14 | MoE expert offloading | High | PR-13, PR-12, PR-9 |
