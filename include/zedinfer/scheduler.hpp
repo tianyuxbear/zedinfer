@@ -83,18 +83,6 @@ public:
         tokenizer::Tokenizer &tokenizer,
         const std::vector<int> &stop_token_ids);
 
-    /**
-     * Single-request mode (backward compat for bench/chat/ping).
-     */
-    GenerationResult run_one(
-        model::Model &model,
-        kvcache::SequenceBlockTable &block_table,
-        kvcache::BlockPool &pool,
-        const ExecutorConfig &exec_config,
-        sampler::Sampler &sampler,
-        tokenizer::Tokenizer &tokenizer,
-        const std::vector<int> &stop_token_ids);
-
 private:
     SchedulerConfig config_;
     kvcache::BlockAllocator *block_allocator_ = nullptr;

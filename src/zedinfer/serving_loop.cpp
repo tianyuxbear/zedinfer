@@ -67,13 +67,16 @@ GenerationResult ServingLoop::generate_tokens(
     const std::vector<int> &input_ids,
     const GenerationConfig &config) {
 
+    // Build request borrowing the session's block table
     auto request = build_request(input_ids, config);
-    scheduler_.submit(std::move(request));
-    return scheduler_.run_one(
-        engine_->model(), block_table, *engine_->block_pool(),
-        engine_->exec_config(),
-        engine_->sampler(), engine_->tokenizer(),
-        engine_->stop_token_ids());
+    request->block_table_ref = &block_table;
+    auto future = submit_async(std::move(request));
+
+    while (future.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) {
+        step();
+    }
+
+    return future.get();
 }
 
 std::unique_ptr<InferenceRequest> ServingLoop::build_request(

@@ -93,6 +93,7 @@ public:
 
     int available_blocks() const;
     int block_size() const;
+    int num_layers() const { return num_layers_; }
     BlockPool &pool() { return pool_; }
     const BlockPool &pool() const { return pool_; }
 
