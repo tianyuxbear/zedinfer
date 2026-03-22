@@ -52,6 +52,15 @@ public:
     virtual void update_seq_len(int new_tokens);
     virtual void reset();
 
+    // Paged KV cache interface (default: not paged)
+    virtual bool is_paged() const { return false; }
+    virtual void *k_pool_data() const { return nullptr; }
+    virtual void *v_pool_data() const { return nullptr; }
+    virtual const int *k_block_ids(int layer_idx) const { return nullptr; }
+    virtual const int *v_block_ids(int layer_idx) const { return nullptr; }
+    virtual int block_size() const { return 0; }
+    virtual void scatter_layer_to_blocks(int /*layer_idx*/) {}
+
     // Statistics
     virtual size_t memory_usage() const = 0;
     virtual float utilization() const = 0;

@@ -44,7 +44,16 @@ public:
     size_t memory_usage() const override;
     float utilization() const override;
 
-    // Access block table for future paged attention (PR-8)
+    // Paged attention interface
+    bool is_paged() const override { return true; }
+    void *k_pool_data() const override;
+    void *v_pool_data() const override;
+    const int *k_block_ids(int layer_idx) const override;
+    const int *v_block_ids(int layer_idx) const override;
+    int block_size() const override;
+    void scatter_layer_to_blocks(int layer_idx) override;
+
+    // Access block table
     const SequenceBlockTable &block_table() const { return block_table_; }
 
 private:
@@ -65,6 +74,7 @@ private:
     // Pending write tracking
     int pending_write_past_len_ = -1;
     int pending_write_seq_len_ = 0;
+    bool direct_write_to_blocks_ = false; // true when decode writes directly to block memory
 
     // Helpers
     void ensure_write_capacity(int seq_len);
