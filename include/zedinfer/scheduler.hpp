@@ -90,7 +90,6 @@ private:
 
     std::deque<std::unique_ptr<InferenceRequest>> waiting_queue_;
     std::vector<std::unique_ptr<InferenceRequest>> active_requests_; // decode phase
-    std::vector<std::unique_ptr<InferenceRequest>> completing_;      // just completed
 
     uint64_t next_request_id_ = 1;
 

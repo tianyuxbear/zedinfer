@@ -110,9 +110,31 @@ bool ServingLoop::step() {
 
     auto batch_ctx = batch.build_context();
 
+    auto t0 = std::chrono::high_resolution_clock::now();
+
     model::PagedForwardContext ctx(batch_ctx, *engine_->block_allocator());
     tensor_t logits = model::transformer_forward(
         engine_->model().forward_config(), ctx, engine_->exec_config());
+
+    auto t1 = std::chrono::high_resolution_clock::now();
+    double step_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+
+    // Track timing: prefill or decode based on batch composition
+    bool has_prefill = !batch.prefill_requests.empty();
+    bool has_decode = !batch.decode_requests.empty();
+
+    if (has_prefill) {
+        for (auto *req : batch.prefill_requests) {
+            req->stats.prefill_time_ms += step_ms;
+            req->stats.total_time_ms += step_ms;
+        }
+    }
+    if (has_decode) {
+        for (auto *req : batch.decode_requests) {
+            req->stats.decode_time_ms += step_ms / batch.decode_requests.size();
+            req->stats.total_time_ms += step_ms / batch.decode_requests.size();
+        }
+    }
 
     scheduler_.process_results(batch, logits,
         engine_->sampler(), engine_->tokenizer(),
