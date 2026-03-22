@@ -7,10 +7,6 @@
 
 namespace zedinfer::model {
 
-// ============================================================================
-// ContiguousForwardContext — for warmup/profile with DynamicKVCache
-// ============================================================================
-
 ContiguousForwardContext::ContiguousForwardContext(
     const std::vector<int> &input_ids, int past_len,
     kvcache::DynamicKVCache &kvcache)
@@ -32,29 +28,26 @@ void ContiguousForwardContext::prepare_inputs(
 }
 
 void ContiguousForwardContext::write_kv(int layer, tensor_t k, tensor_t v) {
-    size_t nkvhead = kvcache_.kv_config().num_kv_heads;
-    size_t head_dim_val = kvcache_.kv_config().head_dim;
-    size_t kv_dim = nkvhead * head_dim_val;
-    size_t dtype_size = utils::dsize(kvcache_.kv_config().dtype);
+    auto &cfg = kvcache_.kv_config();
+    size_t kv_dim = cfg.num_kv_heads * cfg.head_dim;
+    size_t dtype_size = utils::dsize(cfg.dtype);
 
-    // V: copy to contiguous KV cache slot
     auto v_slot = kvcache_.get_v_cache_slice(layer, past_len_, sl_);
     size_t v_bytes = sl_ * kv_dim * dtype_size;
-    if (kvcache_.kv_config().device_type == ZEDINFER_DEVICE_CPU) {
+    if (cfg.device_type == ZEDINFER_DEVICE_CPU) {
         std::memcpy(v_slot->data(), v->data(), v_bytes);
     } else {
-        core::context().setDevice(kvcache_.kv_config().device_type, kvcache_.kv_config().device_id);
+        core::context().setDevice(cfg.device_type, cfg.device_id);
         core::context().runtime().api()->memcpy_sync(
             v_slot->data(), v->data(), v_bytes, ZEDINFER_MEMCPY_D2D);
     }
 
-    // K: copy to contiguous KV cache slot
     auto k_slot = kvcache_.get_k_cache_slice(layer, past_len_, sl_);
-    size_t k_bytes = sl_ * nkvhead * head_dim_val * dtype_size;
-    if (kvcache_.kv_config().device_type == ZEDINFER_DEVICE_CPU) {
+    size_t k_bytes = sl_ * cfg.num_kv_heads * cfg.head_dim * dtype_size;
+    if (cfg.device_type == ZEDINFER_DEVICE_CPU) {
         std::memcpy(k_slot->data(), k->data(), k_bytes);
     } else {
-        core::context().setDevice(kvcache_.kv_config().device_type, kvcache_.kv_config().device_id);
+        core::context().setDevice(cfg.device_type, cfg.device_id);
         core::context().runtime().api()->memcpy_sync(
             k_slot->data(), k->data(), k_bytes, ZEDINFER_MEMCPY_D2D);
     }
@@ -63,16 +56,24 @@ void ContiguousForwardContext::write_kv(int layer, tensor_t k, tensor_t v) {
 tensor_t ContiguousForwardContext::attend(
     int layer, tensor_t q_rope, float scale,
     const ExecutorConfig &exec_config,
-    size_t nhead, size_t /*nkvhead*/, size_t head_dim) {
+    size_t nhead, size_t nkvhead, size_t head_dim) {
 
+    auto &cfg = kvcache_.kv_config();
     auto attn = Tensor::create({static_cast<size_t>(sl_), nhead, head_dim},
                                 exec_config.data_type,
                                 exec_config.device_type, exec_config.device_id);
 
-    ops::self_attention(attn, q_rope,
-        kvcache_.get_k_cache_slice(layer, past_len_ + sl_),
-        kvcache_.get_v_cache_slice(layer, past_len_ + sl_), scale);
+    ops::AttentionConfig attn_cfg{
+        static_cast<int>(nhead), static_cast<int>(nkvhead), static_cast<int>(head_dim),
+        scale, 0, cfg.dtype, cfg.device_type, cfg.device_id};
 
+    ops::AttentionParams params{attn_cfg};
+    params.out = attn;
+    params.q = q_rope;
+    params.k_contiguous = kvcache_.get_k_cache_slice(layer, past_len_ + sl_);
+    params.v_contiguous = kvcache_.get_v_cache_slice(layer, past_len_ + sl_);
+
+    ops::attention(params);
     return attn;
 }
 

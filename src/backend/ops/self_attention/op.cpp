@@ -11,124 +11,137 @@
 
 namespace zedinfer::ops {
 
-void self_attention(tensor_t attn_val, tensor_t q, tensor_t k, tensor_t v, float scale) {
-    CHECK_SAME_DEVICE(attn_val, q, k, v);
-    CHECK_SAME_DTYPE(attn_val->dtype(), q->dtype(), k->dtype(), v->dtype());
-    ASSERT(attn_val->isContiguous() && q->isContiguous() && k->isContiguous() && v->isContiguous(), "SelfAttention: all tensors must be contiguous.");
+// ============================================================================
+// Contiguous attention (warmup/profile only)
+// ============================================================================
 
-    if (attn_val->deviceType() == ZEDINFER_DEVICE_CPU) {
-        return cpu::self_attention(attn_val->data(), q->data(), k->data(), v->data(), scale, attn_val->dtype(), attn_val->dim(0), attn_val->dim(1), attn_val->dim(2), k->dim(0), k->dim(1), k->dim(2));
+static void dispatch_contiguous(const AttentionParams &p) {
+    auto &c = p.config;
+
+    if (c.device_type == ZEDINFER_DEVICE_CPU) {
+        return cpu::self_attention(
+            p.out->data(), p.q->data(),
+            p.k_contiguous->data(), p.v_contiguous->data(),
+            c.scale, c.dtype,
+            p.q->dim(0), c.nhead, c.head_dim,
+            p.k_contiguous->dim(0), c.nkvhead, c.head_dim);
     }
 
-    zedinfer::core::context().setDevice(attn_val->deviceType(), attn_val->deviceId());
+    core::context().setDevice(c.device_type, c.device_id);
 
-    switch (attn_val->deviceType()) {
-    case ZEDINFER_DEVICE_CPU:
-        return cpu::self_attention(attn_val->data(), q->data(), k->data(), v->data(), scale, attn_val->dtype(), attn_val->dim(0), attn_val->dim(1), attn_val->dim(2), k->dim(0), k->dim(1), k->dim(2));
+    switch (c.device_type) {
 #ifdef ENABLE_NVIDIA_API
     case ZEDINFER_DEVICE_NVIDIA:
-        return nvidia::self_attention(attn_val->data(), q->data(), k->data(), v->data(), scale, attn_val->dtype(), attn_val->dim(0), attn_val->dim(1), attn_val->dim(2), k->dim(0), k->dim(1), k->dim(2));
+        return nvidia::self_attention(
+            p.out->data(), p.q->data(),
+            p.k_contiguous->data(), p.v_contiguous->data(),
+            c.scale, c.dtype,
+            p.q->dim(0), c.nhead, c.head_dim,
+            p.k_contiguous->dim(0), c.nkvhead, c.head_dim);
 #endif
     default:
         EXCEPTION_UNSUPPORTED_DEVICE;
     }
 }
 
-void paged_attention_decode(
-    tensor_t attn_val, tensor_t q,
-    const void *pool_base,
-    const int *k_block_table, const int *v_block_table,
-    int seq_len, float scale,
-    zedinferDataType_t dtype,
-    zedinferDeviceType_t device_type,
-    int device_id,
-    int nhead, int nkvhead, int head_dim, int block_size) {
+// ============================================================================
+// Paged decode — single request
+// ============================================================================
 
-    if (device_type == ZEDINFER_DEVICE_CPU) {
+static void dispatch_paged_decode(const AttentionParams &p) {
+    auto &c = p.config;
+
+    if (c.device_type == ZEDINFER_DEVICE_CPU) {
         return cpu::paged_attention_decode(
-            attn_val->data(), q->data(),
-            reinterpret_cast<const std::byte *>(pool_base),
-            k_block_table, v_block_table,
-            seq_len, scale, dtype,
-            nhead, nkvhead, head_dim, block_size);
+            p.out->data(), p.q->data(),
+            reinterpret_cast<const std::byte *>(p.pool_base),
+            p.k_block_table, p.v_block_table,
+            p.seq_len, c.scale, c.dtype,
+            c.nhead, c.nkvhead, c.head_dim, c.block_size);
     }
 
-    zedinfer::core::context().setDevice(device_type, device_id);
+    core::context().setDevice(c.device_type, c.device_id);
 
-    switch (device_type) {
+    switch (c.device_type) {
 #ifdef ENABLE_NVIDIA_API
     case ZEDINFER_DEVICE_NVIDIA:
         return nvidia::paged_attention_decode(
-            attn_val->data(), q->data(),
-            reinterpret_cast<const std::byte *>(pool_base),
-            k_block_table, v_block_table,
-            seq_len, scale, dtype,
-            nhead, nkvhead, head_dim, block_size);
+            p.out->data(), p.q->data(),
+            reinterpret_cast<const std::byte *>(p.pool_base),
+            p.k_block_table, p.v_block_table,
+            p.seq_len, c.scale, c.dtype,
+            c.nhead, c.nkvhead, c.head_dim, c.block_size);
 #endif
     default:
         EXCEPTION_UNSUPPORTED_DEVICE;
     }
 }
 
-void paged_attention_prefill(
-    tensor_t attn_val, tensor_t q,
-    const void *pool_base,
-    const int *k_block_table, const int *v_block_table,
-    int seqlen_q, int past_len,
-    float scale,
-    zedinferDataType_t dtype,
-    zedinferDeviceType_t device_type,
-    int device_id,
-    int nhead, int nkvhead, int head_dim, int block_size) {
+// ============================================================================
+// Paged decode — batched (multiple requests)
+// ============================================================================
 
-    zedinfer::core::context().setDevice(device_type, device_id);
+static void dispatch_paged_decode_batched(const AttentionParams &p) {
+    auto &c = p.config;
 
-    switch (device_type) {
-    case ZEDINFER_DEVICE_CPU:
-        // CPU prefill: fall back to gather + self_attention (no paged prefill kernel for CPU yet)
-        ASSERT(false, "CPU paged prefill not implemented — use gather path");
-        break;
-#ifdef ENABLE_NVIDIA_API
-    case ZEDINFER_DEVICE_NVIDIA:
-        return nvidia::paged_attention_prefill(
-            attn_val->data(), q->data(),
-            reinterpret_cast<const std::byte *>(pool_base),
-            k_block_table, v_block_table,
-            seqlen_q, past_len, scale, dtype,
-            nhead, nkvhead, head_dim, block_size);
-#endif
-    default:
-        EXCEPTION_UNSUPPORTED_DEVICE;
-    }
-}
+    core::context().setDevice(c.device_type, c.device_id);
 
-void paged_attention_decode_batched(
-    tensor_t attn_val, tensor_t q,
-    const void *pool_base,
-    const int *k_block_tables, const int *v_block_tables,
-    const int *seq_lens,
-    int num_reqs, int max_blocks_per_seq,
-    float scale,
-    zedinferDataType_t dtype,
-    zedinferDeviceType_t device_type,
-    int device_id,
-    int nhead, int nkvhead, int head_dim, int block_size) {
-
-    zedinfer::core::context().setDevice(device_type, device_id);
-
-    switch (device_type) {
+    switch (c.device_type) {
 #ifdef ENABLE_NVIDIA_API
     case ZEDINFER_DEVICE_NVIDIA:
         return nvidia::paged_attention_decode_batched(
-            attn_val->data(), q->data(),
-            reinterpret_cast<const std::byte *>(pool_base),
-            k_block_tables, v_block_tables, seq_lens,
-            num_reqs, max_blocks_per_seq,
-            scale, dtype, nhead, nkvhead, head_dim, block_size);
+            p.out->data(), p.q->data(),
+            reinterpret_cast<const std::byte *>(p.pool_base),
+            p.batched_k_block_tables, p.batched_v_block_tables,
+            p.batched_seq_lens,
+            p.num_requests, p.max_blocks_per_seq,
+            c.scale, c.dtype,
+            c.nhead, c.nkvhead, c.head_dim, c.block_size);
 #endif
     default:
         EXCEPTION_UNSUPPORTED_DEVICE;
     }
+}
+
+// ============================================================================
+// Paged prefill — single request
+// ============================================================================
+
+static void dispatch_paged_prefill(const AttentionParams &p) {
+    auto &c = p.config;
+
+    core::context().setDevice(c.device_type, c.device_id);
+
+    switch (c.device_type) {
+#ifdef ENABLE_NVIDIA_API
+    case ZEDINFER_DEVICE_NVIDIA:
+        return nvidia::paged_attention_prefill(
+            p.out->data(), p.q->data(),
+            reinterpret_cast<const std::byte *>(p.pool_base),
+            p.k_block_table, p.v_block_table,
+            p.seqlen_q, p.past_len, c.scale, c.dtype,
+            c.nhead, c.nkvhead, c.head_dim, c.block_size);
+#endif
+    default:
+        EXCEPTION_UNSUPPORTED_DEVICE;
+    }
+}
+
+// ============================================================================
+// Unified dispatch
+// ============================================================================
+
+void attention(const AttentionParams &params) {
+    if (params.is_contiguous()) {
+        return dispatch_contiguous(params);
+    }
+    if (params.is_batched()) {
+        return dispatch_paged_decode_batched(params);
+    }
+    if (params.is_decode()) {
+        return dispatch_paged_decode(params);
+    }
+    return dispatch_paged_prefill(params);
 }
 
 } // namespace zedinfer::ops
