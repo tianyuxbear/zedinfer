@@ -54,7 +54,8 @@ struct BatchContext {
 struct ScheduledBatch {
     std::vector<InferenceRequest *> decode_requests;
     std::vector<InferenceRequest *> prefill_requests;
-    std::vector<int> prefill_chunk_sizes;  // tokens to process per prefill request
+    std::vector<int> prefill_chunk_starts;  // start offset in input_ids per prefill request
+    std::vector<int> prefill_chunk_sizes;   // tokens to process per prefill request
 
     int total_tokens() const;
     bool empty() const;

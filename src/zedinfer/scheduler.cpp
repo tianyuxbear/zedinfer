@@ -147,6 +147,7 @@ ScheduledBatch Scheduler::schedule() {
         int chunk = std::min(remaining_prompt, prefill_budget);
 
         batch.prefill_requests.push_back(req);
+        batch.prefill_chunk_starts.push_back(req->prefill_progress);  // record BEFORE advancing
         batch.prefill_chunk_sizes.push_back(chunk);
         prefill_budget -= chunk;
 
