@@ -2,6 +2,7 @@
 
 #include "backend/device/device.hpp"
 #include "backend/kvcache/base.hpp"
+#include "backend/kvcache/block_pool.hpp"
 #include "frontend/models/base.hpp"
 #include "frontend/sampler/sampler.hpp"
 #include "frontend/tokenizer/base.hpp"
@@ -63,7 +64,11 @@ private:
     ChatTemplate chat_template_;
     std::vector<int> stop_token_ids_; // All token IDs that end generation
     Scheduler scheduler_;
+    SchedulerConfig scheduler_config_;
+    std::unique_ptr<kvcache::BlockPool> block_pool_;
+    std::unique_ptr<kvcache::BlockAllocator> block_allocator_;
 
+    void init_block_pool();
     void build_stop_token_ids();
     bool should_stop(int token_id) const;
     std::unique_ptr<InferenceRequest> build_request(
