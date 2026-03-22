@@ -126,7 +126,11 @@ tensor_t PagedForwardContext::attend(
                               exec_config.device_type, exec_config.device_id);
     };
 
-    int block_size = pool_.config().block_size;
+    ops::AttentionConfig attn_cfg{
+        static_cast<int>(nhead), static_cast<int>(nkvhead), static_cast<int>(head_dim),
+        scale, pool_.config().block_size,
+        exec_config.data_type, exec_config.device_type, exec_config.device_id};
+
     auto attn = make({static_cast<size_t>(total_tokens_), nhead, head_dim});
 
     // Count decode and prefill slots
@@ -139,9 +143,8 @@ tensor_t PagedForwardContext::attend(
         }
     }
 
-    // Batched decode attention
+    // Decode attention
     if (num_decode > 0) {
-        // Build flattened block tables for this layer
         int max_blocks = 0;
         std::vector<kvcache::SequenceBlockTable *> decode_tables;
         for (const auto &slot : slots_) {
@@ -156,7 +159,7 @@ tensor_t PagedForwardContext::attend(
         std::vector<int> sl(num_decode);
 
         for (int r = 0; r < num_decode; ++r) {
-            sl[r] = decode_tables[r]->seq_len + 1; // past + current token
+            sl[r] = decode_tables[r]->seq_len + 1;
             auto &kb = decode_tables[r]->k_blocks[layer];
             auto &vb = decode_tables[r]->v_blocks[layer];
             for (size_t b = 0; b < kb.size(); ++b) {
@@ -166,20 +169,19 @@ tensor_t PagedForwardContext::attend(
         }
 
         if (num_decode == 1) {
-            // Single decode: use non-batched kernel (simpler, no block table upload)
             auto decode_q = q_rope->slice(0, decode_start, decode_start + 1);
             auto decode_out = attn->slice(0, decode_start, decode_start + 1);
-            ops::paged_attention_decode(
-                decode_out->view({nhead, head_dim}),
-                decode_q->view({nhead, head_dim}),
-                pool_.block_data(0),
-                decode_tables[0]->k_blocks[layer].data(),
-                decode_tables[0]->v_blocks[layer].data(),
-                sl[0], scale, exec_config.data_type,
-                exec_config.device_type, exec_config.device_id,
-                nhead, nkvhead, head_dim, block_size);
+
+            ops::AttentionParams params{attn_cfg};
+            params.out = decode_out->view({nhead, head_dim});
+            params.q = decode_q->view({nhead, head_dim});
+            params.pool_base = pool_.block_data(0);
+            params.k_block_table = decode_tables[0]->k_blocks[layer].data();
+            params.v_block_table = decode_tables[0]->v_blocks[layer].data();
+            params.seq_len = sl[0];
+            params.seqlen_q = 1;
+            ops::attention(params);
         } else {
-            // Multi decode: batched kernel
             auto k_bt_t = make_typed({static_cast<size_t>(num_decode * max_blocks)}, ZEDINFER_DTYPE_I32);
             k_bt_t->load(k_bt.data());
             auto v_bt_t = make_typed({static_cast<size_t>(num_decode * max_blocks)}, ZEDINFER_DTYPE_I32);
@@ -190,14 +192,16 @@ tensor_t PagedForwardContext::attend(
             auto decode_q = q_rope->slice(0, decode_start, decode_start + num_decode);
             auto decode_out = attn->slice(0, decode_start, decode_start + num_decode);
 
-            ops::paged_attention_decode_batched(
-                decode_out, decode_q, pool_.block_data(0),
-                reinterpret_cast<const int *>(k_bt_t->data()),
-                reinterpret_cast<const int *>(v_bt_t->data()),
-                reinterpret_cast<const int *>(sl_t->data()),
-                num_decode, max_blocks, scale, exec_config.data_type,
-                exec_config.device_type, exec_config.device_id,
-                nhead, nkvhead, head_dim, block_size);
+            ops::AttentionParams params{attn_cfg};
+            params.out = decode_out;
+            params.q = decode_q;
+            params.pool_base = pool_.block_data(0);
+            params.batched_k_block_tables = reinterpret_cast<const int *>(k_bt_t->data());
+            params.batched_v_block_tables = reinterpret_cast<const int *>(v_bt_t->data());
+            params.batched_seq_lens = reinterpret_cast<const int *>(sl_t->data());
+            params.num_requests = num_decode;
+            params.max_blocks_per_seq = max_blocks;
+            ops::attention(params);
         }
     }
 
@@ -208,13 +212,15 @@ tensor_t PagedForwardContext::attend(
         auto pf_q = q_rope->slice(0, slot.token_offset, slot.token_offset + slot.num_tokens);
         auto pf_out = attn->slice(0, slot.token_offset, slot.token_offset + slot.num_tokens);
 
-        ops::paged_attention_prefill(
-            pf_out, pf_q, pool_.block_data(0),
-            slot.block_table->k_blocks[layer].data(),
-            slot.block_table->v_blocks[layer].data(),
-            slot.num_tokens, slot.past_len, scale, exec_config.data_type,
-            exec_config.device_type, exec_config.device_id,
-            nhead, nkvhead, head_dim, block_size);
+        ops::AttentionParams params{attn_cfg};
+        params.out = pf_out;
+        params.q = pf_q;
+        params.pool_base = pool_.block_data(0);
+        params.k_block_table = slot.block_table->k_blocks[layer].data();
+        params.v_block_table = slot.block_table->v_blocks[layer].data();
+        params.seqlen_q = slot.num_tokens;
+        params.past_len = slot.past_len;
+        ops::attention(params);
     }
 
     return attn;
