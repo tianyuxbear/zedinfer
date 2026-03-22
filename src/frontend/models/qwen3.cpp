@@ -1,9 +1,7 @@
 #include "frontend/models/qwen3.hpp"
-#include "backend/kvcache/base.hpp"
-#include "backend/ops/ops.hpp"
-#include "zedinfer/activation.hpp"
+#include "frontend/models/forward_config.hpp"
+#include "frontend/models/forward_context.hpp"
 
-#include <cmath>
 #include <string>
 
 namespace zedinfer::model {
@@ -46,6 +44,29 @@ size_t Qwen3Model::calculate_num_parameters() const {
 }
 
 tensor_t Qwen3Model::forward(
+    const std::vector<int> &input_ids,
+    int past_len,
+    kvcache::KVCache &kvcache,
+    const ExecutorConfig &exec_config) {
+
+    ModelForwardConfig cfg_fwd{config_, *weights_, /*has_qkv_bias=*/false, /*has_qk_norm=*/true};
+    SingleForwardContext ctx(input_ids, past_len, kvcache);
+    return transformer_forward(cfg_fwd, ctx, exec_config);
+}
+
+tensor_t Qwen3Model::forward_batch(
+    const BatchContext &batch,
+    kvcache::BlockAllocator &allocator,
+    const ExecutorConfig &exec_config) {
+
+    ModelForwardConfig cfg_fwd{config_, *weights_, /*has_qkv_bias=*/false, /*has_qk_norm=*/true};
+    BatchedForwardContext ctx(batch, allocator, exec_config);
+    return transformer_forward(cfg_fwd, ctx, exec_config);
+}
+
+// Dead code below — kept temporarily until build verified, then deleted.
+#if 0
+tensor_t Qwen3Model::forward_OLD(
     const std::vector<int> &input_ids,
     int past_len,
     kvcache::KVCache &kvcache,
@@ -171,5 +192,6 @@ tensor_t Qwen3Model::forward(
     kvcache.update_seq_len(sl);
     return logits;
 }
+#endif
 
 } // namespace zedinfer::model
