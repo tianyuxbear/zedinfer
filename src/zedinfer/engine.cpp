@@ -199,13 +199,9 @@ bool InferenceEngine::step() {
 
     auto batch_ctx = batch.build_context();
 
-    // Use PagedForwardContext for batched forward
     model::PagedForwardContext ctx(batch_ctx, *block_allocator_);
     tensor_t logits = model::transformer_forward(
-        model::ModelForwardConfig{model_->config(), model_->weights(),
-                                   /*has_qkv_bias=*/model_->model_type() == "qwen2",
-                                   /*has_qk_norm=*/model_->model_type() == "qwen3"},
-        ctx, exec_config_);
+        model_->forward_config(), ctx, exec_config_);
 
     scheduler_.process_results(batch, logits, *sampler_, *tokenizer_, stop_token_ids_);
 
@@ -329,21 +325,27 @@ void InferenceEngine::warmup(size_t prefill_len, size_t decode_steps) {
     kv_config.initial_capacity = prefill_len + decode_steps;
     kv_config.model_max_seq_len = tokenizer_->get_config().model_max_length;
 
-    auto tmp_kv = kvcache::DynamicKVCache::create_dynamic_kvcache(kv_config);
+    auto tmp_kv = kvcache::DynamicKVCache::create(kv_config);
+    auto fwd_cfg = model_->forward_config();
 
     int min_id = 100, max_id = mc.vocab_size - 100;
     std::vector<int> dummy(prefill_len);
     for (auto &t : dummy) t = utils::randint(min_id, max_id);
 
     int past_len = 0;
-    auto logits = model_->forward(dummy, past_len, *tmp_kv, exec_config_);
-    int next = sampler_->sample(logits);
-    past_len += prefill_len;
+    {
+        model::ContiguousForwardContext ctx(dummy, past_len, *tmp_kv);
+        auto logits = model::transformer_forward(fwd_cfg, ctx, exec_config_);
+        int next = sampler_->sample(logits);
+        past_len += prefill_len;
 
-    for (size_t i = 1; i < decode_steps; ++i) {
-        logits = model_->forward({next}, past_len, *tmp_kv, exec_config_);
-        next = sampler_->sample(logits);
-        past_len++;
+        for (size_t i = 1; i < decode_steps; ++i) {
+            std::vector<int> tok = {next};
+            model::ContiguousForwardContext dctx(tok, past_len, *tmp_kv);
+            logits = model::transformer_forward(fwd_cfg, dctx, exec_config_);
+            next = sampler_->sample(logits);
+            past_len++;
+        }
     }
 
     auto t1 = std::chrono::high_resolution_clock::now();
@@ -367,7 +369,8 @@ std::pair<double, double> InferenceEngine::profile(size_t prefill_len, size_t de
     kv_config.initial_capacity = prefill_len + decode_steps;
     kv_config.model_max_seq_len = tokenizer_->get_config().model_max_length;
 
-    auto tmp_kv = kvcache::DynamicKVCache::create_dynamic_kvcache(kv_config);
+    auto tmp_kv = kvcache::DynamicKVCache::create(kv_config);
+    auto fwd_cfg = model_->forward_config();
 
     int min_id = 100, max_id = mc.vocab_size - 100;
     std::vector<int> dummy(prefill_len);
@@ -375,15 +378,22 @@ std::pair<double, double> InferenceEngine::profile(size_t prefill_len, size_t de
 
     auto p0 = std::chrono::high_resolution_clock::now();
     int past_len = 0;
-    auto logits = model_->forward(dummy, past_len, *tmp_kv, exec_config_);
-    int next = sampler_->sample(logits);
+    tensor_t logits;
+    int next;
+    {
+        model::ContiguousForwardContext ctx(dummy, past_len, *tmp_kv);
+        logits = model::transformer_forward(fwd_cfg, ctx, exec_config_);
+        next = sampler_->sample(logits);
+    }
     auto p1 = std::chrono::high_resolution_clock::now();
 
     past_len += prefill_len;
 
     auto d0 = std::chrono::high_resolution_clock::now();
     for (size_t i = 1; i < decode_steps; ++i) {
-        logits = model_->forward({next}, past_len, *tmp_kv, exec_config_);
+        std::vector<int> tok = {next};
+        model::ContiguousForwardContext ctx(tok, past_len, *tmp_kv);
+        logits = model::transformer_forward(fwd_cfg, ctx, exec_config_);
         next = sampler_->sample(logits);
         past_len++;
     }

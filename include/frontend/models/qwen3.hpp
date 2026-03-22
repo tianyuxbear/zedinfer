@@ -1,52 +1,34 @@
 #pragma once
 
 #include "frontend/models/base.hpp"
+#include "frontend/models/forward_config.hpp"
 
 #include <memory>
 
 namespace zedinfer::model {
 
-// Qwen3-specific configuration extending base model config.
 struct Qwen3Config : public ModelConfig {
     Qwen3Config(ModelConfig config) : ModelConfig(config) {}
-    int sliding_window;      // Sliding window size for attention
-    int max_window_layers;   // Number of layers using sliding window
-    bool use_sliding_window; // Whether sliding window attention is enabled
+    int sliding_window;
+    int max_window_layers;
+    bool use_sliding_window;
 };
 
-// Concrete implementation of the Qwen3 model.
 class Qwen3Model : public Model {
 public:
-    Qwen3Model(Qwen3Config &config, std::unique_ptr<ModelWeights> weights) : config_(config), weights_(std::move(weights)) {
+    Qwen3Model(Qwen3Config &config, std::unique_ptr<ModelWeights> weights)
+        : config_(config), weights_(std::move(weights)) {
         num_params_ = calculate_num_parameters();
-    };
-
-    const Qwen3Config &config() const override {
-        return config_;
     }
-    const ModelWeights &weights() const override {
-        return *weights_;
-    };
 
-    // Weight name accessors for inference graph construction
-    std::string get_embedding_weight_name() const override;
-    std::string get_output_norm_weight_name() const override;
-    std::string get_output_weight_name() const override;
-    std::vector<std::string> get_layer_weight_names(int layer_idx) const override;
+    const Qwen3Config &config() const override { return config_; }
+    const ModelWeights &weights() const override { return *weights_; }
+    std::string model_type() const override { return "qwen3"; }
+    size_t num_parameters() const override { return num_params_; }
 
-    std::string model_type() const override { return "qwen3"; };
-    size_t num_parameters() const override { return num_params_; };
-
-    tensor_t forward(
-        const std::vector<int> &input_ids,
-        int past_len,
-        kvcache::KVCache &kvcache,
-        const ExecutorConfig &exec_config) override;
-
-    tensor_t forward_batch(
-        const BatchContext &batch,
-        kvcache::BlockAllocator &allocator,
-        const ExecutorConfig &exec_config) override;
+    ModelForwardConfig forward_config() const override {
+        return {config_, *weights_, /*has_qkv_bias=*/false, /*has_qk_norm=*/true};
+    }
 
 private:
     size_t calculate_num_parameters() const;
