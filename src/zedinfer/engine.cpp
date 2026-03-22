@@ -118,8 +118,8 @@ std::string InferenceEngine::generate(
         LOGI << "[Inference] Generating...";
     }
 
-    auto output_ids = generate_tokens(kvcache, input_ids, config);
-    std::string output = tokenizer_->decode(output_ids);
+    auto result = generate_tokens(kvcache, input_ids, config);
+    std::string output = tokenizer_->decode(result.output_ids);
 
     if (config.verbose) {
         LOGI << "[Inference] Generation complete";
@@ -131,22 +131,22 @@ std::string InferenceEngine::generate(
     }
 
     if (config.print_stats) {
-        LOGI << last_stats_.summary();
+        LOGI << result.stats.summary();
     }
 
     return output;
 }
 
-std::vector<int> InferenceEngine::generate_tokens(
+GenerationResult InferenceEngine::generate_tokens(
     kvcache::KVCache &kvcache,
     const std::vector<int> &input_ids,
     const GenerationConfig &config) {
 
-    last_stats_ = GenerationStats();
-    last_stats_.prompt_tokens = input_ids.size();
+    GenerationResult result;
+    GenerationStats &stats = result.stats;
+    stats.prompt_tokens = input_ids.size();
 
-    std::vector<int> generated_ids;
-    generated_ids.reserve(config.max_new_tokens);
+    result.output_ids.reserve(config.max_new_tokens);
 
     // Prefill
     auto t0 = std::chrono::high_resolution_clock::now();
@@ -156,20 +156,19 @@ std::vector<int> InferenceEngine::generate_tokens(
     int next_token = sampler_->sample(logits);
 
     auto t1 = std::chrono::high_resolution_clock::now();
-    update_stats_prefill(
-        std::chrono::duration<double, std::milli>(t1 - t0).count(),
-        input_ids.size());
+    stats.prefill_time_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    stats.total_time_ms += stats.prefill_time_ms;
 
-    generated_ids.push_back(next_token);
+    result.output_ids.push_back(next_token);
 
     if (config.stream && config.stream_callback) {
         config.stream_callback(tokenizer_->decode({next_token}));
     }
 
     if (should_stop(next_token)) {
-        last_stats_.generated_tokens = generated_ids.size();
-        last_stats_.total_tokens = last_stats_.prompt_tokens + last_stats_.generated_tokens;
-        return generated_ids;
+        stats.generated_tokens = result.output_ids.size();
+        stats.total_tokens = stats.prompt_tokens + stats.generated_tokens;
+        return result;
     }
 
     // Decode
@@ -182,10 +181,11 @@ std::vector<int> InferenceEngine::generate_tokens(
         next_token = sampler_->sample(logits);
 
         auto s1 = std::chrono::high_resolution_clock::now();
-        update_stats_decode(
-            std::chrono::duration<double, std::milli>(s1 - s0).count());
+        double step_ms = std::chrono::duration<double, std::milli>(s1 - s0).count();
+        stats.decode_time_ms += step_ms;
+        stats.total_time_ms += step_ms;
 
-        generated_ids.push_back(next_token);
+        result.output_ids.push_back(next_token);
         past_len++;
 
         if (config.stream && config.stream_callback) {
@@ -202,24 +202,13 @@ std::vector<int> InferenceEngine::generate_tokens(
         }
     }
 
-    last_stats_.generated_tokens = generated_ids.size();
-    last_stats_.total_tokens = last_stats_.prompt_tokens + last_stats_.generated_tokens;
-    return generated_ids;
+    stats.generated_tokens = result.output_ids.size();
+    stats.total_tokens = stats.prompt_tokens + stats.generated_tokens;
+    return result;
 }
 
 bool InferenceEngine::should_stop(int token_id) const {
     return token_id == tokenizer_->get_eos_token_id();
-}
-
-void InferenceEngine::update_stats_prefill(double time_ms, int num_tokens) {
-    last_stats_.prompt_tokens = num_tokens;
-    last_stats_.prefill_time_ms = time_ms;
-    last_stats_.total_time_ms += time_ms;
-}
-
-void InferenceEngine::update_stats_decode(double time_ms) {
-    last_stats_.decode_time_ms += time_ms;
-    last_stats_.total_time_ms += time_ms;
 }
 
 void InferenceEngine::warmup(size_t prefill_len, size_t decode_steps) {

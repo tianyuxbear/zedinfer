@@ -7,6 +7,7 @@
 #include "frontend/tokenizer/base.hpp"
 #include "zedinfer/activation.hpp"
 #include "zedinfer/generation_types.hpp"
+#include "zedinfer/request.hpp"
 
 #include <cstddef>
 #include <memory>
@@ -35,12 +36,10 @@ public:
         const std::string &prompt,
         const GenerationConfig &config);
 
-    std::vector<int> generate_tokens(
+    GenerationResult generate_tokens(
         kvcache::KVCache &kvcache,
         const std::vector<int> &input_ids,
         const GenerationConfig &config);
-
-    const GenerationStats &last_stats() const { return last_stats_; }
 
     void warmup(size_t prefill_len = 128, size_t decode_steps = 128);
     std::pair<double, double> profile(size_t prefill_len = 128, size_t decode_steps = 128);
@@ -58,11 +57,8 @@ private:
     std::shared_ptr<sampler::Sampler> sampler_;
     device::Device device_;
     ExecutorConfig exec_config_;
-    GenerationStats last_stats_;
 
     bool should_stop(int token_id) const;
-    void update_stats_prefill(double time_ms, int num_tokens);
-    void update_stats_decode(double time_ms);
 };
 
 } // namespace zedinfer
