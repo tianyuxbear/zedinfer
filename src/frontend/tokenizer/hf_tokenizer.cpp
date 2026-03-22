@@ -43,8 +43,18 @@ void HFTokenizer::load_from_file(const std::string &tokenizer_path) {
 
         if (model.contains("merges")) {
             int rank = 0;
-            for (const auto &merge_str : model["merges"]) {
-                merges_[merge_str.get<std::string>()] = rank++;
+            for (const auto &merge_entry : model["merges"]) {
+                std::string key;
+                if (merge_entry.is_string()) {
+                    // Old format: "token1 token2"
+                    key = merge_entry.get<std::string>();
+                } else if (merge_entry.is_array() && merge_entry.size() == 2) {
+                    // New format: ["token1", "token2"]
+                    key = merge_entry[0].get<std::string>() + " " + merge_entry[1].get<std::string>();
+                } else {
+                    continue;
+                }
+                merges_[key] = rank++;
             }
         }
     }
@@ -73,23 +83,17 @@ void HFTokenizer::load_from_file(const std::string &tokenizer_path) {
         }
     }
 
-    // Load added (special) tokens
+    // Load added (special) tokens into lookup maps
     if (tokenizer.contains("added_tokens")) {
         for (const auto &token_info : tokenizer["added_tokens"]) {
             std::string token = token_info["content"].get<std::string>();
             int id = token_info["id"].get<int>();
             special_tokens_.token_to_id[token] = id;
             special_tokens_.id_to_token[id] = token;
-
-            if (token == "<｜begin▁of▁sentence｜>" || token == "<|begin_of_sentence|>" || token == "<bos>") {
-                special_tokens_.bos_token_id = id;
-            } else if (token == "<｜end▁of▁sentence｜>" || token == "<|end_of_sentence|>" || token == "<eos>") {
-                special_tokens_.eos_token_id = id;
-            }
         }
     }
 
-    // Load additional config from tokenizer_config.json if available
+    // Load config and resolve BOS/EOS from tokenizer_config.json (authoritative source)
     std::filesystem::path tokenizer_config_path(tokenizer_path);
     if (tokenizer_config_path.filename() == "tokenizer.json") {
         tokenizer_config_path.replace_filename("tokenizer_config.json");
@@ -183,28 +187,24 @@ std::string HFTokenizer::decode(const std::vector<int> &tokens) {
 
 std::string HFTokenizer::apply_chat_template(
     const std::vector<std::pair<std::string, std::string>> &messages,
+    const ChatTemplate &tmpl,
     bool add_generation_prompt) {
     std::string result;
 
     if (special_tokens_.bos_token_id != -1) {
-        result += "<｜begin▁of▁sentence｜>";
+        result += tmpl.bos_token;
     }
 
     for (const auto &[role, content] : messages) {
         if (role == "user") {
-            result += "<｜User｜>" + content;
+            result += tmpl.user_prefix + content + tmpl.user_suffix;
         } else if (role == "assistant") {
-            std::string clean_content = content;
-            size_t think_end = content.find("</think>");
-            if (think_end != std::string::npos) {
-                clean_content = content.substr(think_end + 8);
-            }
-            result += "<｜Assistant｜>" + clean_content + "<｜end▁of▁sentence｜>";
+            result += tmpl.assistant_prefix + content + tmpl.assistant_suffix;
         }
     }
 
     if (add_generation_prompt) {
-        result += "<｜Assistant｜><think>\n";
+        result += tmpl.generation_prompt;
     }
 
     return result;
@@ -222,17 +222,45 @@ void HFTokenizer::load_config_file(const std::string &tokenizer_config_path) {
     json config;
     file >> config;
 
-    if (config.contains("add_bos_token")) {
+    if (config.contains("add_bos_token") && config["add_bos_token"].is_boolean()) {
         config_.add_bos_token = config["add_bos_token"].get<bool>();
     }
-    if (config.contains("add_eos_token")) {
+    if (config.contains("add_eos_token") && config["add_eos_token"].is_boolean()) {
         config_.add_eos_token = config["add_eos_token"].get<bool>();
     }
-    if (config.contains("clean_up_tokenization_spaces")) {
+    if (config.contains("clean_up_tokenization_spaces") && config["clean_up_tokenization_spaces"].is_boolean()) {
         config_.clean_up_tokenization_spaces = config["clean_up_tokenization_spaces"].get<bool>();
     }
-    if (config.contains("model_max_length")) {
+    if (config.contains("model_max_length") && config["model_max_length"].is_number()) {
         config_.model_max_length = config["model_max_length"].get<int>();
+    }
+
+    // Extract token string from either a plain string or AddedToken object {"content": "..."}
+    auto extract_token = [](const json &j, const std::string &key) -> std::string {
+        if (!j.contains(key)) return "";
+        const auto &val = j[key];
+        if (val.is_string()) return val.get<std::string>();
+        if (val.is_object() && val.contains("content"))
+            return val["content"].get<std::string>();
+        return "";
+    };
+
+    // Resolve eos_token / bos_token strings to IDs via the special token map.
+    // tokenizer_config.json is the authoritative source for which token is EOS/BOS.
+    std::string eos_str = extract_token(config, "eos_token");
+    std::string bos_str = extract_token(config, "bos_token");
+
+    if (!eos_str.empty()) {
+        auto it = special_tokens_.token_to_id.find(eos_str);
+        if (it != special_tokens_.token_to_id.end()) {
+            special_tokens_.eos_token_id = it->second;
+        }
+    }
+    if (!bos_str.empty()) {
+        auto it = special_tokens_.token_to_id.find(bos_str);
+        if (it != special_tokens_.token_to_id.end()) {
+            special_tokens_.bos_token_id = it->second;
+        }
     }
 }
 

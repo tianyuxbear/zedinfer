@@ -1,0 +1,126 @@
+#include "zedinfer/chat_template.hpp"
+
+#include <filesystem>
+#include <fstream>
+#include <nlohmann/json.hpp>
+#include <plog/Log.h>
+#include <string>
+
+namespace fs = std::filesystem;
+using json = nlohmann::json;
+
+namespace zedinfer {
+
+// DeepSeek-R1 uses fullwidth Unicode delimiters in special token names.
+// U+FF5C (fullwidth vertical line) and U+2581 (lower one eighth block).
+static const std::string DS_SEP = "\xef\xbd\x9c";   // ｜
+static const std::string DS_MID = "\xe2\x96\x81";    // ▁
+
+static std::string ds_token(const std::string &name) {
+    return "<" + DS_SEP + name + DS_SEP + ">";
+}
+
+static std::string ds_sentence_token(const std::string &action) {
+    return "<" + DS_SEP + action + DS_MID + "of" + DS_MID + "sentence" + DS_SEP + ">";
+}
+
+ChatTemplate ChatTemplate::default_deepseek_r1() {
+    ChatTemplate t;
+    t.bos_token            = ds_sentence_token("begin");
+    t.eos_token            = ds_sentence_token("end");
+    t.user_prefix          = ds_token("User");
+    t.user_suffix          = "";
+    t.assistant_prefix     = ds_token("Assistant");
+    t.assistant_suffix     = ds_sentence_token("end");
+    t.generation_prompt    = ds_token("Assistant") + "<think>\n";
+    t.output_prefix        = "<think> ";
+    t.add_bos_first_turn_only = true;
+    return t;
+}
+
+ChatTemplate ChatTemplate::default_qwen_chatml() {
+    ChatTemplate t;
+    t.bos_token            = "";
+    t.eos_token            = "<|im_end|>";
+    t.user_prefix          = "<|im_start|>user\n";
+    t.user_suffix          = "<|im_end|>\n";
+    t.assistant_prefix     = "<|im_start|>assistant\n";
+    t.assistant_suffix     = "<|im_end|>\n";
+    t.generation_prompt    = "<|im_start|>assistant\n";
+    t.output_prefix        = "";
+    t.add_bos_first_turn_only = false;
+    return t;
+}
+
+// Extract token string from either a plain string or AddedToken object {"content": "..."}
+static std::string extract_token_string(const json &j, const std::string &key) {
+    if (!j.contains(key)) return "";
+    const auto &val = j[key];
+    if (val.is_string()) return val.get<std::string>();
+    if (val.is_object() && val.contains("content"))
+        return val["content"].get<std::string>();
+    return "";
+}
+
+// Detect DeepSeek-R1 format by checking if eos_token contains the fullwidth delimiter.
+static bool is_deepseek_r1_format(const std::string &model_path) {
+    fs::path tc_path = fs::path(model_path) / "tokenizer_config.json";
+    if (!fs::exists(tc_path)) return false;
+
+    try {
+        std::ifstream file(tc_path);
+        json j;
+        file >> j;
+
+        std::string eos = extract_token_string(j, "eos_token");
+        return eos.find(DS_SEP) != std::string::npos;
+    } catch (...) {}
+
+    return false;
+}
+
+ChatTemplate ChatTemplate::load(const std::string &model_path,
+                                const std::string &model_type) {
+    // Try optional chat_template.json override
+    fs::path override_path = fs::path(model_path) / "chat_template.json";
+    if (fs::exists(override_path)) {
+        try {
+            std::ifstream file(override_path);
+            json j;
+            file >> j;
+
+            ChatTemplate t;
+            t.bos_token = j.value("bos_token", "");
+            t.eos_token = j.value("eos_token", "");
+            t.user_prefix = j.value("user_prefix", "");
+            t.user_suffix = j.value("user_suffix", "");
+            t.assistant_prefix = j.value("assistant_prefix", "");
+            t.assistant_suffix = j.value("assistant_suffix", "");
+            t.generation_prompt = j.value("generation_prompt", "");
+            t.output_prefix = j.value("output_prefix", "");
+            t.add_bos_first_turn_only = j.value("add_bos_first_turn_only", true);
+
+            LOGI << "[ChatTemplate] Loaded from " << override_path.string();
+            return t;
+        } catch (const std::exception &e) {
+            LOGW << "[ChatTemplate] Failed to parse " << override_path.string()
+                 << ": " << e.what() << "; falling back to model-type default";
+        }
+    }
+
+    // Auto-detect: DeepSeek-R1 distillation vs standard Qwen
+    if (model_type == "qwen2" || model_type == "qwen3") {
+        if (is_deepseek_r1_format(model_path)) {
+            LOGI << "[ChatTemplate] Detected DeepSeek-R1 format for model_type=" << model_type;
+            return default_deepseek_r1();
+        }
+        LOGI << "[ChatTemplate] Using ChatML template for model_type=" << model_type;
+        return default_qwen_chatml();
+    }
+
+    LOGW << "[ChatTemplate] Unknown model_type=" << model_type
+         << "; using ChatML template as fallback";
+    return default_qwen_chatml();
+}
+
+} // namespace zedinfer

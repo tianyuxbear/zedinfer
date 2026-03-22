@@ -30,6 +30,14 @@ std::shared_ptr<Model> Model::parse(const std::string &model_path, zedinferDevic
         config->torch_dtype = "float32";
     }
 
+    // Handle tied word embeddings: reuse embed_tokens.weight as lm_head.weight
+    if (config->tie_word_embeddings && !weights->has_tensor("lm_head.weight")) {
+        if (weights->has_tensor("embed_tokens.weight")) {
+            weights->add_tensor("lm_head.weight", weights->get_tensor("embed_tokens.weight"));
+            LOGI << "[Model] tie_word_embeddings=true: aliased embed_tokens.weight -> lm_head.weight";
+        }
+    }
+
     // Construct and return the model instance
     if (config->model_type == "qwen2") {
         auto *qwen2_config = dynamic_cast<Qwen2Config *>(config.get());
@@ -48,14 +56,33 @@ std::shared_ptr<Model> Model::parse(const std::string &model_path, zedinferDevic
     throw std::runtime_error("Unsupported model type: " + config->model_type);
 }
 
+// Safe string reader: returns default if key missing, null, or non-string type.
+static std::string safe_string(const json &j, const std::string &key, const std::string &def) {
+    if (!j.contains(key) || !j[key].is_string()) return def;
+    return j[key].get<std::string>();
+}
+
 // Populate common config fields from JSON.
 void Model::load_base_config(ModelConfig &config, const json &j) {
-    config.model_type = j.value("model_type", "unknown");
-    config.hidden_act = j.value("hidden_act", "silu");
-    config.torch_dtype = j.value("torch_dtype", "bfloat16");
+    config.model_type = safe_string(j, "model_type", "unknown");
+    config.hidden_act = safe_string(j, "hidden_act", "silu");
+    config.torch_dtype = safe_string(j, "torch_dtype", "bfloat16");
 
     config.bos_token_id = j.value("bos_token_id", 151643);
-    config.eos_token_id = j.value("eos_token_id", 151643);
+
+    // eos_token_id can be int or array of ints in config.json
+    if (j.contains("eos_token_id")) {
+        if (j["eos_token_id"].is_array()) {
+            for (const auto &id : j["eos_token_id"]) {
+                config.eos_token_ids.push_back(id.get<int>());
+            }
+        } else {
+            config.eos_token_ids.push_back(j["eos_token_id"].get<int>());
+        }
+    } else {
+        config.eos_token_ids.push_back(151643);
+    }
+    config.eos_token_id = config.eos_token_ids.empty() ? 151643 : config.eos_token_ids[0];
 
     config.hidden_size = j["hidden_size"];
     config.intermediate_size = j["intermediate_size"];
@@ -80,14 +107,15 @@ std::unique_ptr<ModelConfig> Model::load_config(const std::string &config_path) 
     }
 
     json j = json::parse(f);
-    std::string model_type = j.value("model_type", "unknown");
+    std::string model_type = safe_string(j, "model_type", "unknown");
 
     ModelConfig base_config;
     load_base_config(base_config, j);
 
     if (model_type == "qwen2") {
         auto qwen2_config = std::make_unique<Qwen2Config>(base_config);
-        qwen2_config->sliding_window = j.value("sliding_window", 4096);
+        qwen2_config->sliding_window = (j.contains("sliding_window") && j["sliding_window"].is_number())
+            ? j["sliding_window"].get<int>() : 4096;
         qwen2_config->max_window_layers = j.value("max_window_layers", 21);
         qwen2_config->use_sliding_window = j.value("use_sliding_window", false);
         return qwen2_config;

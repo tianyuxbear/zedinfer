@@ -1,6 +1,7 @@
 #pragma once
 
 #include "backend/kvcache/base.hpp"
+#include "zedinfer/chat_template.hpp"
 #include "zedinfer/generation_types.hpp"
 
 #include <memory>
@@ -58,7 +59,8 @@ private:
     InferenceSession(
         std::shared_ptr<InferenceEngine> engine,
         kvcache::kvcache_t kvcache,
-        const GenerationConfig &gen_config);
+        const GenerationConfig &gen_config,
+        const ChatTemplate &chat_template);
 
     /**
      * Generate UUID for session identification
@@ -70,6 +72,7 @@ private:
     std::string session_id_;                  // Unique session ID
     kvcache::kvcache_t kvcache_;              // Session-specific KV cache
     GenerationConfig config_;                 // Generation parameters
+    ChatTemplate template_;                   // Chat formatting template
 
     // Conversation state
     std::vector<std::pair<std::string, std::string>> chat_history_; // [(role, content), ...]
