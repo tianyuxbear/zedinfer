@@ -59,6 +59,13 @@ void memcpyAsync(void *dst, const void *src, size_t size, zedinferMemcpyKind_t k
     memcpySync(dst, src, size, kind); // Async falls back to sync on CPU
 }
 
+void getMemoryInfo(size_t *free, size_t *total) {
+    // CPU: report a large default (8 GB). Actual system RAM query is platform-specific.
+    constexpr size_t default_total = 8ULL * 1024 * 1024 * 1024;
+    if (total) *total = default_total;
+    if (free) *free = default_total;
+}
+
 static const ZedinferRuntimeAPI RUNTIME_API = {
     &getDeviceCount,
     &setDevice,
@@ -71,7 +78,8 @@ static const ZedinferRuntimeAPI RUNTIME_API = {
     &mallocHost,
     &freeHost,
     &memcpySync,
-    &memcpyAsync};
+    &memcpyAsync,
+    &getMemoryInfo};
 
 } // namespace runtime_api
 

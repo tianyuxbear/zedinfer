@@ -49,7 +49,7 @@ public:
     virtual tensor_t get_v_cache_slice(int layer_idx, int past_len, int seq_len) = 0;
 
     // State management
-    void update_seq_len(int new_tokens);
+    virtual void update_seq_len(int new_tokens);
     virtual void reset();
 
     // Statistics

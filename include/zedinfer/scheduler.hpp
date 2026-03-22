@@ -33,6 +33,11 @@ struct SchedulerConfig {
     int max_batch_requests = 64;
     int max_prefill_tokens = 512;
     int max_queue_size = 256;
+
+    // KV cache memory management
+    float gpu_memory_utilization = 0.9f; // fraction of free VRAM for KV cache block pool
+    int kv_block_size = 16;              // tokens per KV cache block
+    bool use_paged_kvcache = true;       // false = fallback to DynamicKVCache
 };
 
 /**

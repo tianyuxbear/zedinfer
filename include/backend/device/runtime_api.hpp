@@ -24,6 +24,9 @@ typedef void (*free_host_api)(void *);
 typedef void (*memcpy_sync_api)(void *, const void *, size_t, zedinferMemcpyKind_t);
 typedef void (*memcpy_async_api)(void *, const void *, size_t, zedinferMemcpyKind_t, zedinferStream_t);
 
+// Memory info query
+typedef void (*get_memory_info_api)(size_t *free, size_t *total);
+
 // Runtime API table for a backend (e.g., CUDA, CPU)
 typedef struct ZedinferRuntimeAPI {
     // Device
@@ -45,6 +48,9 @@ typedef struct ZedinferRuntimeAPI {
     // Memory copy
     memcpy_sync_api memcpy_sync;
     memcpy_async_api memcpy_async;
+
+    // Memory info
+    get_memory_info_api get_memory_info;
 } ZedinferRuntimeAPI;
 
 namespace zedinfer::device {

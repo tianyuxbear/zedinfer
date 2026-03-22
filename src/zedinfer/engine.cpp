@@ -1,5 +1,8 @@
 #include "zedinfer/engine.hpp"
+#include "backend/core/context/context.hpp"
+#include "backend/device/runtime_api.hpp"
 #include "backend/kvcache/dynamic.hpp"
+#include "backend/kvcache/paged.hpp"
 #include "frontend/sampler/sampler.hpp"
 #include "frontend/tokenizer/hf_tokenizer.hpp"
 #include "utils/logging.hpp"
@@ -75,28 +78,42 @@ std::shared_ptr<InferenceEngine> InferenceEngine::create(
     engine->warmup();
     LOG_VERBOSE_(utils::BOTH) << "[Engine] Ready";
 
+    // Create block pool for paged KV cache (after warmup so VRAM is settled)
+    engine->init_block_pool();
+
     return engine;
 }
 
 std::unique_ptr<InferenceSession> InferenceEngine::create_session(
     const GenerationConfig &config) {
 
-    kvcache::DynamicKVCacheConfig kv_config;
     const auto &mc = model_->config();
 
-    kv_config.num_layers = mc.num_hidden_layers;
-    kv_config.num_kv_heads = mc.num_key_value_heads;
-    kv_config.head_dim = mc.hidden_size / mc.num_attention_heads;
-    kv_config.device_type = device_.type();
-    kv_config.device_id = device_.id();
-    kv_config.dtype = utils::str_to_dtype(mc.torch_dtype);
-    kv_config.model_max_seq_len = tokenizer_->get_config().model_max_length;
+    kvcache::KVCacheConfig base_kv_config;
+    base_kv_config.num_layers = mc.num_hidden_layers;
+    base_kv_config.num_kv_heads = mc.num_key_value_heads;
+    base_kv_config.head_dim = mc.hidden_size / mc.num_attention_heads;
+    base_kv_config.device_type = device_.type();
+    base_kv_config.device_id = device_.id();
+    base_kv_config.dtype = utils::str_to_dtype(mc.torch_dtype);
 
-    auto kv_cache = kvcache::DynamicKVCache::create_dynamic_kvcache(kv_config);
+    kvcache::kvcache_t kv_cache;
 
-    LOGI << "[Session] KV cache initialized: "
-         << "capacity=" << kv_cache->allocated_capacity()
-         << ", memory=" << kv_cache->memory_usage() / (1024.0 * 1024.0) << " MB";
+    if (block_allocator_ && scheduler_config_.use_paged_kvcache) {
+        kv_cache = std::make_unique<kvcache::PagedKVCache>(
+            base_kv_config, *block_allocator_, 256);
+        LOGI << "[Session] Paged KV cache initialized: "
+             << "capacity=" << kv_cache->allocated_capacity()
+             << ", pool_free=" << block_pool_->free_blocks() << "/" << block_pool_->total_blocks();
+    } else {
+        kvcache::DynamicKVCacheConfig dyn_config;
+        static_cast<kvcache::KVCacheConfig &>(dyn_config) = base_kv_config;
+        dyn_config.model_max_seq_len = tokenizer_->get_config().model_max_length;
+        kv_cache = kvcache::DynamicKVCache::create_dynamic_kvcache(dyn_config);
+        LOGI << "[Session] Dynamic KV cache initialized: "
+             << "capacity=" << kv_cache->allocated_capacity()
+             << ", memory=" << kv_cache->memory_usage() / (1024.0 * 1024.0) << " MB";
+    }
 
     return std::unique_ptr<InferenceSession>(
         new InferenceSession(shared_from_this(), std::move(kv_cache), config, chat_template_));
@@ -166,6 +183,56 @@ std::unique_ptr<InferenceRequest> InferenceEngine::build_request(
     req->stream_callback = config.stream ? config.stream_callback : nullptr;
     req->arrival_time = std::chrono::steady_clock::now();
     return req;
+}
+
+void InferenceEngine::init_block_pool() {
+    if (!scheduler_config_.use_paged_kvcache) {
+        LOGI << "[Engine] Paged KV cache disabled, skipping block pool";
+        return;
+    }
+
+    const auto &mc = model_->config();
+    auto dtype = utils::str_to_dtype(mc.torch_dtype);
+
+    // Query free device memory
+    core::context().setDevice(device_.type(), device_.id());
+    auto api = device::getRuntimeAPI(device_.type());
+    size_t free_bytes = 0, total_bytes = 0;
+    api->get_memory_info(&free_bytes, &total_bytes);
+
+    LOGI << "[Engine] Device memory: free=" << free_bytes / (1024 * 1024)
+         << " MB, total=" << total_bytes / (1024 * 1024) << " MB";
+
+    // Calculate KV budget (vLLM-style: total * utilization - used)
+    size_t used_bytes = total_bytes - free_bytes;
+    size_t allowed_bytes = static_cast<size_t>(
+        total_bytes * scheduler_config_.gpu_memory_utilization);
+    size_t kv_budget = (allowed_bytes > used_bytes) ? (allowed_bytes - used_bytes) : 0;
+
+    // Configure blocks
+    kvcache::BlockConfig block_config;
+    block_config.block_size = scheduler_config_.kv_block_size;
+    block_config.num_kv_heads = mc.num_key_value_heads;
+    block_config.head_dim = mc.hidden_size / mc.num_attention_heads;
+    block_config.dtype = dtype;
+
+    size_t block_bytes = block_config.block_bytes();
+    int num_blocks = static_cast<int>(kv_budget / block_bytes);
+
+    if (num_blocks <= 0) {
+        LOGW << "[Engine] Not enough memory for block pool, falling back to DynamicKVCache";
+        scheduler_config_.use_paged_kvcache = false;
+        return;
+    }
+
+    LOGI << "[Engine] Creating block pool: " << num_blocks << " blocks x "
+         << block_config.block_size << " tokens, "
+         << (num_blocks * block_bytes) / (1024 * 1024) << " MB";
+
+    block_pool_ = std::make_unique<kvcache::BlockPool>(
+        block_config, num_blocks, device_.type(), device_.id());
+    block_allocator_ = std::make_unique<kvcache::BlockAllocator>(
+        *block_pool_, mc.num_hidden_layers);
 }
 
 void InferenceEngine::build_stop_token_ids() {

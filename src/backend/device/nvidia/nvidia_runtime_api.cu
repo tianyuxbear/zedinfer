@@ -110,6 +110,10 @@ void memcpyAsync(void *dst, const void *src, size_t size, zedinferMemcpyKind_t k
     cudaMemcpyAsync(dst, src, size, cuda_kind, reinterpret_cast<cudaStream_t>(stream));
 }
 
+void getMemoryInfo(size_t *free, size_t *total) {
+    cudaMemGetInfo(free, total);
+}
+
 static const ZedinferRuntimeAPI RUNTIME_API = {
     &getDeviceCount,
     &setDevice,
@@ -122,7 +126,8 @@ static const ZedinferRuntimeAPI RUNTIME_API = {
     &mallocHost,
     &freeHost,
     &memcpySync,
-    &memcpyAsync};
+    &memcpyAsync,
+    &getMemoryInfo};
 
 } // namespace runtime_api
 
