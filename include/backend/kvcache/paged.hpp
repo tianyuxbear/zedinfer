@@ -74,7 +74,8 @@ private:
     // Pending write tracking
     int pending_write_past_len_ = -1;
     int pending_write_seq_len_ = 0;
-    bool direct_write_to_blocks_ = false; // true when decode writes directly to block memory
+    bool direct_write_to_blocks_ = false;  // true when decode writes directly to block memory
+    int scattered_layers_ = 0;             // count of layers already scattered (prefill path)
 
     // Helpers
     void ensure_write_capacity(int seq_len);

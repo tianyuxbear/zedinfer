@@ -43,6 +43,11 @@ public:
         kvcache::KVCache &kvcache,
         const ExecutorConfig &exec_config) override;
 
+    tensor_t forward_batch(
+        const BatchContext &batch,
+        kvcache::BlockAllocator &allocator,
+        const ExecutorConfig &exec_config) override;
+
 private:
     size_t calculate_num_parameters() const;
 

@@ -291,6 +291,7 @@ void PagedKVCache::scatter_layer_to_blocks(int layer_idx) {
             + offset_in_block * token_bytes;
         copy_region(v_dst, v_src + t * token_bytes, token_bytes);
     }
+    scattered_layers_++;
 }
 
 void PagedKVCache::update_seq_len(int new_tokens) {
@@ -301,8 +302,12 @@ void PagedKVCache::update_seq_len(int new_tokens) {
     // Ensure we have enough blocks for the new total
     ensure_blocks_for_tokens(total_after);
 
-    // Scatter write buffer data into blocks (skip if decode wrote directly to blocks)
-    if (!direct_write_to_blocks_) {
+    // Skip scatter if data is already in blocks:
+    // - decode: direct_write_to_blocks_ (Tensor points to block memory)
+    // - prefill with paged attention: all layers scattered via scatter_layer_to_blocks()
+    bool already_scattered = direct_write_to_blocks_ ||
+                             (scattered_layers_ >= config_.num_layers);
+    if (!already_scattered) {
         int past_len = (pending_write_past_len_ >= 0) ? pending_write_past_len_ : current_length_;
         scatter_to_blocks(past_len, new_tokens);
     }
@@ -312,6 +317,8 @@ void PagedKVCache::update_seq_len(int new_tokens) {
     block_table_.seq_len = current_length_;
     pending_write_past_len_ = -1;
     pending_write_seq_len_ = 0;
+    direct_write_to_blocks_ = false;
+    scattered_layers_ = 0;
 }
 
 // --- Lifecycle ---

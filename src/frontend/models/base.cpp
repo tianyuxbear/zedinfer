@@ -2,6 +2,7 @@
 #include "frontend/models/qwen2.hpp"
 #include "frontend/models/qwen3.hpp"
 #include "zedinfer.h"
+#include "zedinfer/batch_context.hpp"
 #ifdef DEBUG
 #include "utils/system_info.hpp"
 #endif
@@ -193,6 +194,13 @@ std::string Model::map_weight_name(const std::string &raw_name) {
         return raw_name.substr(6);
     }
     return raw_name;
+}
+
+tensor_t Model::forward_batch(
+    const BatchContext & /*batch*/,
+    kvcache::BlockAllocator & /*allocator*/,
+    const ExecutorConfig & /*exec_config*/) {
+    throw std::runtime_error("forward_batch() not implemented for this model");
 }
 
 } // namespace zedinfer::model

@@ -81,6 +81,11 @@ std::shared_ptr<InferenceEngine> InferenceEngine::create(
     // Create block pool for paged KV cache (after warmup so VRAM is settled)
     engine->init_block_pool();
 
+    // Wire scheduler with block allocator for batched mode
+    if (engine->block_allocator_) {
+        engine->scheduler_.set_block_allocator(engine->block_allocator_.get());
+    }
+
     return engine;
 }
 
@@ -183,6 +188,30 @@ std::unique_ptr<InferenceRequest> InferenceEngine::build_request(
     req->stream_callback = config.stream ? config.stream_callback : nullptr;
     req->arrival_time = std::chrono::steady_clock::now();
     return req;
+}
+
+std::future<GenerationResult> InferenceEngine::submit_async(
+    std::unique_ptr<InferenceRequest> request) {
+    auto future = request->result_promise.get_future();
+    scheduler_.submit(std::move(request));
+    return future;
+}
+
+bool InferenceEngine::step() {
+    auto batch = scheduler_.schedule();
+    if (batch.empty()) return false;
+
+    auto batch_ctx = batch.build_context();
+    tensor_t logits = model_->forward_batch(batch_ctx, *block_allocator_, exec_config_);
+    scheduler_.process_results(batch, logits, *sampler_, *tokenizer_, stop_token_ids_);
+
+    return true;
+}
+
+void InferenceEngine::run_loop() {
+    while (scheduler_.has_work()) {
+        step();
+    }
 }
 
 void InferenceEngine::init_block_pool() {
