@@ -27,13 +27,11 @@ void DynamicKVCacheConfig::validate() const {
 }
 
 DynamicKVCache::DynamicKVCache(const DynamicKVCacheConfig &config)
-    : KVCache(config),
-      dynamic_config_(config),
-      allocated_capacity_(0),
-      growth_count_(0),
-      total_growth_time_ms_(0.0) {
+    : dynamic_config_(config) {
 
     dynamic_config_.validate();
+    k_caches_.reserve(dynamic_config_.num_layers);
+    v_caches_.reserve(dynamic_config_.num_layers);
     allocate_cache(dynamic_config_.initial_capacity);
 }
 
@@ -43,16 +41,16 @@ void DynamicKVCache::allocate_cache(int capacity) {
 
     std::vector<size_t> cache_shape = {
         static_cast<size_t>(capacity),
-        static_cast<size_t>(config_.num_kv_heads),
-        static_cast<size_t>(config_.head_dim)};
+        static_cast<size_t>(dynamic_config_.num_kv_heads),
+        static_cast<size_t>(dynamic_config_.head_dim)};
 
-    for (int layer = 0; layer < config_.num_layers; ++layer) {
+    for (int layer = 0; layer < dynamic_config_.num_layers; ++layer) {
         k_caches_.push_back(Tensor::create(
-            cache_shape, config_.dtype, config_.device_type,
-            config_.device_id, false, nullptr));
+            cache_shape, dynamic_config_.dtype, dynamic_config_.device_type,
+            dynamic_config_.device_id, false, nullptr));
         v_caches_.push_back(Tensor::create(
-            cache_shape, config_.dtype, config_.device_type,
-            config_.device_id, false, nullptr));
+            cache_shape, dynamic_config_.dtype, dynamic_config_.device_type,
+            dynamic_config_.device_id, false, nullptr));
     }
 
     allocated_capacity_ = capacity;
@@ -78,7 +76,7 @@ void DynamicKVCache::grow_cache(int required_capacity) {
 
     // Copy existing data
     if (current_length_ > 0) {
-        for (int layer = 0; layer < config_.num_layers; ++layer) {
+        for (int layer = 0; layer < dynamic_config_.num_layers; ++layer) {
             copy_cache_data(old_k[layer], k_caches_[layer], current_length_);
             copy_cache_data(old_v[layer], v_caches_[layer], current_length_);
         }
@@ -134,14 +132,14 @@ void DynamicKVCache::copy_cache_data(tensor_t src, tensor_t dst, int valid_len) 
     auto src_slice = src->slice(0, 0, valid_len);
     auto dst_slice = dst->slice(0, 0, valid_len);
 
-    size_t copy_size = valid_len * config_.num_kv_heads * config_.head_dim
-                     * utils::dsize(config_.dtype);
+    size_t copy_size = valid_len * dynamic_config_.num_kv_heads * dynamic_config_.head_dim
+                     * utils::dsize(dynamic_config_.dtype);
 
-    if (config_.device_type == ZEDINFER_DEVICE_CPU) {
+    if (dynamic_config_.device_type == ZEDINFER_DEVICE_CPU) {
         std::memcpy(dst_slice->data(), src_slice->data(), copy_size);
     } else {
         // GPU memory copy
-        core::context().setDevice(config_.device_type, config_.device_id);
+        core::context().setDevice(dynamic_config_.device_type, dynamic_config_.device_id);
         core::context().runtime().api()->memcpy_sync(
             dst_slice->data(), src_slice->data(), copy_size, ZEDINFER_MEMCPY_D2D);
     }
@@ -200,7 +198,8 @@ tensor_t DynamicKVCache::get_v_cache_slice(int layer_idx, int total_len) {
 
 tensor_t DynamicKVCache::get_k_cache_slice(int layer_idx, int past_len, int seq_len) {
     validate_layer_idx(layer_idx);
-    validate_length_params(past_len, seq_len);
+    if (past_len < 0 || seq_len < 0)
+        throw std::invalid_argument("Lengths must be non-negative");
 
     int total_len = past_len + seq_len;
     if (total_len > dynamic_config_.model_max_seq_len) {
@@ -213,7 +212,8 @@ tensor_t DynamicKVCache::get_k_cache_slice(int layer_idx, int past_len, int seq_
 
 tensor_t DynamicKVCache::get_v_cache_slice(int layer_idx, int past_len, int seq_len) {
     validate_layer_idx(layer_idx);
-    validate_length_params(past_len, seq_len);
+    if (past_len < 0 || seq_len < 0)
+        throw std::invalid_argument("Lengths must be non-negative");
 
     int total_len = past_len + seq_len;
     if (total_len > dynamic_config_.model_max_seq_len) {
@@ -241,25 +241,20 @@ float DynamicKVCache::utilization() const {
              : 0.0f;
 }
 
-double DynamicKVCache::average_growth_time_ms() const {
-    return growth_count_ > 0
-             ? total_growth_time_ms_ / growth_count_
-             : 0.0;
+void DynamicKVCache::update_seq_len(int new_tokens) {
+    if (new_tokens <= 0) return;
+    current_length_ += new_tokens;
+    if (current_length_ > allocated_capacity_)
+        throw std::runtime_error("Sequence length exceeds allocated capacity");
 }
 
-std::string DynamicKVCache::get_stats() const {
-    std::ostringstream oss;
+void DynamicKVCache::reset() {
+    current_length_ = 0;
+}
 
-    oss << KVCache::get_stats();
-    oss << "  --- Dynamic Stats ---" << std::endl;
-    oss << "  Growth count: " << growth_count_ << std::endl;
-
-    if (growth_count_ > 0) {
-        oss << "  Avg growth time: " << std::fixed << std::setprecision(2)
-            << average_growth_time_ms() << " ms" << std::endl;
-    }
-
-    return oss.str();
+void DynamicKVCache::validate_layer_idx(int layer_idx) const {
+    if (layer_idx < 0 || layer_idx >= dynamic_config_.num_layers)
+        throw std::out_of_range("Invalid layer_idx");
 }
 
 } // namespace zedinfer::kvcache

@@ -13,7 +13,7 @@ namespace zedinfer::model {
 
 ContiguousForwardContext::ContiguousForwardContext(
     const std::vector<int> &input_ids, int past_len,
-    kvcache::KVCache &kvcache)
+    kvcache::DynamicKVCache &kvcache)
     : input_ids_(input_ids), past_len_(past_len),
       sl_(static_cast<int>(input_ids.size())), kvcache_(kvcache) {}
 
@@ -32,18 +32,18 @@ void ContiguousForwardContext::prepare_inputs(
 }
 
 void ContiguousForwardContext::write_kv(int layer, tensor_t k, tensor_t v) {
-    size_t nkvhead = kvcache_.config().num_kv_heads;
-    size_t head_dim_val = kvcache_.config().head_dim;
+    size_t nkvhead = kvcache_.kv_config().num_kv_heads;
+    size_t head_dim_val = kvcache_.kv_config().head_dim;
     size_t kv_dim = nkvhead * head_dim_val;
-    size_t dtype_size = utils::dsize(kvcache_.config().dtype);
+    size_t dtype_size = utils::dsize(kvcache_.kv_config().dtype);
 
     // V: copy to contiguous KV cache slot
     auto v_slot = kvcache_.get_v_cache_slice(layer, past_len_, sl_);
     size_t v_bytes = sl_ * kv_dim * dtype_size;
-    if (kvcache_.config().device_type == ZEDINFER_DEVICE_CPU) {
+    if (kvcache_.kv_config().device_type == ZEDINFER_DEVICE_CPU) {
         std::memcpy(v_slot->data(), v->data(), v_bytes);
     } else {
-        core::context().setDevice(kvcache_.config().device_type, kvcache_.config().device_id);
+        core::context().setDevice(kvcache_.kv_config().device_type, kvcache_.kv_config().device_id);
         core::context().runtime().api()->memcpy_sync(
             v_slot->data(), v->data(), v_bytes, ZEDINFER_MEMCPY_D2D);
     }
@@ -51,10 +51,10 @@ void ContiguousForwardContext::write_kv(int layer, tensor_t k, tensor_t v) {
     // K: copy to contiguous KV cache slot
     auto k_slot = kvcache_.get_k_cache_slice(layer, past_len_, sl_);
     size_t k_bytes = sl_ * nkvhead * head_dim_val * dtype_size;
-    if (kvcache_.config().device_type == ZEDINFER_DEVICE_CPU) {
+    if (kvcache_.kv_config().device_type == ZEDINFER_DEVICE_CPU) {
         std::memcpy(k_slot->data(), k->data(), k_bytes);
     } else {
-        core::context().setDevice(kvcache_.config().device_type, kvcache_.config().device_id);
+        core::context().setDevice(kvcache_.kv_config().device_type, kvcache_.kv_config().device_id);
         core::context().runtime().api()->memcpy_sync(
             k_slot->data(), k->data(), k_bytes, ZEDINFER_MEMCPY_D2D);
     }

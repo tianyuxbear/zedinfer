@@ -1,84 +1,76 @@
 #pragma once
 
 #include "backend/kvcache/base.hpp"
+#include "backend/tensor/tensor.hpp"
+
+#include <memory>
+#include <string>
+#include <vector>
 
 namespace zedinfer::kvcache {
 
-/**
- * @brief Configuration for dynamic KV cache
- */
 struct DynamicKVCacheConfig : public KVCacheConfig {
-    // Initial allocation size (tokens)
     int initial_capacity = 256;
-
-    // Maximum sequence length supported by model
     int model_max_seq_len = 8192;
 
-    // Growth strategy for cache expansion
-    enum class GrowthStrategy {
-        DOUBLE,      // 2x growth each time
-        AGGRESSIVE,  // Jump to target after N growths
-        CONSERVATIVE // Linear growth by initial_capacity
-    };
+    enum class GrowthStrategy { DOUBLE, AGGRESSIVE, CONSERVATIVE };
     GrowthStrategy growth_strategy = GrowthStrategy::DOUBLE;
 
-    // Aggressive strategy parameters
-    int aggressive_threshold = 3;          // Trigger after N growths
-    int aggressive_target_capacity = 8192; // Jump to this capacity
+    int aggressive_threshold = 3;
+    int aggressive_target_capacity = 8192;
 
     void validate() const;
 };
 
 /**
- * @brief Dynamic KV cache with automatic growth
- *
- * Each session owns a dedicated cache instance. No shrinking needed
- * as cache is destroyed when session ends.
+ * Standalone dynamic KV cache with automatic growth.
+ * Used only by warmup() and profile(). Not a polymorphic base.
  */
-class DynamicKVCache : public KVCache {
+class DynamicKVCache {
 public:
     explicit DynamicKVCache(const DynamicKVCacheConfig &config);
-    ~DynamicKVCache() override = default;
+    ~DynamicKVCache() = default;
 
-    const DynamicKVCacheConfig &config() const { return dynamic_config_; }
+    const DynamicKVCacheConfig &dyn_config() const { return dynamic_config_; }
+    const KVCacheConfig &kv_config() const { return dynamic_config_; }
 
-    // KVCache interface
-    int allocated_capacity() const override { return allocated_capacity_; }
-    tensor_t get_k_cache(int layer_idx) override;
-    tensor_t get_v_cache(int layer_idx) override;
-    tensor_t get_k_cache_slice(int layer_idx, int total_len) override;
-    tensor_t get_v_cache_slice(int layer_idx, int total_len) override;
-    tensor_t get_k_cache_slice(int layer_idx, int past_len, int seq_len) override;
-    tensor_t get_v_cache_slice(int layer_idx, int past_len, int seq_len) override;
-    size_t memory_usage() const override;
-    float utilization() const override;
-    std::string get_stats() const override;
+    int current_length() const { return current_length_; }
+    int allocated_capacity() const { return allocated_capacity_; }
 
-    // Growth statistics
-    int growth_count() const { return growth_count_; }
-    double total_growth_time_ms() const { return total_growth_time_ms_; }
-    double average_growth_time_ms() const;
+    tensor_t get_k_cache(int layer_idx);
+    tensor_t get_v_cache(int layer_idx);
+    tensor_t get_k_cache_slice(int layer_idx, int total_len);
+    tensor_t get_v_cache_slice(int layer_idx, int total_len);
+    tensor_t get_k_cache_slice(int layer_idx, int past_len, int seq_len);
+    tensor_t get_v_cache_slice(int layer_idx, int past_len, int seq_len);
 
-    // Ensure cache has sufficient capacity
+    void update_seq_len(int new_tokens);
+    void reset();
+
+    size_t memory_usage() const;
+    float utilization() const;
+
     void ensure_capacity(int required_capacity);
 
-    // Factory method
-    static std::unique_ptr<KVCache> create_dynamic_kvcache(
-        const DynamicKVCacheConfig &config) {
+    static std::unique_ptr<DynamicKVCache> create(const DynamicKVCacheConfig &config) {
         return std::make_unique<DynamicKVCache>(config);
     }
 
 private:
     DynamicKVCacheConfig dynamic_config_;
-    int allocated_capacity_;
-    int growth_count_;
-    double total_growth_time_ms_;
+    int current_length_ = 0;
+    int allocated_capacity_ = 0;
+    int growth_count_ = 0;
+    double total_growth_time_ms_ = 0.0;
 
-    // Internal memory management
+    std::vector<tensor_t> k_caches_;
+    std::vector<tensor_t> v_caches_;
+
     void allocate_cache(int capacity);
     void grow_cache(int required_capacity);
     int calculate_new_capacity(int required) const;
     void copy_cache_data(tensor_t src, tensor_t dst, int valid_len);
+    void validate_layer_idx(int layer_idx) const;
 };
 
 } // namespace zedinfer::kvcache

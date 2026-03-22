@@ -242,12 +242,7 @@ GenerationResult Scheduler::run_one(
     stats.prompt_tokens = req.input_ids.size();
     req.output_ids.reserve(req.config.max_new_tokens);
 
-    // Determine model config for forward
-    model::ModelForwardConfig model_cfg{
-        model.config(), model.weights(),
-        model.model_type() == "qwen2",  // has_qkv_bias
-        model.model_type() == "qwen3"   // has_qk_norm
-    };
+    auto model_cfg = model.forward_config();
 
     // Prefill: use PagedForwardContext with the session's block_table
     req.phase = RequestPhase::PREFILL;

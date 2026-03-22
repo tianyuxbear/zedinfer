@@ -1,6 +1,6 @@
 #pragma once
 
-#include "backend/kvcache/base.hpp"
+#include "backend/kvcache/dynamic.hpp"
 #include "backend/tensor/tensor.hpp"
 #include "zedinfer/activation.hpp"
 
@@ -33,7 +33,7 @@ public:
 class ContiguousForwardContext : public ForwardContext {
 public:
     ContiguousForwardContext(const std::vector<int> &input_ids, int past_len,
-                             kvcache::KVCache &kvcache);
+                             kvcache::DynamicKVCache &kvcache);
 
     int num_tokens() const override { return sl_; }
     void prepare_inputs(tensor_t &ids, tensor_t &pos_ids,
@@ -48,7 +48,7 @@ private:
     const std::vector<int> &input_ids_;
     int past_len_;
     int sl_;
-    kvcache::KVCache &kvcache_;
+    kvcache::DynamicKVCache &kvcache_;
 };
 
 } // namespace zedinfer::model
