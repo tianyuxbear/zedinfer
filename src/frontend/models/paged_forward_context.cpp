@@ -100,12 +100,53 @@ void PagedForwardContext::scatter_slot_kv(
 }
 
 void PagedForwardContext::write_kv(int layer, tensor_t k, tensor_t v) {
-    // For decode slots (1 token), the shared transformer_forward already
-    // allocated k/v as regular tensors. We scatter them to blocks.
-    // For prefill slots (N tokens), same — scatter all tokens.
-    for (const auto &slot : slots_) {
-        scatter_slot_kv(slot, layer, k, v);
+    const int bs = pool_.config().block_size;
+    const size_t token_bytes = pool_.config().token_bytes();
+
+    if (pool_.device_type() == ZEDINFER_DEVICE_CPU) {
+        // CPU: per-token memcpy (already fast, no launch overhead)
+        for (const auto &slot : slots_) {
+            scatter_slot_kv(slot, layer, k, v);
+        }
+        return;
     }
+
+    // GPU: batch all scatter operations into arrays, then use cudaMemcpyAsync
+    // to avoid per-token cudaMemcpy launch overhead.
+    // Collect (src, dst, size) triplets for all tokens across all slots.
+    struct ScatterOp { const void *src; void *dst; };
+    std::vector<ScatterOp> ops;
+    ops.reserve(total_tokens_ * 2); // K + V
+
+    for (const auto &slot : slots_) {
+        auto *k_src = static_cast<const std::byte *>(k->data()) + slot.token_offset * token_bytes;
+        auto *v_src = static_cast<const std::byte *>(v->data()) + slot.token_offset * token_bytes;
+        auto &k_blocks = slot.block_table->k_blocks[layer];
+        auto &v_blocks = slot.block_table->v_blocks[layer];
+
+        for (int t = 0; t < slot.num_tokens; ++t) {
+            int global_pos = slot.past_len + t;
+            int block_idx = global_pos / bs;
+            int offset = global_pos % bs;
+
+            void *k_dst = static_cast<std::byte *>(pool_.block_data(k_blocks[block_idx]))
+                          + offset * token_bytes;
+            void *v_dst = static_cast<std::byte *>(pool_.block_data(v_blocks[block_idx]))
+                          + offset * token_bytes;
+
+            ops.push_back({k_src + t * token_bytes, k_dst});
+            ops.push_back({v_src + t * token_bytes, v_dst});
+        }
+    }
+
+    // Execute all copies using async memcpy on the default stream
+    core::context().setDevice(pool_.device_type(), pool_.device_id());
+    auto *api = core::context().runtime().api();
+    for (const auto &op : ops) {
+        api->memcpy_async(op.dst, op.src, token_bytes, ZEDINFER_MEMCPY_D2D, nullptr);
+    }
+    // No explicit sync needed — subsequent CUDA kernels (attention) on the same
+    // stream will wait for the async copies to complete.
 }
 
 // ============================================================================
