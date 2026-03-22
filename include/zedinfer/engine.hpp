@@ -1,7 +1,6 @@
 #pragma once
 
 #include "backend/device/device.hpp"
-#include "backend/kvcache/base.hpp"
 #include "backend/kvcache/block_pool.hpp"
 #include "frontend/models/base.hpp"
 #include "frontend/sampler/sampler.hpp"
@@ -21,13 +20,8 @@
 
 namespace zedinfer {
 
-// Forward declaration
 class InferenceSession;
 
-/**
- * Inference engine shared across sessions.
- * Owns model, tokenizer, sampler, and runtime config.
- */
 class InferenceEngine : public std::enable_shared_from_this<InferenceEngine> {
 public:
     static std::shared_ptr<InferenceEngine> create(
@@ -36,36 +30,25 @@ public:
 
     std::unique_ptr<InferenceSession> create_session(const GenerationConfig &gen_config);
 
+    // Session-based generate (uses block table directly)
     std::string generate(
-        kvcache::KVCache &kvcache,
+        kvcache::SequenceBlockTable &block_table,
         const std::string &prompt,
         const GenerationConfig &config);
 
     GenerationResult generate_tokens(
-        kvcache::KVCache &kvcache,
+        kvcache::SequenceBlockTable &block_table,
         const std::vector<int> &input_ids,
         const GenerationConfig &config);
 
+    // Batch mode
+    std::future<GenerationResult> submit_async(std::unique_ptr<InferenceRequest> request);
+    bool step();
+    void run_loop();
+
+    // Profiling (uses DynamicKVCache internally, no block table)
     void warmup(size_t prefill_len = 128, size_t decode_steps = 128);
     std::pair<double, double> profile(size_t prefill_len = 128, size_t decode_steps = 128);
-
-    /**
-     * Submit a request to the scheduler for batched processing.
-     * Returns a future that will be fulfilled when generation completes.
-     */
-    std::future<GenerationResult> submit_async(std::unique_ptr<InferenceRequest> request);
-
-    /**
-     * Run one iteration of the batched engine loop.
-     * Returns true if work was done, false if idle.
-     */
-    bool step();
-
-    /**
-     * Run the batched engine loop until all work is done.
-     * For serving mode (PR-10), this runs on a dedicated thread.
-     */
-    void run_loop();
 
 private:
     InferenceEngine(
@@ -82,7 +65,7 @@ private:
     device::Device device_;
     ExecutorConfig exec_config_;
     ChatTemplate chat_template_;
-    std::vector<int> stop_token_ids_; // All token IDs that end generation
+    std::vector<int> stop_token_ids_;
     Scheduler scheduler_;
     SchedulerConfig scheduler_config_;
     std::unique_ptr<kvcache::BlockPool> block_pool_;

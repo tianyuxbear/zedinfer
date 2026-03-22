@@ -2,7 +2,9 @@
 #include "backend/core/context/context.hpp"
 #include "backend/device/runtime_api.hpp"
 #include "backend/kvcache/dynamic.hpp"
-#include "backend/kvcache/paged.hpp"
+#include "frontend/models/forward_config.hpp"
+#include "frontend/models/forward_context.hpp"
+#include "frontend/models/paged_forward_context.hpp"
 #include "frontend/sampler/sampler.hpp"
 #include "frontend/tokenizer/hf_tokenizer.hpp"
 #include "utils/logging.hpp"
@@ -78,10 +80,8 @@ std::shared_ptr<InferenceEngine> InferenceEngine::create(
     engine->warmup();
     LOG_VERBOSE_(utils::BOTH) << "[Engine] Ready";
 
-    // Create block pool for paged KV cache (after warmup so VRAM is settled)
     engine->init_block_pool();
 
-    // Wire scheduler with block allocator for batched mode
     if (engine->block_allocator_) {
         engine->scheduler_.set_block_allocator(engine->block_allocator_.get());
     }
@@ -89,43 +89,34 @@ std::shared_ptr<InferenceEngine> InferenceEngine::create(
     return engine;
 }
 
+// ============================================================================
+// Session Management
+// ============================================================================
+
 std::unique_ptr<InferenceSession> InferenceEngine::create_session(
     const GenerationConfig &config) {
 
-    const auto &mc = model_->config();
-
-    kvcache::KVCacheConfig base_kv_config;
-    base_kv_config.num_layers = mc.num_hidden_layers;
-    base_kv_config.num_kv_heads = mc.num_key_value_heads;
-    base_kv_config.head_dim = mc.hidden_size / mc.num_attention_heads;
-    base_kv_config.device_type = device_.type();
-    base_kv_config.device_id = device_.id();
-    base_kv_config.dtype = utils::str_to_dtype(mc.torch_dtype);
-
-    kvcache::kvcache_t kv_cache;
-
-    if (block_allocator_ && scheduler_config_.use_paged_kvcache) {
-        kv_cache = std::make_unique<kvcache::PagedKVCache>(
-            base_kv_config, *block_allocator_, 256);
-        LOGI << "[Session] Paged KV cache initialized: "
-             << "capacity=" << kv_cache->allocated_capacity()
-             << ", pool_free=" << block_pool_->free_blocks() << "/" << block_pool_->total_blocks();
-    } else {
-        kvcache::DynamicKVCacheConfig dyn_config;
-        static_cast<kvcache::KVCacheConfig &>(dyn_config) = base_kv_config;
-        dyn_config.model_max_seq_len = tokenizer_->get_config().model_max_length;
-        kv_cache = kvcache::DynamicKVCache::create_dynamic_kvcache(dyn_config);
-        LOGI << "[Session] Dynamic KV cache initialized: "
-             << "capacity=" << kv_cache->allocated_capacity()
-             << ", memory=" << kv_cache->memory_usage() / (1024.0 * 1024.0) << " MB";
+    if (!block_allocator_) {
+        throw std::runtime_error("[Engine] Block allocator not initialized");
     }
 
+    auto block_table = block_allocator_->allocate_sequence(256);
+
+    LOGI << "[Session] Created with " << block_table.k_blocks[0].size()
+         << " blocks/layer, pool_free=" << block_pool_->free_blocks()
+         << "/" << block_pool_->total_blocks();
+
     return std::unique_ptr<InferenceSession>(
-        new InferenceSession(shared_from_this(), std::move(kv_cache), config, chat_template_));
+        new InferenceSession(shared_from_this(), std::move(block_table),
+                             block_allocator_.get(), config, chat_template_));
 }
 
+// ============================================================================
+// Session-based Generation (uses block table directly)
+// ============================================================================
+
 std::string InferenceEngine::generate(
-    kvcache::KVCache &kvcache,
+    kvcache::SequenceBlockTable &block_table,
     const std::string &prompt,
     const GenerationConfig &config) {
 
@@ -147,7 +138,7 @@ std::string InferenceEngine::generate(
         LOGI << "[Inference] Generating...";
     }
 
-    auto result = generate_tokens(kvcache, input_ids, config);
+    auto result = generate_tokens(block_table, input_ids, config);
     std::string output = tokenizer_->decode(result.output_ids);
 
     if (config.verbose) {
@@ -167,14 +158,15 @@ std::string InferenceEngine::generate(
 }
 
 GenerationResult InferenceEngine::generate_tokens(
-    kvcache::KVCache &kvcache,
+    kvcache::SequenceBlockTable &block_table,
     const std::vector<int> &input_ids,
     const GenerationConfig &config) {
 
+    // Use run_one on the scheduler — it uses PagedForwardContext internally
     auto request = build_request(input_ids, config);
     scheduler_.submit(std::move(request));
     return scheduler_.run_one(
-        *model_, kvcache, exec_config_,
+        *model_, block_table, *block_pool_, exec_config_,
         *sampler_, *tokenizer_, stop_token_ids_);
 }
 
@@ -190,6 +182,10 @@ std::unique_ptr<InferenceRequest> InferenceEngine::build_request(
     return req;
 }
 
+// ============================================================================
+// Batch Mode
+// ============================================================================
+
 std::future<GenerationResult> InferenceEngine::submit_async(
     std::unique_ptr<InferenceRequest> request) {
     auto future = request->result_promise.get_future();
@@ -202,7 +198,15 @@ bool InferenceEngine::step() {
     if (batch.empty()) return false;
 
     auto batch_ctx = batch.build_context();
-    tensor_t logits = model_->forward_batch(batch_ctx, *block_allocator_, exec_config_);
+
+    // Use PagedForwardContext for batched forward
+    model::PagedForwardContext ctx(batch_ctx, *block_allocator_);
+    tensor_t logits = model::transformer_forward(
+        model::ModelForwardConfig{model_->config(), model_->weights(),
+                                   /*has_qkv_bias=*/model_->model_type() == "qwen2",
+                                   /*has_qk_norm=*/model_->model_type() == "qwen3"},
+        ctx, exec_config_);
+
     scheduler_.process_results(batch, logits, *sampler_, *tokenizer_, stop_token_ids_);
 
     return true;
@@ -214,6 +218,10 @@ void InferenceEngine::run_loop() {
     }
 }
 
+// ============================================================================
+// Block Pool Initialization
+// ============================================================================
+
 void InferenceEngine::init_block_pool() {
     if (!scheduler_config_.use_paged_kvcache) {
         LOGI << "[Engine] Paged KV cache disabled, skipping block pool";
@@ -223,7 +231,6 @@ void InferenceEngine::init_block_pool() {
     const auto &mc = model_->config();
     auto dtype = utils::str_to_dtype(mc.torch_dtype);
 
-    // Query free device memory
     core::context().setDevice(device_.type(), device_.id());
     auto api = device::getRuntimeAPI(device_.type());
     size_t free_bytes = 0, total_bytes = 0;
@@ -232,13 +239,11 @@ void InferenceEngine::init_block_pool() {
     LOGI << "[Engine] Device memory: free=" << free_bytes / (1024 * 1024)
          << " MB, total=" << total_bytes / (1024 * 1024) << " MB";
 
-    // Calculate KV budget (vLLM-style: total * utilization - used)
     size_t used_bytes = total_bytes - free_bytes;
     size_t allowed_bytes = static_cast<size_t>(
         total_bytes * scheduler_config_.gpu_memory_utilization);
     size_t kv_budget = (allowed_bytes > used_bytes) ? (allowed_bytes - used_bytes) : 0;
 
-    // Configure blocks
     kvcache::BlockConfig block_config;
     block_config.block_size = scheduler_config_.kv_block_size;
     block_config.num_kv_heads = mc.num_key_value_heads;
@@ -264,6 +269,10 @@ void InferenceEngine::init_block_pool() {
         *block_pool_, mc.num_hidden_layers);
 }
 
+// ============================================================================
+// Stop Tokens
+// ============================================================================
+
 void InferenceEngine::build_stop_token_ids() {
     auto add_unique = [this](int id) {
         if (id >= 0) {
@@ -273,15 +282,12 @@ void InferenceEngine::build_stop_token_ids() {
         }
     };
 
-    // 1. Tokenizer's EOS
     add_unique(tokenizer_->get_eos_token_id());
 
-    // 2. All model config EOS token IDs (handles array eos_token_id)
     for (int eos_id : model_->config().eos_token_ids) {
         add_unique(eos_id);
     }
 
-    // 3. Resolve ChatTemplate eos_token string to ID (e.g., <|im_end|> for ChatML)
     if (!chat_template_.eos_token.empty()) {
         add_unique(tokenizer_->get_special_token_id(chat_template_.eos_token));
     }
@@ -300,6 +306,10 @@ bool InferenceEngine::should_stop(int token_id) const {
     }
     return false;
 }
+
+// ============================================================================
+// Warmup / Profile (uses DynamicKVCache + ContiguousForwardContext)
+// ============================================================================
 
 void InferenceEngine::warmup(size_t prefill_len, size_t decode_steps) {
     LOGI << "[Engine] Warming up with prefill_len=" << prefill_len

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "backend/kvcache/base.hpp"
+#include "backend/kvcache/block_pool.hpp"
 #include "zedinfer/chat_template.hpp"
 #include "zedinfer/generation_types.hpp"
 
@@ -14,70 +14,51 @@ namespace zedinfer {
 // Forward declaration
 class InferenceEngine;
 
+namespace kvcache {
+class BlockAllocator;
+}
+
 /**
- * Inference session managing conversation state and KV cache
- * Each session maintains independent dialogue history and context
+ * Inference session managing conversation state and KV cache blocks.
+ * Each session maintains independent dialogue history and block table.
  */
 class InferenceSession {
 public:
-    /**
-     * Multi-turn chat interface
-     * @param user_input User message
-     * @return Assistant response
-     */
-    std::string chat(const std::string &user_input);
+    ~InferenceSession();
 
-    /**
-     * Reset session state (clear history and KV cache)
-     */
+    std::string chat(const std::string &user_input);
     void reset();
 
-    /**
-     * Get unique session identifier
-     */
     const std::string &session_id() const { return session_id_; }
-
-    /**
-     * Get conversation history [(role, content), ...]
-     */
     const std::vector<std::pair<std::string, std::string>> &chat_history() const {
         return chat_history_;
     }
-
-    /**
-     * Get current KV cache length
-     */
     int past_len() const { return past_len_; }
 
 private:
-    // Only InferenceEngine can create sessions
     friend class InferenceEngine;
 
-    /**
-     * Private constructor - use InferenceEngine::create_session()
-     */
     InferenceSession(
         std::shared_ptr<InferenceEngine> engine,
-        kvcache::kvcache_t kvcache,
+        kvcache::SequenceBlockTable block_table,
+        kvcache::BlockAllocator *allocator,
         const GenerationConfig &gen_config,
         const ChatTemplate &chat_template);
 
-    /**
-     * Generate UUID for session identification
-     */
     static std::string generate_uuid();
 
     // Core components
-    std::shared_ptr<InferenceEngine> engine_; // Shared stateless engine
-    std::string session_id_;                  // Unique session ID
-    kvcache::kvcache_t kvcache_;              // Session-specific KV cache
-    GenerationConfig config_;                 // Generation parameters
-    ChatTemplate template_;                   // Chat formatting template
+    std::shared_ptr<InferenceEngine> engine_;
+    std::string session_id_;
+    kvcache::SequenceBlockTable block_table_;  // Per-session KV block ownership
+    kvcache::BlockAllocator *allocator_;        // For freeing blocks on destroy/reset
+    GenerationConfig config_;
+    ChatTemplate template_;
 
     // Conversation state
-    std::vector<std::pair<std::string, std::string>> chat_history_; // [(role, content), ...]
-    int past_len_;                                                  // Cached token count
-    bool is_first_turn_;                                            // First turn flag for BOS token
+    std::vector<std::pair<std::string, std::string>> chat_history_;
+    int past_len_;
+    bool is_first_turn_;
 };
 
 } // namespace zedinfer
