@@ -112,6 +112,76 @@ void PagedForwardContext::write_kv(int layer, tensor_t k, tensor_t v) {
 // Attention: paged decode (single or batched) + paged prefill
 // ============================================================================
 
+void PagedForwardContext::build_decode_cache(const ExecutorConfig &exec_config) {
+    if (decode_cache_built_) return;
+
+    // Count decode slots
+    cached_num_decode_ = 0;
+    cached_decode_start_ = -1;
+    std::vector<kvcache::SequenceBlockTable *> decode_tables;
+
+    for (const auto &slot : slots_) {
+        if (!slot.is_decode) continue;
+        if (cached_decode_start_ < 0) cached_decode_start_ = slot.token_offset;
+        cached_num_decode_++;
+        decode_tables.push_back(slot.block_table);
+    }
+
+    if (cached_num_decode_ <= 1 || decode_tables.empty()) {
+        decode_cache_built_ = true;
+        return;
+    }
+
+    // Find max blocks across all layers and all requests
+    int num_layers = decode_tables[0]->num_layers;
+    cached_max_blocks_ = 0;
+    for (auto *dt : decode_tables) {
+        for (int L = 0; L < num_layers; ++L) {
+            cached_max_blocks_ = std::max(cached_max_blocks_,
+                static_cast<int>(dt->k_blocks[L].size()));
+        }
+    }
+
+    // Build seq_lens GPU tensor (same for all layers)
+    std::vector<int> sl(cached_num_decode_);
+    for (int r = 0; r < cached_num_decode_; ++r) {
+        sl[r] = decode_tables[r]->seq_len + 1;
+    }
+    seq_lens_gpu_ = Tensor::create({static_cast<size_t>(cached_num_decode_)},
+                                    ZEDINFER_DTYPE_I32,
+                                    exec_config.device_type, exec_config.device_id);
+    seq_lens_gpu_->load(sl.data());
+
+    // Build per-layer block table GPU tensors
+    decode_layer_cache_.resize(num_layers);
+    size_t bt_size = static_cast<size_t>(cached_num_decode_) * cached_max_blocks_;
+
+    for (int L = 0; L < num_layers; ++L) {
+        std::vector<int> k_bt(bt_size, 0);
+        std::vector<int> v_bt(bt_size, 0);
+
+        for (int r = 0; r < cached_num_decode_; ++r) {
+            auto &kb = decode_tables[r]->k_blocks[L];
+            auto &vb = decode_tables[r]->v_blocks[L];
+            for (size_t b = 0; b < kb.size(); ++b) {
+                k_bt[r * cached_max_blocks_ + b] = kb[b];
+                v_bt[r * cached_max_blocks_ + b] = vb[b];
+            }
+        }
+
+        auto k_gpu = Tensor::create({bt_size}, ZEDINFER_DTYPE_I32,
+                                     exec_config.device_type, exec_config.device_id);
+        k_gpu->load(k_bt.data());
+        auto v_gpu = Tensor::create({bt_size}, ZEDINFER_DTYPE_I32,
+                                     exec_config.device_type, exec_config.device_id);
+        v_gpu->load(v_bt.data());
+
+        decode_layer_cache_[L] = {std::move(k_gpu), std::move(v_gpu)};
+    }
+
+    decode_cache_built_ = true;
+}
+
 tensor_t PagedForwardContext::attend(
     int layer, tensor_t q_rope, float scale,
     const ExecutorConfig &exec_config,
@@ -119,10 +189,6 @@ tensor_t PagedForwardContext::attend(
 
     auto make = [&](std::vector<size_t> shape) {
         return Tensor::create(shape, exec_config.data_type,
-                              exec_config.device_type, exec_config.device_id);
-    };
-    auto make_typed = [&](std::vector<size_t> shape, zedinferDataType_t dtype) {
-        return Tensor::create(shape, dtype,
                               exec_config.device_type, exec_config.device_id);
     };
 
@@ -133,74 +199,48 @@ tensor_t PagedForwardContext::attend(
 
     auto attn = make({static_cast<size_t>(total_tokens_), nhead, head_dim});
 
-    // Count decode and prefill slots
-    int num_decode = 0;
-    int decode_start = -1;
-    for (size_t i = 0; i < slots_.size(); ++i) {
-        if (slots_[i].is_decode) {
-            if (decode_start < 0) decode_start = slots_[i].token_offset;
-            num_decode++;
-        }
-    }
+    // Build decode cache on first layer (uploads all layers' block tables at once)
+    build_decode_cache(exec_config);
 
     // Decode attention
-    if (num_decode > 0) {
-        int max_blocks = 0;
-        std::vector<kvcache::SequenceBlockTable *> decode_tables;
-        for (const auto &slot : slots_) {
-            if (!slot.is_decode) continue;
-            int nb = static_cast<int>(slot.block_table->k_blocks[layer].size());
-            max_blocks = std::max(max_blocks, nb);
-            decode_tables.push_back(slot.block_table);
-        }
+    if (cached_num_decode_ > 0) {
+        if (cached_num_decode_ == 1) {
+            // Single decode: use non-batched kernel (no GPU block table needed)
+            auto decode_q = q_rope->slice(0, cached_decode_start_, cached_decode_start_ + 1);
+            auto decode_out = attn->slice(0, cached_decode_start_, cached_decode_start_ + 1);
 
-        std::vector<int> k_bt(num_decode * max_blocks, 0);
-        std::vector<int> v_bt(num_decode * max_blocks, 0);
-        std::vector<int> sl(num_decode);
-
-        for (int r = 0; r < num_decode; ++r) {
-            sl[r] = decode_tables[r]->seq_len + 1;
-            auto &kb = decode_tables[r]->k_blocks[layer];
-            auto &vb = decode_tables[r]->v_blocks[layer];
-            for (size_t b = 0; b < kb.size(); ++b) {
-                k_bt[r * max_blocks + b] = kb[b];
-                v_bt[r * max_blocks + b] = vb[b];
+            auto *dt = slots_[0].block_table; // first slot is decode for single request
+            for (const auto &slot : slots_) {
+                if (slot.is_decode) { dt = slot.block_table; break; }
             }
-        }
-
-        if (num_decode == 1) {
-            auto decode_q = q_rope->slice(0, decode_start, decode_start + 1);
-            auto decode_out = attn->slice(0, decode_start, decode_start + 1);
 
             ops::AttentionParams params{attn_cfg};
             params.out = decode_out->view({nhead, head_dim});
             params.q = decode_q->view({nhead, head_dim});
             params.pool_base = pool_.block_data(0);
-            params.k_block_table = decode_tables[0]->k_blocks[layer].data();
-            params.v_block_table = decode_tables[0]->v_blocks[layer].data();
-            params.seq_len = sl[0];
+            params.k_block_table = dt->k_blocks[layer].data();
+            params.v_block_table = dt->v_blocks[layer].data();
+            params.seq_len = dt->seq_len + 1;
             params.seqlen_q = 1;
             ops::attention(params);
         } else {
-            auto k_bt_t = make_typed({static_cast<size_t>(num_decode * max_blocks)}, ZEDINFER_DTYPE_I32);
-            k_bt_t->load(k_bt.data());
-            auto v_bt_t = make_typed({static_cast<size_t>(num_decode * max_blocks)}, ZEDINFER_DTYPE_I32);
-            v_bt_t->load(v_bt.data());
-            auto sl_t = make_typed({static_cast<size_t>(num_decode)}, ZEDINFER_DTYPE_I32);
-            sl_t->load(sl.data());
-
-            auto decode_q = q_rope->slice(0, decode_start, decode_start + num_decode);
-            auto decode_out = attn->slice(0, decode_start, decode_start + num_decode);
+            // Multi decode: use cached GPU block tables
+            auto decode_q = q_rope->slice(0, cached_decode_start_,
+                                           cached_decode_start_ + cached_num_decode_);
+            auto decode_out = attn->slice(0, cached_decode_start_,
+                                           cached_decode_start_ + cached_num_decode_);
 
             ops::AttentionParams params{attn_cfg};
             params.out = decode_out;
             params.q = decode_q;
             params.pool_base = pool_.block_data(0);
-            params.batched_k_block_tables = reinterpret_cast<const int *>(k_bt_t->data());
-            params.batched_v_block_tables = reinterpret_cast<const int *>(v_bt_t->data());
-            params.batched_seq_lens = reinterpret_cast<const int *>(sl_t->data());
-            params.num_requests = num_decode;
-            params.max_blocks_per_seq = max_blocks;
+            params.batched_k_block_tables = reinterpret_cast<const int *>(
+                decode_layer_cache_[layer].k_bt_gpu->data());
+            params.batched_v_block_tables = reinterpret_cast<const int *>(
+                decode_layer_cache_[layer].v_bt_gpu->data());
+            params.batched_seq_lens = reinterpret_cast<const int *>(seq_lens_gpu_->data());
+            params.num_requests = cached_num_decode_;
+            params.max_blocks_per_seq = cached_max_blocks_;
             ops::attention(params);
         }
     }
