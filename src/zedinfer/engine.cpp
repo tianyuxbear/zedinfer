@@ -1,18 +1,12 @@
 #include "zedinfer/engine.hpp"
 #include "backend/core/context/context.hpp"
 #include "backend/device/runtime_api.hpp"
-#include "backend/kvcache/dynamic.hpp"
-#include "frontend/models/forward_config.hpp"
-#include "frontend/models/forward_context.hpp"
-#include "frontend/models/paged_forward_context.hpp"
 #include "frontend/sampler/sampler.hpp"
 #include "frontend/tokenizer/hf_tokenizer.hpp"
 #include "utils/logging.hpp"
-#include "utils/random.hpp"
 #include "utils/types.hpp"
 #include "zedinfer/session.hpp"
 
-#include <chrono>
 #include <plog/Log.h>
 #include <stdexcept>
 
@@ -60,31 +54,28 @@ std::shared_ptr<InferenceEngine> InferenceEngine::create(
     exec_config.max_seq_len = tokenizer->get_config().model_max_length;
 
     auto sampler = sampler::createSampler(exec_config, sampler::SamplerType::ARGMAX);
-
     auto chat_template = ChatTemplate::load(model_path, model->model_type());
 
     auto engine = std::shared_ptr<InferenceEngine>(
         new InferenceEngine(
-            std::move(model),
-            std::move(tokenizer),
-            std::move(sampler),
-            device,
-            exec_config,
-            std::move(chat_template)));
+            std::move(model), std::move(tokenizer), std::move(sampler),
+            device, exec_config, std::move(chat_template)));
 
     engine->build_stop_token_ids();
 
     LOGI << "[Engine] Initialization complete";
 
+    // Create profiler and run warmup
+    engine->profiler_ = std::make_unique<Profiler>(engine);
     LOG_VERBOSE_(utils::BOTH) << "[Engine] Performing warmup...";
-    engine->warmup();
+    engine->profiler_->warmup();
     LOG_VERBOSE_(utils::BOTH) << "[Engine] Ready";
 
+    // Create block pool (after warmup so VRAM is settled)
     engine->init_block_pool();
 
-    if (engine->block_allocator_) {
-        engine->scheduler_.set_block_allocator(engine->block_allocator_.get());
-    }
+    // Create serving loop (after block pool)
+    engine->serving_loop_ = std::make_unique<ServingLoop>(engine);
 
     return engine;
 }
@@ -109,109 +100,6 @@ std::unique_ptr<InferenceSession> InferenceEngine::create_session(
     return std::unique_ptr<InferenceSession>(
         new InferenceSession(shared_from_this(), std::move(block_table),
                              block_allocator_.get(), config, chat_template_));
-}
-
-// ============================================================================
-// Session-based Generation (uses block table directly)
-// ============================================================================
-
-std::string InferenceEngine::generate(
-    kvcache::SequenceBlockTable &block_table,
-    const std::string &prompt,
-    const GenerationConfig &config) {
-
-    config.validate();
-
-    if (config.verbose) {
-        if (config.gen_mode == GenerationMode::PING) {
-            LOG_INFO_(utils::BOTH) << "\n=== [Inference] Prompt: ===\n" << prompt;
-        } else {
-            LOGI << "\n=== [Inference] Prompt: ===\n" << prompt;
-        }
-        LOGI << "[Inference] Encoding prompt...";
-    }
-
-    auto input_ids = tokenizer_->encode(prompt);
-
-    if (config.verbose) {
-        LOGI << "[Inference] Prompt tokens: " << input_ids.size();
-        LOGI << "[Inference] Generating...";
-    }
-
-    auto result = generate_tokens(block_table, input_ids, config);
-    std::string output = tokenizer_->decode(result.output_ids);
-
-    if (config.verbose) {
-        LOGI << "[Inference] Generation complete";
-        if (config.gen_mode == GenerationMode::PING) {
-            LOG_INFO_(utils::BOTH) << "\n=== [Inference] Generated ===\n" << output;
-        } else {
-            LOGI << "\n=== [Inference] Generated ===\n" << output;
-        }
-    }
-
-    if (config.print_stats) {
-        LOGI << result.stats.summary();
-    }
-
-    return output;
-}
-
-GenerationResult InferenceEngine::generate_tokens(
-    kvcache::SequenceBlockTable &block_table,
-    const std::vector<int> &input_ids,
-    const GenerationConfig &config) {
-
-    // Use run_one on the scheduler — it uses PagedForwardContext internally
-    auto request = build_request(input_ids, config);
-    scheduler_.submit(std::move(request));
-    return scheduler_.run_one(
-        *model_, block_table, *block_pool_, exec_config_,
-        *sampler_, *tokenizer_, stop_token_ids_);
-}
-
-std::unique_ptr<InferenceRequest> InferenceEngine::build_request(
-    const std::vector<int> &input_ids,
-    const GenerationConfig &config) {
-
-    auto req = std::make_unique<InferenceRequest>();
-    req->input_ids = input_ids;
-    req->config = config;
-    req->stream_callback = config.stream ? config.stream_callback : nullptr;
-    req->arrival_time = std::chrono::steady_clock::now();
-    return req;
-}
-
-// ============================================================================
-// Batch Mode
-// ============================================================================
-
-std::future<GenerationResult> InferenceEngine::submit_async(
-    std::unique_ptr<InferenceRequest> request) {
-    auto future = request->result_promise.get_future();
-    scheduler_.submit(std::move(request));
-    return future;
-}
-
-bool InferenceEngine::step() {
-    auto batch = scheduler_.schedule();
-    if (batch.empty()) return false;
-
-    auto batch_ctx = batch.build_context();
-
-    model::PagedForwardContext ctx(batch_ctx, *block_allocator_);
-    tensor_t logits = model::transformer_forward(
-        model_->forward_config(), ctx, exec_config_);
-
-    scheduler_.process_results(batch, logits, *sampler_, *tokenizer_, stop_token_ids_);
-
-    return true;
-}
-
-void InferenceEngine::run_loop() {
-    while (scheduler_.has_work()) {
-        step();
-    }
 }
 
 // ============================================================================
@@ -250,7 +138,7 @@ void InferenceEngine::init_block_pool() {
     int num_blocks = static_cast<int>(kv_budget / block_bytes);
 
     if (num_blocks <= 0) {
-        LOGW << "[Engine] Not enough memory for block pool, falling back to DynamicKVCache";
+        LOGW << "[Engine] Not enough memory for block pool";
         scheduler_config_.use_paged_kvcache = false;
         return;
     }
@@ -279,11 +167,9 @@ void InferenceEngine::build_stop_token_ids() {
     };
 
     add_unique(tokenizer_->get_eos_token_id());
-
     for (int eos_id : model_->config().eos_token_ids) {
         add_unique(eos_id);
     }
-
     if (!chat_template_.eos_token.empty()) {
         add_unique(tokenizer_->get_special_token_id(chat_template_.eos_token));
     }
@@ -294,114 +180,6 @@ void InferenceEngine::build_stop_token_ids() {
         ids_str += std::to_string(id);
     }
     LOGI << "[Engine] Stop token IDs: [" << ids_str << "]";
-}
-
-bool InferenceEngine::should_stop(int token_id) const {
-    for (int stop_id : stop_token_ids_) {
-        if (token_id == stop_id) return true;
-    }
-    return false;
-}
-
-// ============================================================================
-// Warmup / Profile (uses DynamicKVCache + ContiguousForwardContext)
-// ============================================================================
-
-void InferenceEngine::warmup(size_t prefill_len, size_t decode_steps) {
-    LOGI << "[Engine] Warming up with prefill_len=" << prefill_len
-         << ", decode_steps=" << decode_steps;
-
-    auto t0 = std::chrono::high_resolution_clock::now();
-
-    kvcache::DynamicKVCacheConfig kv_config;
-    const auto &mc = model_->config();
-
-    kv_config.num_layers = mc.num_hidden_layers;
-    kv_config.num_kv_heads = mc.num_key_value_heads;
-    kv_config.head_dim = mc.hidden_size / mc.num_attention_heads;
-    kv_config.device_type = device_.type();
-    kv_config.device_id = device_.id();
-    kv_config.dtype = utils::str_to_dtype(mc.torch_dtype);
-    kv_config.initial_capacity = prefill_len + decode_steps;
-    kv_config.model_max_seq_len = tokenizer_->get_config().model_max_length;
-
-    auto tmp_kv = kvcache::DynamicKVCache::create(kv_config);
-    auto fwd_cfg = model_->forward_config();
-
-    int min_id = 100, max_id = mc.vocab_size - 100;
-    std::vector<int> dummy(prefill_len);
-    for (auto &t : dummy) t = utils::randint(min_id, max_id);
-
-    int past_len = 0;
-    {
-        model::ContiguousForwardContext ctx(dummy, past_len, *tmp_kv);
-        auto logits = model::transformer_forward(fwd_cfg, ctx, exec_config_);
-        int next = sampler_->sample(logits);
-        past_len += prefill_len;
-
-        for (size_t i = 1; i < decode_steps; ++i) {
-            std::vector<int> tok = {next};
-            model::ContiguousForwardContext dctx(tok, past_len, *tmp_kv);
-            logits = model::transformer_forward(fwd_cfg, dctx, exec_config_);
-            next = sampler_->sample(logits);
-            past_len++;
-        }
-    }
-
-    auto t1 = std::chrono::high_resolution_clock::now();
-    LOGI << "[Engine] Warmup complete in "
-         << std::chrono::duration<double, std::milli>(t1 - t0).count() << " ms";
-}
-
-std::pair<double, double> InferenceEngine::profile(size_t prefill_len, size_t decode_steps) {
-    LOGI << "[Engine] Profiling with prefill_len=" << prefill_len
-         << ", decode_steps=" << decode_steps;
-
-    kvcache::DynamicKVCacheConfig kv_config;
-    const auto &mc = model_->config();
-
-    kv_config.num_layers = mc.num_hidden_layers;
-    kv_config.num_kv_heads = mc.num_key_value_heads;
-    kv_config.head_dim = mc.hidden_size / mc.num_attention_heads;
-    kv_config.device_type = device_.type();
-    kv_config.device_id = device_.id();
-    kv_config.dtype = utils::str_to_dtype(mc.torch_dtype);
-    kv_config.initial_capacity = prefill_len + decode_steps;
-    kv_config.model_max_seq_len = tokenizer_->get_config().model_max_length;
-
-    auto tmp_kv = kvcache::DynamicKVCache::create(kv_config);
-    auto fwd_cfg = model_->forward_config();
-
-    int min_id = 100, max_id = mc.vocab_size - 100;
-    std::vector<int> dummy(prefill_len);
-    for (auto &t : dummy) t = utils::randint(min_id, max_id);
-
-    auto p0 = std::chrono::high_resolution_clock::now();
-    int past_len = 0;
-    tensor_t logits;
-    int next;
-    {
-        model::ContiguousForwardContext ctx(dummy, past_len, *tmp_kv);
-        logits = model::transformer_forward(fwd_cfg, ctx, exec_config_);
-        next = sampler_->sample(logits);
-    }
-    auto p1 = std::chrono::high_resolution_clock::now();
-
-    past_len += prefill_len;
-
-    auto d0 = std::chrono::high_resolution_clock::now();
-    for (size_t i = 1; i < decode_steps; ++i) {
-        std::vector<int> tok = {next};
-        model::ContiguousForwardContext ctx(tok, past_len, *tmp_kv);
-        logits = model::transformer_forward(fwd_cfg, ctx, exec_config_);
-        next = sampler_->sample(logits);
-        past_len++;
-    }
-    auto d1 = std::chrono::high_resolution_clock::now();
-
-    return {
-        std::chrono::duration<double, std::milli>(p1 - p0).count(),
-        std::chrono::duration<double, std::milli>(d1 - d0).count()};
 }
 
 } // namespace zedinfer

@@ -8,9 +8,9 @@
 #include "zedinfer/activation.hpp"
 #include "zedinfer/generation_types.hpp"
 #include "zedinfer/chat_template.hpp"
-#include "zedinfer/batch_context.hpp"
 #include "zedinfer/request.hpp"
-#include "zedinfer/scheduler.hpp"
+#include "zedinfer/serving_loop.hpp"
+#include "zedinfer/profiler.hpp"
 
 #include <cstddef>
 #include <future>
@@ -22,33 +22,44 @@ namespace zedinfer {
 
 class InferenceSession;
 
+/**
+ * Inference engine: resource container and factory.
+ * Owns model, tokenizer, sampler, block pool.
+ * Delegates serving to ServingLoop and profiling to Profiler.
+ */
 class InferenceEngine : public std::enable_shared_from_this<InferenceEngine> {
 public:
     static std::shared_ptr<InferenceEngine> create(
-        const std::string &model_path,
-        device::Device device);
+        const std::string &model_path, device::Device device);
 
     std::unique_ptr<InferenceSession> create_session(const GenerationConfig &gen_config);
 
-    // Session-based generate (uses block table directly)
-    std::string generate(
-        kvcache::SequenceBlockTable &block_table,
-        const std::string &prompt,
-        const GenerationConfig &config);
+    // Resource accessors (used by ServingLoop, Profiler, Session)
+    model::Model &model() { return *model_; }
+    tokenizer::Tokenizer &tokenizer() { return *tokenizer_; }
+    sampler::Sampler &sampler() { return *sampler_; }
+    const ExecutorConfig &exec_config() const { return exec_config_; }
+    const ChatTemplate &chat_template() const { return chat_template_; }
+    const std::vector<int> &stop_token_ids() const { return stop_token_ids_; }
+    kvcache::BlockPool *block_pool() { return block_pool_.get(); }
+    kvcache::BlockAllocator *block_allocator() { return block_allocator_.get(); }
 
-    GenerationResult generate_tokens(
-        kvcache::SequenceBlockTable &block_table,
-        const std::vector<int> &input_ids,
-        const GenerationConfig &config);
+    // Delegation to ServingLoop (backward compat for existing callers)
+    std::string generate(kvcache::SequenceBlockTable &bt, const std::string &p, const GenerationConfig &c) {
+        return serving_loop_->generate(bt, p, c);
+    }
+    GenerationResult generate_tokens(kvcache::SequenceBlockTable &bt, const std::vector<int> &ids, const GenerationConfig &c) {
+        return serving_loop_->generate_tokens(bt, ids, c);
+    }
+    std::future<GenerationResult> submit_async(std::unique_ptr<InferenceRequest> r) {
+        return serving_loop_->submit_async(std::move(r));
+    }
+    bool step() { return serving_loop_->step(); }
+    void run_loop() { serving_loop_->run_loop(); }
 
-    // Batch mode
-    std::future<GenerationResult> submit_async(std::unique_ptr<InferenceRequest> request);
-    bool step();
-    void run_loop();
-
-    // Profiling (uses DynamicKVCache internally, no block table)
-    void warmup(size_t prefill_len = 128, size_t decode_steps = 128);
-    std::pair<double, double> profile(size_t prefill_len = 128, size_t decode_steps = 128);
+    // Delegation to Profiler
+    void warmup(size_t pl = 128, size_t ds = 128) { profiler_->warmup(pl, ds); }
+    std::pair<double, double> profile(size_t pl = 128, size_t ds = 128) { return profiler_->profile(pl, ds); }
 
 private:
     InferenceEngine(
@@ -66,17 +77,16 @@ private:
     ExecutorConfig exec_config_;
     ChatTemplate chat_template_;
     std::vector<int> stop_token_ids_;
-    Scheduler scheduler_;
     SchedulerConfig scheduler_config_;
     std::unique_ptr<kvcache::BlockPool> block_pool_;
     std::unique_ptr<kvcache::BlockAllocator> block_allocator_;
 
+    // Owned sub-components
+    std::unique_ptr<ServingLoop> serving_loop_;
+    std::unique_ptr<Profiler> profiler_;
+
     void init_block_pool();
     void build_stop_token_ids();
-    bool should_stop(int token_id) const;
-    std::unique_ptr<InferenceRequest> build_request(
-        const std::vector<int> &input_ids,
-        const GenerationConfig &config);
 };
 
 } // namespace zedinfer
