@@ -44,10 +44,8 @@ BatchContext ScheduledBatch::build_context() const {
     // Prefill slots after decode
     for (size_t i = 0; i < prefill_requests.size(); ++i) {
         auto *req = prefill_requests[i];
+        int chunk_start = prefill_chunk_starts[i];
         int chunk_size = prefill_chunk_sizes[i];
-        // prefill_progress was already advanced by chunk in schedule(),
-        // so the start offset for this chunk is (progress - chunk_size)
-        int chunk_start = req->prefill_progress - chunk_size;
 
         // Add chunk tokens from input_ids
         for (int t = 0; t < chunk_size; ++t) {
