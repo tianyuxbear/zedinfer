@@ -1,6 +1,8 @@
 #include "zedinfer/scheduler.hpp"
 #include "backend/kvcache/block_pool.hpp"
 #include "frontend/models/base.hpp"
+#include "frontend/models/forward_config.hpp"
+#include "frontend/models/paged_forward_context.hpp"
 #include "frontend/sampler/sampler.hpp"
 #include "frontend/tokenizer/base.hpp"
 #include "backend/kvcache/base.hpp"
@@ -218,7 +220,8 @@ void Scheduler::complete_request(InferenceRequest &req) {
 
 GenerationResult Scheduler::run_one(
     model::Model &model,
-    kvcache::KVCache &kvcache,
+    kvcache::SequenceBlockTable &block_table,
+    kvcache::BlockPool &pool,
     const ExecutorConfig &exec_config,
     sampler::Sampler &sampler,
     tokenizer::Tokenizer &tokenizer,
@@ -239,42 +242,66 @@ GenerationResult Scheduler::run_one(
     stats.prompt_tokens = req.input_ids.size();
     req.output_ids.reserve(req.config.max_new_tokens);
 
-    // Prefill
+    // Determine model config for forward
+    model::ModelForwardConfig model_cfg{
+        model.config(), model.weights(),
+        model.model_type() == "qwen2",  // has_qkv_bias
+        model.model_type() == "qwen3"   // has_qk_norm
+    };
+
+    // Prefill: use PagedForwardContext with the session's block_table
     req.phase = RequestPhase::PREFILL;
     auto t0 = std::chrono::high_resolution_clock::now();
 
-    int past_len = kvcache.current_length();
-    tensor_t logits = model.forward(req.input_ids, past_len, kvcache, exec_config);
-    int next_token = sampler.sample(logits);
+    int past_len = block_table.seq_len;
+    {
+        model::PagedForwardContext ctx(req.input_ids, past_len, block_table, pool);
+        tensor_t logits = model::transformer_forward(model_cfg, ctx, exec_config);
+        int next_token = sampler.sample(logits);
 
-    auto t1 = std::chrono::high_resolution_clock::now();
-    stats.prefill_time_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-    stats.total_time_ms += stats.prefill_time_ms;
+        auto t1 = std::chrono::high_resolution_clock::now();
+        stats.prefill_time_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        stats.total_time_ms += stats.prefill_time_ms;
 
-    req.output_ids.push_back(next_token);
-    req.last_token = next_token;
-    req.generated_count = 1;
+        req.output_ids.push_back(next_token);
+        req.last_token = next_token;
+        req.generated_count = 1;
 
-    if (is_stop_token(next_token, stop_token_ids)) {
-        req.phase = RequestPhase::COMPLETE;
-        stats.generated_tokens = req.output_ids.size();
-        stats.total_tokens = stats.prompt_tokens + stats.generated_tokens;
-        return GenerationResult{std::move(req.output_ids), stats};
+        if (is_stop_token(next_token, stop_token_ids)) {
+            req.phase = RequestPhase::COMPLETE;
+            stats.generated_tokens = req.output_ids.size();
+            stats.total_tokens = stats.prompt_tokens + stats.generated_tokens;
+            return GenerationResult{std::move(req.output_ids), stats};
+        }
+
+        if (req.config.stream && req.stream_callback) {
+            req.stream_callback(tokenizer.decode({next_token}));
+        }
     }
 
-    if (req.config.stream && req.stream_callback) {
-        req.stream_callback(tokenizer.decode({next_token}));
-    }
-
-    // Decode
+    // Decode loop: each step creates a PagedForwardContext with 1 token
     req.phase = RequestPhase::DECODE;
-    past_len += req.input_ids.size();
 
     for (int i = 1; i < req.config.max_new_tokens; ++i) {
         auto s0 = std::chrono::high_resolution_clock::now();
 
-        logits = model.forward({req.last_token}, past_len, kvcache, exec_config);
-        next_token = sampler.sample(logits);
+        // Ensure enough blocks for the new token
+        int total_tokens = block_table.seq_len + 1;
+        int bs = pool.config().block_size;
+        int blocks_needed = (total_tokens + bs - 1) / bs;
+        for (int layer = 0; layer < block_table.num_layers; ++layer) {
+            while (static_cast<int>(block_table.k_blocks[layer].size()) < blocks_needed) {
+                block_table.k_blocks[layer].push_back(pool.allocate());
+            }
+            while (static_cast<int>(block_table.v_blocks[layer].size()) < blocks_needed) {
+                block_table.v_blocks[layer].push_back(pool.allocate());
+            }
+        }
+
+        std::vector<int> decode_token = {req.last_token};
+        model::PagedForwardContext ctx(decode_token, block_table.seq_len, block_table, pool);
+        tensor_t logits = model::transformer_forward(model_cfg, ctx, exec_config);
+        int next_token = sampler.sample(logits);
 
         auto s1 = std::chrono::high_resolution_clock::now();
         double step_ms = std::chrono::duration<double, std::milli>(s1 - s0).count();
@@ -284,7 +311,6 @@ GenerationResult Scheduler::run_one(
         req.output_ids.push_back(next_token);
         req.last_token = next_token;
         req.generated_count++;
-        past_len++;
 
         if (is_stop_token(next_token, stop_token_ids)) break;
 
@@ -292,7 +318,7 @@ GenerationResult Scheduler::run_one(
             req.stream_callback(tokenizer.decode({next_token}));
         }
 
-        if (past_len >= static_cast<int>(tokenizer.get_config().model_max_length)) {
+        if (block_table.seq_len >= static_cast<int>(tokenizer.get_config().model_max_length)) {
             if (req.config.verbose) {
                 LOGI << "[Scheduler] Reached max sequence length";
             }

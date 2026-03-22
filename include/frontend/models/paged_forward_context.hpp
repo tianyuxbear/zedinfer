@@ -1,0 +1,65 @@
+#pragma once
+
+#include "frontend/models/forward_context.hpp"
+#include "backend/kvcache/block_pool.hpp"
+#include "zedinfer/batch_context.hpp"
+
+#include <vector>
+
+namespace zedinfer::model {
+
+/**
+ * Unified paged forward context for both single-request and batched execution.
+ * A single request is just a batch of size 1.
+ *
+ * Handles:
+ *   - Token scatter to blocks (write_kv)
+ *   - Paged attention dispatch (attend) — decode and prefill
+ *   - Direct-to-block decode writes (zero-copy via is_mmap)
+ */
+class PagedForwardContext : public ForwardContext {
+public:
+    // Single-request mode (session-based, run_one)
+    PagedForwardContext(
+        const std::vector<int> &input_ids,
+        int past_len,
+        kvcache::SequenceBlockTable &block_table,
+        kvcache::BlockPool &pool);
+
+    // Batch mode (continuous batching, step/run_loop)
+    PagedForwardContext(
+        const BatchContext &batch,
+        kvcache::BlockAllocator &allocator);
+
+    int num_tokens() const override { return total_tokens_; }
+    void prepare_inputs(tensor_t &ids, tensor_t &pos_ids,
+                        const ExecutorConfig &exec_config) override;
+    void write_kv(int layer, tensor_t k, tensor_t v) override;
+    tensor_t attend(int layer, tensor_t q_rope, float scale,
+                    const ExecutorConfig &exec_config,
+                    size_t nhead, size_t nkvhead, size_t head_dim) override;
+    void finalize() override;
+
+private:
+    struct Slot {
+        kvcache::SequenceBlockTable *block_table;
+        int token_offset;   // start in flattened token_ids
+        int num_tokens;     // tokens in this slot
+        int past_len;       // tokens already in KV cache
+        bool is_decode;     // true if num_tokens == 1 and past_len > 0
+    };
+
+    kvcache::BlockPool &pool_;
+    int total_tokens_;
+    std::vector<Slot> slots_;
+
+    // Input data (single-request mode stores locally, batch mode references BatchContext)
+    std::vector<int> token_ids_;
+    std::vector<int64_t> position_ids_;
+
+    // Helpers
+    void scatter_slot_kv(const Slot &slot, int layer, tensor_t k, tensor_t v);
+    void copy_to_block(const void *src, size_t bytes, void *dst);
+};
+
+} // namespace zedinfer::model

@@ -88,7 +88,8 @@ public:
      */
     GenerationResult run_one(
         model::Model &model,
-        kvcache::KVCache &kvcache,
+        kvcache::SequenceBlockTable &block_table,
+        kvcache::BlockPool &pool,
         const ExecutorConfig &exec_config,
         sampler::Sampler &sampler,
         tokenizer::Tokenizer &tokenizer,

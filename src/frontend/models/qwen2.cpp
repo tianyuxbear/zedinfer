@@ -1,6 +1,7 @@
 #include "frontend/models/qwen2.hpp"
 #include "frontend/models/forward_config.hpp"
 #include "frontend/models/forward_context.hpp"
+#include "frontend/models/paged_forward_context.hpp"
 
 #include <string>
 
@@ -51,7 +52,7 @@ tensor_t Qwen2Model::forward(
     const ExecutorConfig &exec_config) {
 
     ModelForwardConfig cfg{config_, *weights_, /*has_qkv_bias=*/true, /*has_qk_norm=*/false};
-    SingleForwardContext ctx(input_ids, past_len, kvcache);
+    ContiguousForwardContext ctx(input_ids, past_len, kvcache);
     return transformer_forward(cfg, ctx, exec_config);
 }
 
@@ -61,7 +62,7 @@ tensor_t Qwen2Model::forward_batch(
     const ExecutorConfig &exec_config) {
 
     ModelForwardConfig cfg{config_, *weights_, /*has_qkv_bias=*/true, /*has_qk_norm=*/false};
-    BatchedForwardContext ctx(batch, allocator, exec_config);
+    PagedForwardContext ctx(batch, allocator);
     return transformer_forward(cfg, ctx, exec_config);
 }
 
