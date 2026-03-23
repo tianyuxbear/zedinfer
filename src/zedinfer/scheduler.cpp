@@ -197,6 +197,14 @@ void Scheduler::process_results(
 
     // Process decode results
     for (auto *req : batch.decode_requests) {
+        // Check cancellation (client disconnected)
+        if (req->cancelled && req->cancelled->load()) {
+            LOGI << "[Scheduler] Request " << req->request_id << " cancelled";
+            complete_request(*req);
+            offset++;
+            continue;
+        }
+
         // Pass [offset : offset+1] to sampler — single row, no double-slice issue
         auto req_logits = logits->slice(0, offset, offset + 1);
         int token = sampler.sample(req_logits);

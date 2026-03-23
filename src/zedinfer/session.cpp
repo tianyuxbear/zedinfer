@@ -107,6 +107,13 @@ void InferenceSession::complete_turn(const std::string &user_input,
     past_len_ = block_table_.seq_len;
 }
 
+void InferenceSession::abort_turn() {
+    // After a failed generation, the block table's seq_len may have advanced
+    // (tokens were written to blocks during prefill/decode before the error).
+    // Sync past_len_ so the next turn doesn't have a gap.
+    past_len_ = block_table_.seq_len;
+}
+
 void InferenceSession::reset() {
     if (allocator_) {
         allocator_->free_sequence(block_table_);
