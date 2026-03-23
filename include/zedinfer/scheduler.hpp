@@ -66,6 +66,9 @@ public:
     int pending_count() const;
     int active_count() const;
 
+    // Remove completed/failed requests from active list (called after fail_batch)
+    void cleanup_failed_requests();
+
     /**
      * Schedule next batch for one forward pass.
      * Decode-first: all active decode requests, then admit new prefills.
