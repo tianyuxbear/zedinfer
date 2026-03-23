@@ -28,10 +28,18 @@ InferenceEngine::InferenceEngine(
 
 std::shared_ptr<InferenceEngine> InferenceEngine::create(
     const std::string &model_path,
-    device::Device device) {
+    device::Device device,
+    SchedulerConfig sched_config) {
 
     if (model_path.empty()) {
         throw std::invalid_argument("Model path cannot be empty");
+    }
+
+    // Derive model name from directory basename
+    std::string model_name = model_path;
+    auto last_slash = model_name.find_last_of("/\\");
+    if (last_slash != std::string::npos) {
+        model_name = model_name.substr(last_slash + 1);
     }
 
     LOGI << "[Engine] Loading model from: " << model_path;
@@ -63,6 +71,9 @@ std::shared_ptr<InferenceEngine> InferenceEngine::create(
 
     engine->build_stop_token_ids();
 
+    engine->model_name_ = model_name;
+    engine->scheduler_config_ = sched_config;
+
     LOGI << "[Engine] Initialization complete";
 
     // Create profiler and run warmup
@@ -75,7 +86,7 @@ std::shared_ptr<InferenceEngine> InferenceEngine::create(
     engine->init_block_pool();
 
     // Create serving loop (after block pool)
-    engine->serving_loop_ = std::make_unique<ServingLoop>(engine);
+    engine->serving_loop_ = std::make_unique<ServingLoop>(engine, engine->scheduler_config_);
 
     return engine;
 }

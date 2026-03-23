@@ -25,7 +25,8 @@ class InferenceEngine;
  */
 class ServingLoop {
 public:
-    explicit ServingLoop(std::shared_ptr<InferenceEngine> engine);
+    explicit ServingLoop(std::shared_ptr<InferenceEngine> engine,
+                         SchedulerConfig sched_config = {});
 
     // Synchronous generation (session-based, used by chat/ping)
     std::string generate(kvcache::SequenceBlockTable &block_table,
@@ -52,6 +53,10 @@ public:
     // Signal the serving loop to stop. Safe to call from any thread.
     void stop();
 
+    // Scheduler status (for health endpoint)
+    int pending_count() const { return scheduler_.pending_count(); }
+    int active_count() const { return scheduler_.active_count(); }
+
 private:
     std::shared_ptr<InferenceEngine> engine_;
     Scheduler scheduler_;
@@ -64,6 +69,9 @@ private:
     std::unique_ptr<InferenceRequest> build_request(
         const std::vector<int> &input_ids,
         const GenerationConfig &config);
+
+    // Fail all requests in a batch with an error (used when forward pass throws)
+    void fail_batch(ScheduledBatch &batch, const std::string &error_msg);
 };
 
 } // namespace zedinfer

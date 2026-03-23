@@ -34,6 +34,8 @@ ChatTemplate ChatTemplate::default_deepseek_r1() {
     t.assistant_suffix     = ds_sentence_token("end");
     t.generation_prompt    = ds_token("Assistant") + "<think>\n";
     t.output_prefix        = "<think> ";
+    t.system_prefix        = "";
+    t.system_suffix        = "";
     t.add_bos_first_turn_only = true;
     return t;
 }
@@ -48,6 +50,8 @@ ChatTemplate ChatTemplate::default_qwen_chatml() {
     t.assistant_suffix     = "<|im_end|>\n";
     t.generation_prompt    = "<|im_start|>assistant\n";
     t.output_prefix        = "";
+    t.system_prefix        = "<|im_start|>system\n";
+    t.system_suffix        = "<|im_end|>\n";
     t.add_bos_first_turn_only = false;
     return t;
 }
@@ -99,6 +103,8 @@ ChatTemplate ChatTemplate::load(const std::string &model_path,
             t.generation_prompt = j.value("generation_prompt", "");
             t.output_prefix = j.value("output_prefix", "");
             t.add_bos_first_turn_only = j.value("add_bos_first_turn_only", true);
+            t.system_prefix = j.value("system_prefix", "");
+            t.system_suffix = j.value("system_suffix", "");
 
             LOGI << "[ChatTemplate] Loaded from " << override_path.string();
             return t;
@@ -121,6 +127,40 @@ ChatTemplate ChatTemplate::load(const std::string &model_path,
     LOGW << "[ChatTemplate] Unknown model_type=" << model_type
          << "; using ChatML template as fallback";
     return default_qwen_chatml();
+}
+
+std::string ChatTemplate::apply(
+    const std::vector<std::pair<std::string, std::string>> &messages,
+    bool add_generation_prompt) const {
+
+    std::string result;
+
+    // BOS token: always prepend once. add_bos_first_turn_only is irrelevant here
+    // because apply() formats a complete conversation in one call (always "first turn").
+    // The flag only matters for incremental per-turn formatting (InferenceSession::chat).
+    if (!bos_token.empty()) {
+        result += bos_token;
+    }
+
+    for (const auto &[role, content] : messages) {
+        if (role == "system") {
+            if (!system_prefix.empty()) {
+                result += system_prefix + content + system_suffix;
+            } else {
+                result += content + "\n";
+            }
+        } else if (role == "user") {
+            result += user_prefix + content + user_suffix;
+        } else if (role == "assistant") {
+            result += assistant_prefix + content + assistant_suffix;
+        }
+    }
+
+    if (add_generation_prompt && !generation_prompt.empty()) {
+        result += generation_prompt;
+    }
+
+    return result;
 }
 
 } // namespace zedinfer

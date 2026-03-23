@@ -46,6 +46,20 @@ int Scheduler::active_count() const {
     return static_cast<int>(active_requests_.size());
 }
 
+void Scheduler::cleanup_failed_requests() {
+    // Clean active requests (decode phase)
+    active_requests_.erase(
+        std::remove_if(active_requests_.begin(), active_requests_.end(),
+            [](const auto &ptr) { return ptr->phase == RequestPhase::COMPLETE; }),
+        active_requests_.end());
+
+    // Also clean waiting queue — failed prefill requests (chunked) might still be there
+    while (!waiting_queue_.empty() &&
+           waiting_queue_.front()->phase == RequestPhase::COMPLETE) {
+        waiting_queue_.pop_front();
+    }
+}
+
 bool Scheduler::can_admit(const InferenceRequest &req) const {
     if (!block_allocator_) return true;
 
@@ -112,8 +126,13 @@ ScheduledBatch Scheduler::schedule() {
             static_cast<int>(batch.prefill_requests.size()) >= config_.max_batch_requests)
             break;
 
-        if (!can_admit(*req))
+        if (!can_admit(*req)) {
+            LOGW << "[Scheduler] Cannot admit request " << req->request_id
+                 << ": prompt=" << req->input_ids.size() << " tokens"
+                 << ", available_blocks=" << (block_allocator_ ? block_allocator_->available_blocks() : -1)
+                 << ", total_blocks=" << (block_allocator_ ? (block_allocator_->available_blocks()) : -1);
             break;
+        }
 
         // Allocate or extend blocks
         if (block_allocator_) {

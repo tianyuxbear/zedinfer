@@ -1,6 +1,8 @@
 #pragma once
 
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace zedinfer {
 
@@ -23,6 +25,10 @@ struct ChatTemplate {
     // Display prefix prepended to model output (e.g., "<think> " for reasoning models)
     std::string output_prefix;
 
+    // System message formatting (empty = plain text fallback)
+    std::string system_prefix;
+    std::string system_suffix;
+
     // If true, BOS token is only added on the first turn
     bool add_bos_first_turn_only = true;
 
@@ -35,6 +41,13 @@ struct ChatTemplate {
 
     // Built-in default for standard Qwen models (ChatML format)
     static ChatTemplate default_qwen_chatml();
+
+    // Format an OpenAI-style messages array into a prompt string.
+    // Each pair is (role, content) where role is "system", "user", or "assistant".
+    // If add_generation_prompt is true, appends generation_prompt at the end.
+    std::string apply(
+        const std::vector<std::pair<std::string, std::string>> &messages,
+        bool add_generation_prompt = true) const;
 };
 
 } // namespace zedinfer

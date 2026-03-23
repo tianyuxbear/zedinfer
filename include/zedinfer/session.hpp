@@ -35,6 +35,17 @@ public:
     }
     int past_len() const { return past_len_; }
 
+    // Async chat support (for HTTP handlers that use submit_async instead of blocking generate)
+    // Step 1: format the new user message into a prompt string (handles bos, template)
+    std::string prepare_prompt(const std::string &user_input);
+    // Step 2: access block table for building InferenceRequest with block_table_ref
+    kvcache::SequenceBlockTable &block_table() { return block_table_; }
+    // Step 3: after generation completes, update session state
+    void complete_turn(const std::string &user_input, const std::string &raw_output);
+    // Get the output prefix to send before first token (e.g. "<think> " for reasoning models)
+    const std::string &output_prefix() const { return template_.output_prefix; }
+    const ChatTemplate &chat_tmpl() const { return template_; }
+
 private:
     friend class InferenceEngine;
 

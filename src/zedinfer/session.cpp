@@ -89,6 +89,24 @@ std::string InferenceSession::chat(const std::string &user_input) {
     return output;
 }
 
+std::string InferenceSession::prepare_prompt(const std::string &user_input) {
+    std::string input;
+    if (is_first_turn_) {
+        input += template_.bos_token;
+    }
+    input += template_.user_prefix + user_input + template_.user_suffix;
+    input += template_.generation_prompt;
+    return input;
+}
+
+void InferenceSession::complete_turn(const std::string &user_input,
+                                      const std::string &raw_output) {
+    is_first_turn_ = false;
+    chat_history_.push_back({"user", user_input});
+    chat_history_.push_back({"assistant", raw_output});
+    past_len_ = block_table_.seq_len;
+}
+
 void InferenceSession::reset() {
     if (allocator_) {
         allocator_->free_sequence(block_table_);

@@ -30,7 +30,8 @@ class InferenceSession;
 class InferenceEngine : public std::enable_shared_from_this<InferenceEngine> {
 public:
     static std::shared_ptr<InferenceEngine> create(
-        const std::string &model_path, device::Device device);
+        const std::string &model_path, device::Device device,
+        SchedulerConfig sched_config = {});
 
     std::unique_ptr<InferenceSession> create_session(const GenerationConfig &gen_config);
 
@@ -43,6 +44,9 @@ public:
     const std::vector<int> &stop_token_ids() const { return stop_token_ids_; }
     kvcache::BlockPool *block_pool() { return block_pool_.get(); }
     kvcache::BlockAllocator *block_allocator() { return block_allocator_.get(); }
+    const std::string &model_name() const { return model_name_; }
+    int pending_count() const { return serving_loop_ ? serving_loop_->pending_count() : 0; }
+    int active_count() const { return serving_loop_ ? serving_loop_->active_count() : 0; }
 
     // Delegation to ServingLoop (backward compat for existing callers)
     std::string generate(kvcache::SequenceBlockTable &bt, const std::string &p, const GenerationConfig &c) {
@@ -80,6 +84,7 @@ private:
     ChatTemplate chat_template_;
     std::vector<int> stop_token_ids_;
     SchedulerConfig scheduler_config_;
+    std::string model_name_;
     std::unique_ptr<kvcache::BlockPool> block_pool_;
     std::unique_ptr<kvcache::BlockAllocator> block_allocator_;
 

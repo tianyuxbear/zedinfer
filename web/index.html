@@ -1,0 +1,578 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ZedInfer</title>
+<style>
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+:root {
+    --bg: #ffffff;
+    --bg-secondary: #f7f7f8;
+    --bg-hover: #ececf1;
+    --text: #343541;
+    --text-secondary: #6e6e80;
+    --text-light: #8e8ea0;
+    --border: #e5e5e5;
+    --accent: #10a37f;
+    --accent-hover: #0d8a6c;
+    --user-bg: #f7f7f8;
+    --assistant-bg: #ffffff;
+    --code-bg: #f6f8fa;
+    --code-border: #e1e4e8;
+    --input-bg: #ffffff;
+    --input-border: #d9d9e3;
+    --input-focus: #10a37f;
+    --shadow: 0 0 10px rgba(0,0,0,0.05);
+    --sidebar-width: 260px;
+    --max-content: 768px;
+    --radius: 8px;
+    --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;
+    --font-mono: 'SFMono-Regular', 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+}
+
+body {
+    font-family: var(--font);
+    color: var(--text);
+    background: var(--bg);
+    height: 100vh;
+    display: flex;
+}
+
+/* ===== Sidebar ===== */
+.sidebar {
+    width: var(--sidebar-width);
+    background: var(--bg-secondary);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    flex-shrink: 0;
+}
+.sidebar-header {
+    padding: 16px;
+    border-bottom: 1px solid var(--border);
+}
+.sidebar-header button {
+    width: 100%;
+    padding: 10px 16px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text);
+    font-size: 14px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    transition: background 0.15s;
+}
+.sidebar-header button:hover { background: var(--bg-hover); }
+.sidebar-header button::before { content: '+'; font-size: 18px; font-weight: 300; }
+.sidebar-info {
+    flex: 1;
+    padding: 16px;
+    overflow-y: auto;
+}
+.sidebar-info .info-item {
+    font-size: 12px;
+    color: var(--text-light);
+    margin-bottom: 8px;
+    line-height: 1.5;
+}
+.sidebar-info .info-label {
+    font-weight: 600;
+    color: var(--text-secondary);
+}
+.sidebar-footer {
+    padding: 12px 16px;
+    border-top: 1px solid var(--border);
+    font-size: 11px;
+    color: var(--text-light);
+    text-align: center;
+}
+
+/* ===== Main ===== */
+.main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+/* ===== Chat Messages ===== */
+.chat-scroll {
+    flex: 1;
+    overflow-y: auto;
+}
+.chat-messages {
+    max-width: var(--max-content);
+    margin: 0 auto;
+    padding: 24px 24px 100px;
+}
+
+/* Welcome */
+.welcome {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 120px 24px 24px;
+    text-align: center;
+}
+.welcome-logo {
+    width: 48px; height: 48px;
+    background: var(--accent);
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    margin-bottom: 20px;
+    font-size: 24px; color: white; font-weight: 700;
+}
+.welcome h2 {
+    font-size: 22px;
+    font-weight: 600;
+    color: var(--text);
+    margin-bottom: 8px;
+}
+.welcome p {
+    font-size: 14px;
+    color: var(--text-secondary);
+    max-width: 400px;
+    line-height: 1.6;
+}
+
+/* Message row */
+.msg-row {
+    padding: 24px 0;
+}
+.msg-row + .msg-row { border-top: 1px solid var(--border); }
+.msg-inner {
+    display: flex;
+    gap: 16px;
+    align-items: flex-start;
+}
+.msg-avatar {
+    width: 32px; height: 32px;
+    border-radius: 4px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 13px; font-weight: 600; color: white;
+    flex-shrink: 0;
+}
+.msg-avatar.user { background: #5c6bc0; }
+.msg-avatar.assistant { background: var(--accent); }
+.msg-content {
+    flex: 1;
+    min-width: 0;
+    font-size: 15px;
+    line-height: 1.7;
+}
+.msg-content p { margin: 0 0 12px; }
+.msg-content p:last-child { margin-bottom: 0; }
+.msg-content strong { font-weight: 600; }
+.msg-content pre {
+    background: var(--code-bg);
+    border: 1px solid var(--code-border);
+    border-radius: 6px;
+    padding: 14px 16px;
+    overflow-x: auto;
+    margin: 12px 0;
+    font-size: 13px;
+    line-height: 1.6;
+}
+.msg-content code {
+    font-family: var(--font-mono);
+    font-size: 13px;
+}
+.msg-content :not(pre) > code {
+    background: var(--code-bg);
+    border: 1px solid var(--code-border);
+    padding: 1px 5px;
+    border-radius: 4px;
+    font-size: 0.9em;
+}
+.msg-content ul, .msg-content ol {
+    margin: 8px 0 8px 20px;
+}
+.msg-content li { margin-bottom: 4px; }
+.thinking-text {
+    color: var(--text-light);
+    font-style: italic;
+}
+.thinking-text::after {
+    content: '';
+    animation: dots 1.4s steps(4) infinite;
+}
+@keyframes dots {
+    0%  { content: ''; }
+    25% { content: '.'; }
+    50% { content: '..'; }
+    75% { content: '...'; }
+}
+
+/* ===== Input Area ===== */
+.input-wrapper {
+    padding: 0 24px 24px;
+    background: linear-gradient(transparent 0%, var(--bg) 30%);
+    position: sticky;
+    bottom: 0;
+}
+.input-box {
+    max-width: var(--max-content);
+    margin: 0 auto;
+    background: var(--input-bg);
+    border: 1px solid var(--input-border);
+    border-radius: 12px;
+    box-shadow: var(--shadow);
+    display: flex;
+    align-items: flex-end;
+    padding: 8px 12px;
+    transition: border-color 0.2s, box-shadow 0.2s;
+}
+.input-box:focus-within {
+    border-color: var(--input-focus);
+    box-shadow: 0 0 0 2px rgba(16,163,127,0.15);
+}
+.input-box textarea {
+    flex: 1;
+    border: none;
+    outline: none;
+    resize: none;
+    font-family: var(--font);
+    font-size: 15px;
+    line-height: 1.5;
+    color: var(--text);
+    background: transparent;
+    padding: 6px 4px;
+    min-height: 24px;
+    max-height: 200px;
+}
+.input-box textarea::placeholder { color: var(--text-light); }
+.input-box .send-btn {
+    width: 36px; height: 36px;
+    background: var(--accent);
+    border: none;
+    border-radius: 8px;
+    color: white;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.15s;
+    flex-shrink: 0;
+    margin-left: 8px;
+}
+.input-box .send-btn:hover { background: var(--accent-hover); }
+.input-box .send-btn:disabled { background: #d1d5db; cursor: not-allowed; }
+.input-box .send-btn svg { width: 18px; height: 18px; }
+.input-hint {
+    text-align: center;
+    font-size: 11px;
+    color: var(--text-light);
+    margin-top: 8px;
+    max-width: var(--max-content);
+    margin-left: auto;
+    margin-right: auto;
+}
+
+/* ===== Settings Drawer ===== */
+.settings-toggle {
+    cursor: pointer;
+    padding: 6px;
+    border-radius: 6px;
+    transition: background 0.15s;
+    display: flex;
+    align-items: center;
+    color: var(--text-secondary);
+}
+.settings-toggle:hover { background: var(--bg-hover); }
+.settings-panel {
+    padding: 0 16px;
+}
+.settings-panel h3 {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-light);
+    margin: 16px 0 10px;
+}
+.setting-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 10px;
+}
+.setting-row label {
+    font-size: 13px;
+    color: var(--text-secondary);
+}
+.setting-row input[type="number"] {
+    width: 80px;
+    padding: 4px 8px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-size: 13px;
+    color: var(--text);
+    text-align: right;
+    outline: none;
+    font-family: var(--font-mono);
+}
+.setting-row input[type="number"]:focus {
+    border-color: var(--input-focus);
+}
+
+/* ===== Responsive ===== */
+@media (max-width: 768px) {
+    .sidebar { display: none; }
+    .chat-messages { padding: 16px 16px 100px; }
+    .input-wrapper { padding: 0 12px 16px; }
+}
+</style>
+</head>
+<body>
+
+<!-- Sidebar -->
+<div class="sidebar">
+    <div class="sidebar-header">
+        <button onclick="newChat()">New Chat</button>
+    </div>
+    <div class="sidebar-info">
+        <div class="info-item">
+            <span class="info-label">Model</span><br>
+            <span id="model-name">loading...</span>
+        </div>
+        <div class="settings-panel">
+            <h3>Settings</h3>
+            <div class="setting-row">
+                <label>Max tokens</label>
+                <input type="number" id="max-tokens" value="1024" min="64" max="8192" step="64">
+            </div>
+        </div>
+    </div>
+    <div class="sidebar-footer">
+        Powered by ZedInfer
+    </div>
+</div>
+
+<!-- Main Area -->
+<div class="main">
+    <div class="chat-scroll" id="chat-scroll">
+        <div class="chat-messages" id="chat">
+            <div class="welcome" id="welcome">
+                <div class="welcome-logo">Z</div>
+                <h2>ZedInfer</h2>
+                <p>A lightweight C++ inference engine. Type a message below to start chatting.</p>
+            </div>
+        </div>
+    </div>
+
+    <div class="input-wrapper">
+        <div class="input-box">
+            <textarea id="input" placeholder="Message ZedInfer..." rows="1" autofocus></textarea>
+            <button class="send-btn" id="send-btn" onclick="sendMessage()">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                    <line x1="22" y1="2" x2="11" y2="13"></line>
+                    <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+                </svg>
+            </button>
+        </div>
+        <div class="input-hint">Enter to send, Shift+Enter for new line</div>
+    </div>
+</div>
+
+<script>
+let messages = [];
+let generating = false;
+let sessionId = Math.random().toString(36).substr(2) + Date.now().toString(36);
+
+const chatEl = document.getElementById('chat');
+const chatScroll = document.getElementById('chat-scroll');
+const inputEl = document.getElementById('input');
+const sendBtn = document.getElementById('send-btn');
+const modelNameEl = document.getElementById('model-name');
+const maxTokensEl = document.getElementById('max-tokens');
+
+// Fetch model name
+fetch('/v1/models')
+    .then(r => r.json())
+    .then(d => { if (d.data?.[0]) modelNameEl.textContent = d.data[0].id; })
+    .catch(() => { modelNameEl.textContent = 'unknown'; });
+
+// Auto-resize textarea
+inputEl.addEventListener('input', function() {
+    this.style.height = 'auto';
+    this.style.height = Math.min(this.scrollHeight, 200) + 'px';
+});
+
+// Enter to send
+inputEl.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        if (!generating) sendMessage();
+    }
+});
+
+function scrollToBottom() {
+    chatScroll.scrollTop = chatScroll.scrollHeight;
+}
+
+function renderMarkdown(text) {
+    let html = text
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+
+    // Fenced code blocks
+    html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) =>
+        '<pre><code>' + code.trimEnd() + '</code></pre>');
+
+    // Inline code
+    html = html.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+
+    // Bold
+    html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+
+    // Italic
+    html = html.replace(/(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g, '<em>$1</em>');
+
+    // Unordered lists (lines starting with - or *)
+    html = html.replace(/(^|\n)([-*] .+(\n[-*] .+)*)/g, (_, pre, list) => {
+        const items = list.split('\n').map(l => '<li>' + l.replace(/^[-*] /, '') + '</li>').join('');
+        return pre + '<ul>' + items + '</ul>';
+    });
+
+    // Ordered lists
+    html = html.replace(/(^|\n)(\d+\. .+(\n\d+\. .+)*)/g, (_, pre, list) => {
+        const items = list.split('\n').map(l => '<li>' + l.replace(/^\d+\. /, '') + '</li>').join('');
+        return pre + '<ol>' + items + '</ol>';
+    });
+
+    // Paragraphs
+    html = html.replace(/\n{2,}/g, '</p><p>');
+    html = html.replace(/\n/g, '<br>');
+
+    return '<p>' + html + '</p>';
+}
+
+function addMessage(role, content) {
+    const welcome = document.getElementById('welcome');
+    if (welcome) welcome.remove();
+
+    const row = document.createElement('div');
+    row.className = 'msg-row';
+
+    const inner = document.createElement('div');
+    inner.className = 'msg-inner';
+
+    const avatar = document.createElement('div');
+    avatar.className = 'msg-avatar ' + role;
+    avatar.textContent = role === 'user' ? 'U' : 'Z';
+
+    const body = document.createElement('div');
+    body.className = 'msg-content';
+    if (content) {
+        body.innerHTML = renderMarkdown(content);
+    }
+
+    inner.appendChild(avatar);
+    inner.appendChild(body);
+    row.appendChild(inner);
+    chatEl.appendChild(row);
+    scrollToBottom();
+    return body;
+}
+
+async function sendMessage() {
+    const content = inputEl.value.trim();
+    if (!content || generating) return;
+
+    generating = true;
+    sendBtn.disabled = true;
+    inputEl.value = '';
+    inputEl.style.height = 'auto';
+
+    messages.push({ role: 'user', content });
+    addMessage('user', content);
+
+    const bodyEl = addMessage('assistant', '');
+    bodyEl.innerHTML = '<span class="thinking-text">Thinking</span>';
+
+    let assistantContent = '';
+    const maxTokens = parseInt(maxTokensEl.value) || 1024;
+
+    try {
+        const response = await fetch('/v1/chat/completions', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                messages,
+                stream: true,
+                max_tokens: maxTokens,
+                session_id: sessionId
+            })
+        });
+
+        if (!response.ok) {
+            const err = await response.json();
+            throw new Error(err.error?.message || `HTTP ${response.status}`);
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+
+            const lines = buffer.split('\n');
+            buffer = lines.pop();
+
+            for (const line of lines) {
+                if (!line.startsWith('data: ')) continue;
+                const data = line.slice(6).trim();
+                if (data === '[DONE]' || !data) continue;
+
+                try {
+                    const chunk = JSON.parse(data);
+                    if (chunk.error) {
+                        throw new Error(chunk.error.message || 'Generation error');
+                    }
+                    const delta = chunk.choices?.[0]?.delta;
+                    if (delta?.content) {
+                        assistantContent += delta.content;
+                        bodyEl.innerHTML = renderMarkdown(assistantContent);
+                        scrollToBottom();
+                    }
+                } catch (e) {
+                    if (e.message && !e.message.includes('JSON')) throw e;
+                }
+            }
+        }
+
+        messages.push({ role: 'assistant', content: assistantContent });
+
+    } catch (err) {
+        bodyEl.innerHTML = '<p style="color:#ef4444;">Error: ' +
+            err.message.replace(/</g, '&lt;') + '</p>';
+    }
+
+    generating = false;
+    sendBtn.disabled = false;
+    inputEl.focus();
+}
+
+function newChat() {
+    messages = [];
+    sessionId = Math.random().toString(36).substr(2) + Date.now().toString(36);
+    chatEl.innerHTML = `
+        <div class="welcome" id="welcome">
+            <div class="welcome-logo">Z</div>
+            <h2>ZedInfer</h2>
+            <p>A lightweight C++ inference engine. Type a message below to start chatting.</p>
+        </div>`;
+    inputEl.focus();
+}
+</script>
+</body>
+</html>
