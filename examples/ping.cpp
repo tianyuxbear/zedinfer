@@ -1,44 +1,76 @@
 #include "backend/device/device.hpp"
-#include "plog/Severity.h"
 #include "utils/logging.hpp"
 #include "utils/system_info.hpp"
 #include "zedinfer.h"
 #include "zedinfer/engine.hpp"
+#include "zedinfer/scheduler.hpp"
 #include "zedinfer/session.hpp"
 
+#include <argparse/argparse.hpp>
 #include <chrono>
+#include <iostream>
 #include <memory>
 #include <string>
 
-// For server1
-// static const std::string model_path = "/mnt/hdd0/shared/models/deepseek-ai/DeepSeek-R1-0528-Qwen3-8B";
-// For server2/server3
-// static const std::string model_path = "/mnt/hdd/shared/models/deepseek-ai/DeepSeek-R1-0528-Qwen3-8B";
-// For NVIDIA server
-static const std::string model_path = "/home/tianyux/data/models/DeepSeek-R1-Distill-Qwen-1.5B";
 using namespace zedinfer;
 
-int main() {
+int main(int argc, char *argv[]) {
     utils::initLoggerWithOverwrite(plog::verbose, "logs/ping.log");
     LOG_VERBOSE_(utils::BOTH) << utils::get_runtime_info();
 
-    auto start = std::chrono::high_resolution_clock::now();
+    argparse::ArgumentParser program("ZedInfer Ping");
 
-    device::Device device(ZEDINFER_DEVICE_NVIDIA, 0);
-    std::shared_ptr<InferenceEngine> engine = InferenceEngine::create(model_path, device);
+    program.add_argument("model_path")
+        .help("Path to the model directory");
 
-    auto end = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-    LOGI << "InferenceEngine::create took " << duration.count() << " ms\n";
+    program.add_argument("--nvidia")
+        .help("Use NVIDIA GPU backend")
+        .default_value(false)
+        .implicit_value(true);
+
+    program.add_argument("--gpu-memory-utilization")
+        .help("Fraction of GPU memory for KV cache (0.0-1.0)")
+        .default_value(0.9f)
+        .scan<'g', float>();
+
+    program.add_argument("--prompt")
+        .help("Prompt text for single-turn generation")
+        .default_value(std::string("Who are you?"));
+
+    try {
+        program.parse_args(argc, argv);
+    } catch (const std::exception &err) {
+        std::cerr << err.what() << std::endl;
+        std::cerr << program;
+        return 1;
+    }
+
+    auto model_path = program.get<std::string>("model_path");
+    bool use_nvidia = program.get<bool>("--nvidia");
+
+    zedinferDeviceType_t device_type =
+        use_nvidia ? ZEDINFER_DEVICE_NVIDIA : ZEDINFER_DEVICE_CPU;
+    device::Device device(device_type, 0);
+
+    SchedulerConfig sched_config;
+    sched_config.gpu_memory_utilization = program.get<float>("--gpu-memory-utilization");
+
+    auto t0 = std::chrono::high_resolution_clock::now();
+    auto engine = InferenceEngine::create(model_path, device, sched_config);
+    auto t1 = std::chrono::high_resolution_clock::now();
+    auto init_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+
+    printf("Engine initialized in %ld ms (%s)\n", init_ms, use_nvidia ? "NVIDIA" : "CPU");
 
     GenerationConfig gen_config;
-    gen_config.max_new_tokens = 16384;
+    gen_config.gen_mode = GenerationMode::PING;
+    gen_config.max_new_tokens = 512;
     gen_config.verbose = true;
     gen_config.print_stats = true;
 
-    std::string prompt = "Who are you?";
-
+    auto prompt = program.get<std::string>("--prompt");
     auto session = engine->create_session(gen_config);
-
     session->chat(prompt);
+
+    return 0;
 }

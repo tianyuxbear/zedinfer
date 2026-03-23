@@ -3,179 +3,126 @@
 #include "utils/system_info.hpp"
 #include "zedinfer.h"
 #include "zedinfer/engine.hpp"
+#include "zedinfer/scheduler.hpp"
 #include "zedinfer/session.hpp"
 
+#include <argparse/argparse.hpp>
+#include <algorithm>
 #include <cstdlib>
-#include <filesystem>
 #include <iostream>
+#include <memory>
 #include <readline/readline.h>
 #include <string>
 
-namespace fs = std::filesystem;
 using namespace zedinfer;
 
-std::string get_usage_message(const char *program_name) {
-    std::ostringstream oss;
-
-    oss << "\n";
-    oss << "📖 Usage:\n";
-    oss << "   " << program_name << " <model_path>\n";
-    oss << "\n";
-    oss << "📝 Arguments:\n";
-    oss << "   model_path     Path to the model directory\n";
-    oss << "                  • Supports absolute paths\n";
-    oss << "                  • Supports relative paths\n";
-    oss << "\n";
-    oss << "💡 Examples:\n";
-    oss << "   Relative path:\n";
-    oss << "     $ " << program_name << " ./models/llama-7b\n";
-    oss << "\n";
-    oss << "   Absolute path:\n";
-    oss << "     $ " << program_name << " /home/user/models/llama-7b\n";
-    oss << "\n";
-
-    return oss.str();
-}
-
-std::string get_welcome_message() {
-    std::ostringstream oss;
-
-    oss << "\n";
-    oss << "╔══════════════════════════════════════════════════════════════╗\n";
-    oss << "║                                                              ║\n";
-    oss << "║             🚀 Welcome to ZedInfer Inference Engine          ║\n";
-    oss << "║                                                              ║\n";
-    oss << "╚══════════════════════════════════════════════════════════════╝\n";
-    oss << "\n";
-    oss << "💬 Ready for conversation! Type your message and press Enter.\n";
-    oss << "\n";
-    oss << "📝 Commands:\n";
-    oss << "   exit, quit, q        Exit the program\n";
-    oss << "   reset, clear, cls    Clear conversation history\n";
-    oss << "   help                 Show this help message\n";
-    oss << "\n";
-
-    return oss.str();
+static void print_welcome() {
+    printf("\n");
+    printf("========================================\n");
+    printf("  ZedInfer Chat\n");
+    printf("========================================\n");
+    printf("\n");
+    printf("Commands:\n");
+    printf("  exit, quit, q      Exit\n");
+    printf("  reset, clear       Clear conversation\n");
+    printf("  help               Show this message\n");
+    printf("\n");
 }
 
 int main(int argc, char *argv[]) {
     utils::initLoggerWithOverwrite(plog::verbose, "logs/chat.log");
+    LOG_VERBOSE_(utils::BOTH) << utils::get_runtime_info();
 
-    // Validate argument count
-    if (argc != 2) {
-        PLOG_ERROR_(utils::BOTH) << "Error: Invalid number of arguments";
-        PLOG_VERBOSE_(utils::BOTH) << get_usage_message(argv[0]);
-        return 1;
-    }
+    argparse::ArgumentParser program("ZedInfer Chat");
 
-    PLOG_VERBOSE_(utils::BOTH) << utils::get_runtime_info();
+    program.add_argument("model_path")
+        .help("Path to the model directory");
 
-    // Parse and resolve model path
-    std::string model_path_arg = argv[1];
-    fs::path model_path_fs;
+    program.add_argument("--nvidia")
+        .help("Use NVIDIA GPU backend")
+        .default_value(false)
+        .implicit_value(true);
+
+    program.add_argument("--gpu-memory-utilization")
+        .help("Fraction of GPU memory for KV cache (0.0-1.0)")
+        .default_value(0.9f)
+        .scan<'g', float>();
+
+    program.add_argument("--max-tokens")
+        .help("Maximum tokens per response")
+        .default_value(16384)
+        .scan<'i', int>();
 
     try {
-        model_path_fs = fs::absolute(model_path_arg);
-    } catch (const fs::filesystem_error &e) {
-        PLOG_ERROR_(utils::BOTH) << "Error: Invalid path: " << e.what();
+        program.parse_args(argc, argv);
+    } catch (const std::exception &err) {
+        std::cerr << err.what() << std::endl;
+        std::cerr << program;
         return 1;
     }
 
-    // Validate model path exists
-    if (!fs::exists(model_path_fs)) {
-        PLOG_ERROR_(utils::BOTH) << "Error: Model path does not exist: " << model_path_fs;
-        return 1;
-    }
+    auto model_path = program.get<std::string>("model_path");
+    bool use_nvidia = program.get<bool>("--nvidia");
+    int max_tokens = program.get<int>("--max-tokens");
 
-    // Validate model path is directory
-    if (!fs::is_directory(model_path_fs)) {
-        PLOG_ERROR_(utils::BOTH) << "Error: Model path is not a directory: " << model_path_fs;
-        return 1;
-    }
+    zedinferDeviceType_t device_type =
+        use_nvidia ? ZEDINFER_DEVICE_NVIDIA : ZEDINFER_DEVICE_CPU;
+    device::Device device(device_type, 0);
 
-    std::string model_path = model_path_fs.string();
+    SchedulerConfig sched_config;
+    sched_config.gpu_memory_utilization = program.get<float>("--gpu-memory-utilization");
 
-    // Initialize inference engine
-    device::Device device(ZEDINFER_DEVICE_NVIDIA, 0);
-    std::shared_ptr<zedinfer::InferenceEngine>
-        engine = zedinfer::InferenceEngine::create(model_path, device);
+    auto engine = InferenceEngine::create(model_path, device, sched_config);
 
-    // Configure generation parameters
-    zedinfer::GenerationConfig gen_config;
-    gen_config.gen_mode = zedinfer::GenerationMode::CHAT;
-    gen_config.max_new_tokens = 16384;
+    GenerationConfig gen_config;
+    gen_config.gen_mode = GenerationMode::CHAT;
+    gen_config.max_new_tokens = max_tokens;
     gen_config.verbose = true;
     gen_config.print_stats = true;
     gen_config.stream = true;
     gen_config.stream_callback = [](const std::string &token_text) {
-        std::cout << token_text << std::flush; // Stream tokens in real-time
+        std::cout << token_text << std::flush;
     };
 
-    // Create chat session
     auto session = engine->create_session(gen_config);
 
-    PLOG_VERBOSE_(utils::BOTH) << get_welcome_message();
-
-    // Set UTF-8 locale for proper Chinese character handling
+    print_welcome();
     std::setlocale(LC_ALL, "en_US.UTF-8");
 
-    // Main conversation loop
-    std::string user_input;
     while (true) {
-        // Display user prompt with readline
-        char *input = readline("\n👨‍💻 \033[1;32mUser:\033[0m ");
+        char *input = readline("\n\033[1;32mUser:\033[0m ");
+        if (!input) break; // EOF (Ctrl+D)
 
-        if (!input) {
-            PLOGI << "Exiting..."; // Handle EOF (Ctrl+D)
-            break;
-        }
-
-        // Convert to std::string
         std::string user_input(input);
+        free(input);
 
-        // Trim whitespace
+        // Trim
         user_input.erase(0, user_input.find_first_not_of(" \t\n\r"));
         user_input.erase(user_input.find_last_not_of(" \t\n\r") + 1);
+        if (user_input.empty()) continue;
 
-        // Skip empty input
-        if (user_input.empty()) {
-            continue;
-        }
+        // Commands
+        std::string cmd = user_input;
+        std::transform(cmd.begin(), cmd.end(), cmd.begin(), ::tolower);
 
-        // Convert to lowercase for command comparison
-        std::string lower_input = user_input;
-        std::transform(lower_input.begin(), lower_input.end(),
-                       lower_input.begin(), ::tolower);
-
-        // Handle exit commands
-        if (lower_input == "exit" || lower_input == "quit" || lower_input == "q") {
-            PLOGI << "Exiting...";
-            break;
-        }
-
-        // Handle clear/reset commands
-        if (lower_input == "reset" || lower_input == "clear" || lower_input == "cls") {
+        if (cmd == "exit" || cmd == "quit" || cmd == "q") break;
+        if (cmd == "reset" || cmd == "clear" || cmd == "cls") {
             session->reset();
-            PLOG_VERBOSE_(utils::BOTH) << "✨ Chat history cleared.";
+            printf("Conversation cleared.\n");
             continue;
         }
+        if (cmd == "help") { print_welcome(); continue; }
 
-        // Handle help command
-        if (lower_input == "help") {
-            PLOG_VERBOSE_(utils::BOTH) << get_welcome_message();
-            continue;
-        }
-
-        // Process chat message
+        // Generate
         try {
-            std::cout << "🤖 \033[1;34mAssistant:\033[0m ";
+            std::cout << "\033[1;34mAssistant:\033[0m ";
             session->chat(user_input);
             std::cout << "\n";
         } catch (const std::exception &e) {
-            PLOG_ERROR_(utils::BOTH) << "Error: " << e.what();
+            std::cerr << "Error: " << e.what() << std::endl;
         }
     }
 
-    PLOG_VERBOSE_(utils::BOTH) << "\n👋 Goodbye! Thanks for using ZedInfer.";
+    printf("\nGoodbye!\n");
     return 0;
 }
