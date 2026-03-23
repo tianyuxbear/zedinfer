@@ -900,66 +900,61 @@ Scheduler falls back to `run_one()` (single-request mode).
 
 ---
 
-## PR-10: HTTP / OpenAPI Server
+## PR-10: HTTP / OpenAPI Server ✅ COMPLETED
 
 ### Objective
 
-Add an HTTP server with OpenAI-compatible endpoints. Wire to scheduler for
-request submission. Support SSE streaming.
+Add an OpenAI-compatible HTTP server with SSE streaming, stateful sessions
+with KV cache reuse, and an embedded web chat UI.
+
+> **Full design doc:** `docs/design/http_api_design.md`
+
+### Implementation Summary
+
+**Stateful sessions:** Server-side `InferenceSession` per `session_id` reuses
+KV cache across conversation turns. Only new user messages are prefilled (not
+the full history). Automatic fallback to full prefill if session expired.
+
+**Endpoints:** `POST /v1/chat/completions` (streaming + non-streaming),
+`GET /v1/models`, `GET /health`, `DELETE /v1/sessions/:id`, `GET /` (web UI).
+
+**Key features:**
+- SSE streaming with UTF-8 safe token buffering
+- Session management: idle timeout (30min), LRU eviction, busy flag, explicit deletion
+- Error recovery: `abort_turn()` syncs session state after failed generation
+- Request cancellation: `cancelled` flag checked each decode step, `on_close` callback
+- Web UI: localStorage persistence, conversation history, stop button, markdown rendering
+- Request/response logging to both console and file
 
 ### Affected Files
 
 | Action | File |
 |--------|------|
-| New | `include/zedinfer/http_server.hpp` |
-| New | `src/zedinfer/http_server.cpp` |
-| New | `include/zedinfer/api_types.hpp` — OpenAI-compatible JSON types |
-| New | `examples/serve.cpp` — HTTP serving entry point |
-| Add dep | `third_party/include/httplib.h` (cpp-httplib, header-only, MIT) or xmake package |
-| Modify | `xmake/examples.lua` — new `serve` target |
-
-### Interfaces Added / Changed / Removed
-
-**Added:**
-
-```cpp
-struct ServerConfig { std::string host; int port; int max_connections; int request_timeout_ms; };
-
-class HttpServer {
-    HttpServer(ServerConfig, std::shared_ptr<Scheduler>, std::shared_ptr<InferenceEngine>);
-    void start();
-    void stop();
-};
-```
-
-Endpoints: `POST /v1/chat/completions`, `GET /v1/models`, `GET /health`.
+| New | `include/zedinfer/http_server.hpp` — `ServerConfig`, `HttpServer`, `SessionLock` |
+| New | `src/zedinfer/http_server.cpp` — all handlers, session management, SSE |
+| New | `examples/serve.cpp` — HTTP entry point with CLI args |
+| New | `web/index.html` — single-page chat UI |
+| New | `web/images/*.svg` — favicon, logo, avatars |
+| New | `third_party/cpp-httplib-0.38.0/httplib.h` — HTTP library (vendored) |
+| Modify | `include/zedinfer/chat_template.hpp` — `apply()`, system role |
+| Modify | `include/zedinfer/session.hpp` — `prepare_prompt()`, `complete_turn()`, `abort_turn()` |
+| Modify | `include/zedinfer/request.hpp` — `cancelled` flag |
+| Modify | `include/zedinfer/engine.hpp` — `model_name()`, `SchedulerConfig` param, count accessors |
+| Modify | `include/zedinfer/serving_loop.hpp` — `SchedulerConfig` param, `fail_batch()`, count accessors |
+| Modify | `include/zedinfer/scheduler.hpp` — `cleanup_failed_requests()` |
+| Modify | `src/zedinfer/scheduler.cpp` — cancellation check in process_results |
+| Modify | `xmake.lua` — cpp-httplib include path |
+| Modify | `xmake/examples.lua` — `serve` target |
 
 ### Dependency
 
 PR-9 (scheduler with batching).
 
-### Correctness Tests
+### Known Limitations
 
-- Unit test: parse request JSON -> `InferenceRequest` -> format response JSON.
-- Integration: `curl` against running server, verify response structure.
-- Streaming: verify SSE chunks, `[DONE]` terminator.
-
-### Regression Tests
-
-`bench`, `chat`, `ping` unaffected.
-
-### Benchmarks
-
-HTTP load test with `wrk` or `hey`: 10 concurrent connections, 64-token responses.
-
-### Risks
-
-- cpp-httplib's thread-per-connection model may bottleneck at high concurrency.
-  Acceptable for initial deployment; can switch to async library later.
-
-### Rollback
-
-Delete `serve` target. No other code depends on it.
+- No per-request sampling parameters (temperature/top_k/top_p) — requires scheduler architecture change
+- No prefix caching across sessions — future work
+- No CORS headers — same-origin only
 
 ---
 

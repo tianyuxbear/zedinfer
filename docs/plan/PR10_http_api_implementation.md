@@ -1,6 +1,8 @@
 # PR10: HTTP API Server — Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **HISTORICAL DOCUMENT.** This was the step-by-step implementation plan used during development.
+> The implementation evolved beyond this plan (added stateful sessions, error recovery, cancellation, web UI persistence).
+> For the current design, see `docs/design/http_api_design.md`.
 
 **Goal:** Add an OpenAI-compatible HTTP server with SSE streaming and embedded web chat UI to zedinfer inference engine.
 
