@@ -3,6 +3,7 @@
 #include "zedinfer/generation_types.hpp"
 #include "backend/kvcache/block_pool.hpp"
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <functional>
@@ -60,6 +61,7 @@ struct InferenceRequest {
     kvcache::SequenceBlockTable block_table;          // owned block table (batch mode)
     kvcache::SequenceBlockTable *block_table_ref = nullptr; // borrowed block table (session mode)
     std::promise<GenerationResult> result_promise;    // async result delivery
+    std::shared_ptr<std::atomic<bool>> cancelled;     // set by HTTP handler on client disconnect
 
     // Access the active block table (borrowed if set, otherwise owned)
     kvcache::SequenceBlockTable &active_block_table() {

@@ -263,6 +263,16 @@ body {
 }
 .input-box .send-btn:hover { background: var(--accent-hover); }
 .input-box .send-btn:disabled { background: #d1d5db; cursor: not-allowed; }
+.input-box .stop-btn {
+    width: 36px; height: 36px;
+    background: #ef4444;
+    border: none; border-radius: 8px;
+    color: white; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0; margin-left: 8px;
+    font-size: 16px;
+}
+.input-box .stop-btn:hover { background: #dc2626; }
 .input-box .send-btn svg { width: 18px; height: 18px; }
 .input-hint {
     text-align: center;
@@ -274,51 +284,86 @@ body {
     margin-right: auto;
 }
 
-/* ===== Settings Drawer ===== */
-.settings-toggle {
-    cursor: pointer;
-    padding: 6px;
-    border-radius: 6px;
-    transition: background 0.15s;
-    display: flex;
-    align-items: center;
-    color: var(--text-secondary);
-}
-.settings-toggle:hover { background: var(--bg-hover); }
-.settings-panel {
-    padding: 0 16px;
-}
-.settings-panel h3 {
+/* ===== Sidebar Sections ===== */
+.sidebar-section { padding: 0 12px; }
+.sidebar-section h3 {
     font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.5px;
     color: var(--text-light);
-    margin: 16px 0 10px;
+    margin: 14px 4px 8px;
 }
 .setting-row {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    margin-bottom: 10px;
+    margin-bottom: 8px;
+    padding: 0 4px;
 }
-.setting-row label {
+.setting-row label { font-size: 13px; color: var(--text-secondary); }
+.setting-row input[type="number"] {
+    width: 80px; padding: 4px 8px;
+    border: 1px solid var(--border); border-radius: 6px;
+    font-size: 13px; color: var(--text); text-align: right;
+    outline: none; font-family: var(--font-mono);
+}
+.setting-row input[type="number"]:focus { border-color: var(--input-focus); }
+
+/* History list */
+.history-list { list-style: none; }
+.history-item {
+    padding: 8px 10px;
+    border-radius: 6px;
+    cursor: pointer;
     font-size: 13px;
     color: var(--text-secondary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    transition: background 0.15s;
+    display: flex;
+    align-items: center;
+    gap: 6px;
 }
-.setting-row input[type="number"] {
-    width: 80px;
-    padding: 4px 8px;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    font-size: 13px;
-    color: var(--text);
-    text-align: right;
-    outline: none;
-    font-family: var(--font-mono);
+.history-item:hover { background: var(--bg-hover); }
+.history-item.active { background: var(--bg-hover); color: var(--text); font-weight: 500; }
+.history-item .delete-btn {
+    margin-left: auto;
+    opacity: 0;
+    color: var(--text-light);
+    border: none;
+    background: none;
+    cursor: pointer;
+    font-size: 14px;
+    padding: 0 2px;
+    flex-shrink: 0;
 }
-.setting-row input[type="number"]:focus {
-    border-color: var(--input-focus);
+.history-item:hover .delete-btn { opacity: 0.6; }
+.history-item .delete-btn:hover { opacity: 1; color: var(--accent); }
+.history-item .rename-input {
+    flex: 1; min-width: 0;
+    border: 1px solid var(--input-focus); border-radius: 4px;
+    padding: 2px 6px; font-size: 13px; color: var(--text);
+    outline: none; background: var(--bg);
 }
+.msg-content h1, .msg-content h2, .msg-content h3 { margin: 12px 0 6px; font-weight: 600; }
+.msg-content h1 { font-size: 1.4em; }
+.msg-content h2 { font-size: 1.2em; }
+.msg-content h3 { font-size: 1.1em; }
+.msg-content a { color: var(--accent); text-decoration: none; }
+.msg-content a:hover { text-decoration: underline; }
+.msg-content table { border-collapse: collapse; margin: 8px 0; width: 100%; }
+.msg-content th, .msg-content td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; font-size: 14px; }
+.msg-content th { background: var(--bg-secondary); font-weight: 600; }
+.msg-content pre { position: relative; }
+.msg-content .copy-btn {
+    position: absolute; top: 6px; right: 6px;
+    background: var(--border); border: none; border-radius: 4px;
+    padding: 3px 8px; font-size: 11px; cursor: pointer; color: var(--text-secondary);
+    opacity: 0; transition: opacity 0.15s;
+}
+.msg-content pre:hover .copy-btn { opacity: 1; }
+.msg-content .copy-btn:hover { background: var(--text-light); color: white; }
 
 /* ===== Responsive ===== */
 @media (max-width: 768px) {
@@ -336,15 +381,21 @@ body {
         <button onclick="newChat()">New Chat</button>
     </div>
     <div class="sidebar-info">
-        <div class="info-item">
-            <span class="info-label">Model</span><br>
-            <span id="model-name">loading...</span>
+        <div class="sidebar-section">
+            <h3>History</h3>
+            <ul class="history-list" id="history-list"></ul>
         </div>
-        <div class="settings-panel">
+        <div class="sidebar-section">
             <h3>Settings</h3>
             <div class="setting-row">
                 <label>Max tokens</label>
                 <input type="number" id="max-tokens" value="1024" min="64" max="8192" step="64">
+            </div>
+        </div>
+        <div class="sidebar-section">
+            <div class="info-item" style="margin-top:8px">
+                <span class="info-label">Model</span><br>
+                <span id="model-name">loading...</span>
             </div>
         </div>
     </div>
@@ -373,207 +424,323 @@ body {
                     <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
                 </svg>
             </button>
+            <button class="stop-btn" id="stop-btn" onclick="stopGeneration()" style="display:none">&#9632;</button>
         </div>
         <div class="input-hint">Enter to send, Shift+Enter for new line</div>
     </div>
 </div>
 
 <script>
+// ===== State =====
 let messages = [];
 let generating = false;
-let sessionId = Math.random().toString(36).substr(2) + Date.now().toString(36);
+let sessionId = '';
+let currentConvId = '';
+let abortCtrl = null; // AbortController for stopping generation
+const STORAGE = 'zedinfer_state';
+const WELCOME_HTML = `<div class="welcome" id="welcome">
+    <div class="welcome-logo"><img src="/images/zedinfer.svg" alt="ZedInfer"></div>
+    <p>A lightweight C++ inference engine. Type a message below to start chatting.</p>
+</div>`;
 
 const chatEl = document.getElementById('chat');
 const chatScroll = document.getElementById('chat-scroll');
 const inputEl = document.getElementById('input');
 const sendBtn = document.getElementById('send-btn');
+const stopBtn = document.getElementById('stop-btn');
 const modelNameEl = document.getElementById('model-name');
 const maxTokensEl = document.getElementById('max-tokens');
+const historyListEl = document.getElementById('history-list');
 
-// Fetch model name
+// ===== Persistence =====
+function genId() { return Math.random().toString(36).substr(2,9) + Date.now().toString(36); }
+function loadStore() { try { return JSON.parse(localStorage.getItem(STORAGE)) || {}; } catch { return {}; } }
+function saveStore(s) { localStorage.setItem(STORAGE, JSON.stringify(s)); }
+
+function saveCurrent() {
+    const s = loadStore();
+    s.current = messages.length > 0 ? { convId: currentConvId, sessionId, messages } : null;
+    saveStore(s);
+}
+
+function saveToHistory() {
+    if (messages.length === 0) return;
+    const s = loadStore();
+    if (!s.history) s.history = [];
+    const title = (messages.find(m => m.role === 'user')?.content || 'Untitled').substring(0, 60);
+    s.history = s.history.filter(h => h.convId !== currentConvId);
+    s.history.unshift({ convId: currentConvId, sessionId, title, messages, ts: Date.now() });
+    s.history = s.history.slice(0, 50);
+    saveStore(s);
+}
+
+function renameHistory(convId, newTitle) {
+    const s = loadStore();
+    const entry = (s.history || []).find(h => h.convId === convId);
+    if (entry) { entry.title = newTitle.substring(0, 60); saveStore(s); }
+    renderHistory();
+}
+
+function deleteHistory(convId) {
+    const s = loadStore();
+    if (!s.history) return;
+    const entry = s.history.find(h => h.convId === convId);
+    s.history = s.history.filter(h => h.convId !== convId);
+    saveStore(s);
+    if (entry?.sessionId) fetch('/v1/sessions/' + entry.sessionId, { method: 'DELETE' }).catch(() => {});
+    renderHistory();
+}
+
+// ===== History Sidebar =====
+function renderHistory() {
+    const s = loadStore();
+    historyListEl.innerHTML = '';
+    for (const h of (s.history || [])) {
+        const li = document.createElement('li');
+        li.className = 'history-item' + (h.convId === currentConvId ? ' active' : '');
+        li.title = h.title;
+
+        const span = document.createElement('span');
+        span.textContent = h.title;
+        span.style.cssText = 'overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0';
+
+        // Double-click to rename
+        span.ondblclick = (e) => {
+            e.stopPropagation();
+            const input = document.createElement('input');
+            input.className = 'rename-input';
+            input.value = h.title;
+            input.onclick = e => e.stopPropagation();
+            input.onkeydown = e => {
+                if (e.key === 'Enter') { renameHistory(h.convId, input.value.trim() || h.title); }
+                if (e.key === 'Escape') { renderHistory(); }
+            };
+            input.onblur = () => renameHistory(h.convId, input.value.trim() || h.title);
+            span.replaceWith(input);
+            input.focus();
+            input.select();
+        };
+
+        const del = document.createElement('button');
+        del.className = 'delete-btn';
+        del.textContent = '\u00d7';
+        del.onclick = e => { e.stopPropagation(); deleteHistory(h.convId); };
+
+        li.appendChild(span);
+        li.appendChild(del);
+        li.onclick = () => switchTo(h.convId);
+        historyListEl.appendChild(li);
+    }
+}
+
+function switchTo(convId) {
+    if (generating || convId === currentConvId) return;
+    saveToHistory();
+    const s = loadStore();
+    const entry = (s.history || []).find(h => h.convId === convId);
+    if (!entry) return;
+    currentConvId = entry.convId;
+    sessionId = entry.sessionId;
+    messages = [...entry.messages];
+    chatEl.innerHTML = '';
+    for (const m of messages) addMessage(m.role, m.content);
+    saveCurrent();
+    renderHistory();
+    inputEl.focus();
+}
+
+// ===== Init =====
 fetch('/v1/models')
     .then(r => r.json())
     .then(d => { if (d.data?.[0]) modelNameEl.textContent = d.data[0].id; })
     .catch(() => { modelNameEl.textContent = 'unknown'; });
 
-// Auto-resize textarea
+(function init() {
+    const s = loadStore();
+    if (s.current?.messages?.length > 0) {
+        currentConvId = s.current.convId;
+        sessionId = s.current.sessionId;
+        messages = s.current.messages;
+        chatEl.innerHTML = '';
+        for (const m of messages) addMessage(m.role, m.content);
+    } else {
+        currentConvId = genId();
+        sessionId = genId();
+    }
+    renderHistory();
+})();
+
+// ===== UI Helpers =====
 inputEl.addEventListener('input', function() {
     this.style.height = 'auto';
     this.style.height = Math.min(this.scrollHeight, 200) + 'px';
 });
-
-// Enter to send
 inputEl.addEventListener('keydown', function(e) {
-    if (e.key === 'Enter' && !e.shiftKey) {
-        e.preventDefault();
-        if (!generating) sendMessage();
-    }
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (!generating) sendMessage(); }
 });
 
-function scrollToBottom() {
-    chatScroll.scrollTop = chatScroll.scrollHeight;
+function scrollToBottom() { chatScroll.scrollTop = chatScroll.scrollHeight; }
+
+function setGenerating(v) {
+    generating = v;
+    sendBtn.style.display = v ? 'none' : 'flex';
+    stopBtn.style.display = v ? 'flex' : 'none';
+    sendBtn.disabled = v;
 }
 
+// ===== Markdown Renderer =====
 function renderMarkdown(text) {
-    let html = text
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;');
+    let h = text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 
-    // Fenced code blocks
-    html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) =>
-        '<pre><code>' + code.trimEnd() + '</code></pre>');
-
-    // Inline code
-    html = html.replace(/`([^`\n]+)`/g, '<code>$1</code>');
-
-    // Bold
-    html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-
-    // Italic
-    html = html.replace(/(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g, '<em>$1</em>');
-
-    // Unordered lists (lines starting with - or *)
-    html = html.replace(/(^|\n)([-*] .+(\n[-*] .+)*)/g, (_, pre, list) => {
-        const items = list.split('\n').map(l => '<li>' + l.replace(/^[-*] /, '') + '</li>').join('');
-        return pre + '<ul>' + items + '</ul>';
+    // Code blocks with copy button
+    h = h.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) => {
+        const escaped = code.trimEnd();
+        const id = 'cb' + Math.random().toString(36).substr(2,6);
+        return `<pre><button class="copy-btn" onclick="copyCode('${id}')">Copy</button><code id="${id}">${escaped}</code></pre>`;
     });
 
+    // Inline code
+    h = h.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+
+    // Tables: | h1 | h2 |\n|---|---|\n| c1 | c2 |
+    h = h.replace(/((?:^|\n)\|.+\|(?:\n\|[-: |]+\|)(?:\n\|.+\|)+)/g, (_, table) => {
+        const rows = table.trim().split('\n').filter(r => r.trim());
+        if (rows.length < 2) return table;
+        const hdr = rows[0].split('|').filter(c => c.trim()).map(c => `<th>${c.trim()}</th>`).join('');
+        let body = '';
+        for (let i = 2; i < rows.length; i++) {
+            const cells = rows[i].split('|').filter(c => c.trim()).map(c => `<td>${c.trim()}</td>`).join('');
+            body += `<tr>${cells}</tr>`;
+        }
+        return `<table><thead><tr>${hdr}</tr></thead><tbody>${body}</tbody></table>`;
+    });
+
+    // Headers
+    h = h.replace(/(^|\n)### (.+)/g, '$1<h3>$2</h3>');
+    h = h.replace(/(^|\n)## (.+)/g, '$1<h2>$2</h2>');
+    h = h.replace(/(^|\n)# (.+)/g, '$1<h1>$2</h1>');
+
+    // Bold + Italic
+    h = h.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+    h = h.replace(/(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g, '<em>$1</em>');
+
+    // Links: [text](url)
+    h = h.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+
+    // Unordered lists
+    h = h.replace(/(^|\n)([-*] .+(\n[-*] .+)*)/g, (_,p,list) => {
+        return p+'<ul>'+list.split('\n').map(l=>'<li>'+l.replace(/^[-*] /,'')+'</li>').join('')+'</ul>';
+    });
     // Ordered lists
-    html = html.replace(/(^|\n)(\d+\. .+(\n\d+\. .+)*)/g, (_, pre, list) => {
-        const items = list.split('\n').map(l => '<li>' + l.replace(/^\d+\. /, '') + '</li>').join('');
-        return pre + '<ol>' + items + '</ol>';
+    h = h.replace(/(^|\n)(\d+\. .+(\n\d+\. .+)*)/g, (_,p,list) => {
+        return p+'<ol>'+list.split('\n').map(l=>'<li>'+l.replace(/^\d+\. /,'')+'</li>').join('')+'</ol>';
     });
 
     // Paragraphs
-    html = html.replace(/\n{2,}/g, '</p><p>');
-    html = html.replace(/\n/g, '<br>');
+    h = h.replace(/\n{2,}/g, '</p><p>').replace(/\n/g, '<br>');
+    return '<p>' + h + '</p>';
+}
 
-    return '<p>' + html + '</p>';
+function copyCode(id) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    navigator.clipboard.writeText(el.textContent).then(() => {
+        const btn = el.parentElement.querySelector('.copy-btn');
+        if (btn) { btn.textContent = 'Copied!'; setTimeout(() => btn.textContent = 'Copy', 1500); }
+    });
 }
 
 function addMessage(role, content) {
-    const welcome = document.getElementById('welcome');
-    if (welcome) welcome.remove();
-
-    const row = document.createElement('div');
-    row.className = 'msg-row';
-
-    const inner = document.createElement('div');
-    inner.className = 'msg-inner';
-
-    const avatar = document.createElement('div');
-    avatar.className = 'msg-avatar ' + role;
-    const avatarImg = document.createElement('img');
-    avatarImg.src = role === 'user' ? '/images/user.svg' : '/images/bot.svg';
-    avatarImg.alt = role;
-    avatar.appendChild(avatarImg);
-
-    const body = document.createElement('div');
-    body.className = 'msg-content';
-    if (content) {
-        body.innerHTML = renderMarkdown(content);
-    }
-
-    inner.appendChild(avatar);
-    inner.appendChild(body);
-    row.appendChild(inner);
-    chatEl.appendChild(row);
+    const w = document.getElementById('welcome'); if (w) w.remove();
+    const row = document.createElement('div'); row.className = 'msg-row';
+    const inner = document.createElement('div'); inner.className = 'msg-inner';
+    const av = document.createElement('div'); av.className = 'msg-avatar '+role;
+    const img = document.createElement('img');
+    img.src = role==='user' ? '/images/user.svg' : '/images/bot.svg'; img.alt = role;
+    av.appendChild(img);
+    const body = document.createElement('div'); body.className = 'msg-content';
+    if (content) body.innerHTML = renderMarkdown(content);
+    inner.appendChild(av); inner.appendChild(body);
+    row.appendChild(inner); chatEl.appendChild(row);
     scrollToBottom();
     return body;
 }
 
+// ===== Stop Generation =====
+function stopGeneration() {
+    if (abortCtrl) { abortCtrl.abort(); abortCtrl = null; }
+}
+
+// ===== Send Message =====
 async function sendMessage() {
     const content = inputEl.value.trim();
     if (!content || generating) return;
-
-    generating = true;
-    sendBtn.disabled = true;
-    inputEl.value = '';
-    inputEl.style.height = 'auto';
+    setGenerating(true);
+    inputEl.value = ''; inputEl.style.height = 'auto';
 
     messages.push({ role: 'user', content });
     addMessage('user', content);
+    saveCurrent();
 
     const bodyEl = addMessage('assistant', '');
     bodyEl.innerHTML = '<span class="thinking-text">Thinking</span>';
-
-    let assistantContent = '';
+    let out = '';
     const maxTokens = parseInt(maxTokensEl.value) || 1024;
 
+    abortCtrl = new AbortController();
+
     try {
-        const response = await fetch('/v1/chat/completions', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                messages,
-                stream: true,
-                max_tokens: maxTokens,
-                session_id: sessionId
-            })
+        const resp = await fetch('/v1/chat/completions', {
+            method: 'POST', headers: {'Content-Type':'application/json'},
+            body: JSON.stringify({ messages, stream:true, max_tokens:maxTokens, session_id:sessionId }),
+            signal: abortCtrl.signal
         });
+        if (!resp.ok) { const e = await resp.json(); throw new Error(e.error?.message || `HTTP ${resp.status}`); }
 
-        if (!response.ok) {
-            const err = await response.json();
-            throw new Error(err.error?.message || `HTTP ${response.status}`);
-        }
-
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = '';
-
+        const reader = resp.body.getReader();
+        const dec = new TextDecoder();
+        let buf = '';
         while (true) {
             const { done, value } = await reader.read();
             if (done) break;
-
-            buffer += decoder.decode(value, { stream: true });
-
-            const lines = buffer.split('\n');
-            buffer = lines.pop();
-
+            buf += dec.decode(value, { stream: true });
+            const lines = buf.split('\n'); buf = lines.pop();
             for (const line of lines) {
                 if (!line.startsWith('data: ')) continue;
-                const data = line.slice(6).trim();
-                if (data === '[DONE]' || !data) continue;
-
+                const d = line.slice(6).trim();
+                if (d === '[DONE]' || !d) continue;
                 try {
-                    const chunk = JSON.parse(data);
-                    if (chunk.error) {
-                        throw new Error(chunk.error.message || 'Generation error');
-                    }
-                    const delta = chunk.choices?.[0]?.delta;
-                    if (delta?.content) {
-                        assistantContent += delta.content;
-                        bodyEl.innerHTML = renderMarkdown(assistantContent);
-                        scrollToBottom();
-                    }
-                } catch (e) {
-                    if (e.message && !e.message.includes('JSON')) throw e;
-                }
+                    const c = JSON.parse(d);
+                    if (c.error) throw new Error(c.error.message || 'Generation error');
+                    const t = c.choices?.[0]?.delta?.content;
+                    if (t) { out += t; bodyEl.innerHTML = renderMarkdown(out); scrollToBottom(); }
+                } catch (e) { if (e.message && !e.message.includes('JSON')) throw e; }
             }
         }
-
-        messages.push({ role: 'assistant', content: assistantContent });
-
+        messages.push({ role: 'assistant', content: out });
     } catch (err) {
-        bodyEl.innerHTML = '<p style="color:#ef4444;">Error: ' +
-            err.message.replace(/</g, '&lt;') + '</p>';
+        if (err.name === 'AbortError') {
+            // User clicked stop — keep partial output
+            if (out) messages.push({ role: 'assistant', content: out });
+        } else {
+            bodyEl.innerHTML = '<p style="color:#ef4444;">Error: '+err.message.replace(/</g,'&lt;')+'</p>';
+        }
     }
 
-    generating = false;
-    sendBtn.disabled = false;
+    abortCtrl = null;
+    saveCurrent(); saveToHistory(); renderHistory();
+    setGenerating(false);
     inputEl.focus();
 }
 
+// ===== New Chat =====
 function newChat() {
-    messages = [];
-    sessionId = Math.random().toString(36).substr(2) + Date.now().toString(36);
-    chatEl.innerHTML = `
-        <div class="welcome" id="welcome">
-            <div class="welcome-logo"><img src="/images/zedinfer.svg" alt="ZedInfer"></div>
-            <h2>ZedInfer</h2>
-            <p>A lightweight C++ inference engine. Type a message below to start chatting.</p>
-        </div>`;
+    if (generating) return;
+    saveToHistory();
+    if (sessionId) fetch('/v1/sessions/'+sessionId, { method:'DELETE' }).catch(()=>{});
+    messages = []; currentConvId = genId(); sessionId = genId();
+    saveCurrent(); renderHistory();
+    chatEl.innerHTML = WELCOME_HTML;
     inputEl.focus();
 }
 </script>
