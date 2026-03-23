@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" href="/images/favicon.svg" type="image/svg+xml">
 <title>ZedInfer</title>
 <style>
 *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
@@ -120,12 +121,11 @@ body {
     text-align: center;
 }
 .welcome-logo {
-    width: 48px; height: 48px;
-    background: var(--accent);
-    border-radius: 50%;
-    display: flex; align-items: center; justify-content: center;
-    margin-bottom: 20px;
-    font-size: 24px; color: white; font-weight: 700;
+    margin-bottom: 16px;
+}
+.welcome-logo img {
+    width: 60%;
+    height: auto;
 }
 .welcome h2 {
     font-size: 22px;
@@ -153,12 +153,13 @@ body {
 .msg-avatar {
     width: 32px; height: 32px;
     border-radius: 4px;
-    display: flex; align-items: center; justify-content: center;
-    font-size: 13px; font-weight: 600; color: white;
     flex-shrink: 0;
+    overflow: hidden;
 }
-.msg-avatar.user { background: #5c6bc0; }
-.msg-avatar.assistant { background: var(--accent); }
+.msg-avatar img {
+    width: 100%; height: 100%;
+    object-fit: cover;
+}
 .msg-content {
     flex: 1;
     min-width: 0;
@@ -357,8 +358,7 @@ body {
     <div class="chat-scroll" id="chat-scroll">
         <div class="chat-messages" id="chat">
             <div class="welcome" id="welcome">
-                <div class="welcome-logo">Z</div>
-                <h2>ZedInfer</h2>
+                <div class="welcome-logo"><img src="/images/zedinfer.svg" alt="ZedInfer"></div>
                 <p>A lightweight C++ inference engine. Type a message below to start chatting.</p>
             </div>
         </div>
@@ -464,7 +464,10 @@ function addMessage(role, content) {
 
     const avatar = document.createElement('div');
     avatar.className = 'msg-avatar ' + role;
-    avatar.textContent = role === 'user' ? 'U' : 'Z';
+    const avatarImg = document.createElement('img');
+    avatarImg.src = role === 'user' ? '/images/user.svg' : '/images/bot.svg';
+    avatarImg.alt = role;
+    avatar.appendChild(avatarImg);
 
     const body = document.createElement('div');
     body.className = 'msg-content';
@@ -567,7 +570,7 @@ function newChat() {
     sessionId = Math.random().toString(36).substr(2) + Date.now().toString(36);
     chatEl.innerHTML = `
         <div class="welcome" id="welcome">
-            <div class="welcome-logo">Z</div>
+            <div class="welcome-logo"><img src="/images/zedinfer.svg" alt="ZedInfer"></div>
             <h2>ZedInfer</h2>
             <p>A lightweight C++ inference engine. Type a message below to start chatting.</p>
         </div>`;

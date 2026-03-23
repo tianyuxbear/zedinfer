@@ -220,6 +220,38 @@ HttpServer::HttpServer(ServerConfig config, std::shared_ptr<InferenceEngine> eng
         [this](const httplib::Request &, httplib::Response &res) {
             res.set_content(web_ui_html_, "text/html");
         });
+
+    // Serve static files (images, etc.) from web/ directory
+    server_.Get("/images/(.*)", [](const httplib::Request &req, httplib::Response &res) {
+        std::string filename = req.matches[1];
+        // Prevent directory traversal
+        if (filename.find("..") != std::string::npos) {
+            res.status = 403;
+            return;
+        }
+        std::vector<std::string> search_paths = {
+            "web/images/" + filename,
+            "../web/images/" + filename,
+        };
+        for (const auto &path : search_paths) {
+            if (fs::exists(path)) {
+                std::ifstream file(path, std::ios::binary);
+                if (file.is_open()) {
+                    std::ostringstream ss;
+                    ss << file.rdbuf();
+                    // Determine content type
+                    std::string content_type = "application/octet-stream";
+                    if (filename.size() > 4 && filename.substr(filename.size() - 4) == ".svg")
+                        content_type = "image/svg+xml";
+                    else if (filename.size() > 4 && filename.substr(filename.size() - 4) == ".png")
+                        content_type = "image/png";
+                    res.set_content(ss.str(), content_type);
+                    return;
+                }
+            }
+        }
+        res.status = 404;
+    });
 }
 
 void HttpServer::start() {

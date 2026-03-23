@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="64" height="64">
+  <defs>
+    <radialGradient id="botGlow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#4158D0" stop-opacity="0.2"/>
+      <stop offset="100%" stop-color="#C850C0" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <style>
+    .bot-float { animation: floatBot 3.5s ease-in-out infinite; }
+    .bot-blink { animation: blinkBot 4.5s infinite; transform-origin: 50px 54px; }
+    .bot-antenna { animation: glowBot 1.5s alternate infinite ease-in-out; }
+    @keyframes floatBot { 
+      0%, 100% { transform: translateY(0px); } 
+      50% { transform: translateY(-5px); } 
+    }
+    @keyframes blinkBot { 
+      0%, 92%, 100% { transform: scaleY(1); } 
+      96% { transform: scaleY(0.1); } 
+    }
+    @keyframes glowBot { 
+      0% { fill: #FFCC70; filter: drop-shadow(0 0 2px #FFCC70); } 
+      100% { fill: #FFF2D1; filter: drop-shadow(0 0 8px #FFD700); } 
+    }
+  </style>
+
+  <circle cx="50" cy="50" r="50" fill="url(#botGlow)" />
+
+  <g class="bot-float">
+    <rect x="48" y="16" width="4" height="16" fill="#A0ABC0" rx="2" />
+    <circle cx="50" cy="14" r="5" class="bot-antenna" />
+    
+    <rect x="18" y="44" width="10" height="22" fill="#718096" rx="4" />
+    <rect x="72" y="44" width="10" height="22" fill="#718096" rx="4" />
+    <circle cx="18" cy="55" r="4" fill="#4A5568" />
+    <circle cx="82" cy="55" r="4" fill="#4A5568" />
+    
+    <rect x="22" y="28" width="56" height="48" rx="18" fill="#FFFFFF" stroke="#E2E8F0" stroke-width="2" />
+    
+    <rect x="28" y="36" width="44" height="32" rx="10" fill="#1A202C" />
+    <path d="M 30 38 Q 50 42 70 38 L 70 42 Q 50 46 30 42 Z" fill="#FFFFFF" opacity="0.05" />
+    
+    <circle cx="34" cy="58" r="4" fill="#ED64A6" opacity="0.7" />
+    <circle cx="66" cy="58" r="4" fill="#ED64A6" opacity="0.7" />
+    
+    <g class="bot-blink">
+      <rect x="34" y="45" width="8" height="9" rx="4" fill="#00E5FF" />
+      <rect x="58" y="45" width="8" height="9" rx="4" fill="#00E5FF" />
+    </g>
+    
+    <path d="M 44 60 Q 50 65 56 60" fill="none" stroke="#00E5FF" stroke-width="3" stroke-linecap="round" />
+  </g>
+</svg>
