@@ -84,6 +84,17 @@ static void dispatch_paged_decode(const AttentionParams &p) {
 static void dispatch_paged_decode_batched(const AttentionParams &p) {
     auto &c = p.config;
 
+    if (c.device_type == ZEDINFER_DEVICE_CPU) {
+        return cpu::paged_attention_decode_batched(
+            p.out->data(), p.q->data(),
+            reinterpret_cast<const std::byte *>(p.pool_base),
+            p.batched_k_block_tables, p.batched_v_block_tables,
+            p.batched_seq_lens,
+            p.num_requests, p.max_blocks_per_seq,
+            c.scale, c.dtype,
+            c.nhead, c.nkvhead, c.head_dim, c.block_size);
+    }
+
     core::context().setDevice(c.device_type, c.device_id);
 
     switch (c.device_type) {
@@ -109,6 +120,15 @@ static void dispatch_paged_decode_batched(const AttentionParams &p) {
 
 static void dispatch_paged_prefill(const AttentionParams &p) {
     auto &c = p.config;
+
+    if (c.device_type == ZEDINFER_DEVICE_CPU) {
+        return cpu::paged_attention_prefill(
+            p.out->data(), p.q->data(),
+            reinterpret_cast<const std::byte *>(p.pool_base),
+            p.k_block_table, p.v_block_table,
+            p.seqlen_q, p.past_len, c.scale, c.dtype,
+            c.nhead, c.nkvhead, c.head_dim, c.block_size);
+    }
 
     core::context().setDevice(c.device_type, c.device_id);
 
