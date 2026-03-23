@@ -1,5 +1,9 @@
 # PR-10: HTTP / OpenAPI Server — Detailed Implementation Plan
 
+> **HISTORICAL DOCUMENT.** This was the pre-implementation spec written before coding began.
+> The actual implementation evolved significantly — notably switching from **stateless** to **stateful sessions** with KV cache reuse.
+> For the current design, see `docs/design/http_api_design.md`.
+
 **Goal:** Add an OpenAI-compatible HTTP server with SSE streaming and an embedded web chat UI. Wire HTTP handlers to the existing `ServingLoop` infrastructure for multi-user concurrent inference.
 
 **Architecture:** cpp-httplib (header-only, MIT) runs an HTTP thread pool. Handlers parse OpenAI-format JSON, build `InferenceRequest` objects, and submit them via `ServingLoop::submit_async()`. The engine thread runs `ServingLoop::run_serving()`, waking on new submissions. Results flow back through `std::future` (non-streaming) or `stream_callback` → thread-safe queue → SSE (streaming). A bundled single-page web UI connects to the same API.

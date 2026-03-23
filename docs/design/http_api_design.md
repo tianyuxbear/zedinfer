@@ -1,22 +1,46 @@
 # HTTP API Design
 
-## Constraints
+> Updated to reflect the implemented state (PR-10). Supersedes the original pre-implementation design.
 
-- No Python runtime in the serving path (per CLAUDE.md)
-- Lightweight C++ HTTP library
-- OpenAI-compatible endpoints for ecosystem compatibility
-- Server-Sent Events (SSE) for streaming
-- Connection to scheduler for request routing
+## Overview
 
-## Library Choice
+ZedInfer provides an OpenAI-compatible HTTP API with SSE streaming and an embedded web chat UI. The server uses **stateful sessions** — each conversation maintains server-side KV cache across turns, so only new tokens are prefilled (not the full history). A stateless fallback is available when no `session_id` is provided.
 
-**cpp-httplib** (header-only, MIT license):
-- Single header file, zero build complexity
-- Supports HTTP/1.1, SSE via chunked transfer encoding
-- Thread-per-connection model (sufficient for moderate concurrency)
-- Well-maintained, widely used
+## Architecture
 
-Add to `third_party/include/httplib.h` or via xmake package.
+```
+HTTP Clients (curl, OpenAI SDK, Web UI)
+        |
+        v
+┌──────────────────────────┐
+│  HttpServer               │  cpp-httplib thread pool
+│  POST /v1/chat/completions│
+│  GET  /v1/models          │
+│  GET  /health             │
+│  DELETE /v1/sessions/:id  │
+│  GET  / (Web UI)          │
+└───────────┬──────────────┘
+            │ submit_async(request)    ← thread-safe
+            v
+┌──────────────────────────┐
+│  ServingLoop              │  engine thread
+│  run_serving()            │  wakes on condition_variable
+│  schedule() → step()     │
+└───────────┬──────────────┘
+            │ result_promise / stream_callback
+            v
+    HTTP handler returns response / SSE stream
+```
+
+**Two threads:**
+- **HTTP thread pool** (cpp-httplib): handles HTTP I/O, JSON parsing, SSE streaming
+- **Engine thread** (`run_serving()`): runs inference (schedule → forward → process_results)
+
+Communication: `submit_async()` (thread-safe, returns `std::future`) and `stream_callback` (pushes tokens to a `TokenQueue`).
+
+## Library
+
+**cpp-httplib v0.38.0** (header-only, MIT license), vendored at `third_party/cpp-httplib-0.38.0/httplib.h`. Same choice as llama.cpp.
 
 ## Endpoints
 
@@ -24,32 +48,38 @@ Add to `third_party/include/httplib.h` or via xmake package.
 
 OpenAI-compatible chat completion endpoint.
 
-**Request**:
+**Request:**
 ```json
 {
     "model": "deepseek-r1-qwen3-8b",
     "messages": [
+        {"role": "system", "content": "You are a helpful assistant."},
         {"role": "user", "content": "Hello, who are you?"}
     ],
-    "max_tokens": 512,
-    "temperature": 1.0,
-    "top_p": 1.0,
-    "top_k": 0,
+    "max_tokens": 1024,
     "stream": false,
     "session_id": "optional-session-id-for-multi-turn"
 }
 ```
 
-**Response (non-streaming)**:
+**Behavior with `session_id`:**
+- First request with a new `session_id`: creates an `InferenceSession` with KV cache blocks
+- Subsequent requests with same `session_id`: only the latest user message is prefilled (KV cache reused from previous turns)
+- If the server session expired (idle timeout): auto-fallback to full messages prefill
+
+**Behavior without `session_id`:**
+- Stateless mode: full messages array formatted and prefilled every time
+
+**Response (non-streaming):**
 ```json
 {
-    "id": "chatcmpl-abc123",
+    "id": "chatcmpl-0",
     "object": "chat.completion",
     "created": 1711234567,
-    "model": "deepseek-r1-qwen3-8b",
+    "model": "DeepSeek-R1-Distill-Qwen-1.5B",
     "choices": [{
         "index": 0,
-        "message": {"role": "assistant", "content": "I am DeepSeek-R1..."},
+        "message": {"role": "assistant", "content": "..."},
         "finish_reason": "stop"
     }],
     "usage": {
@@ -60,28 +90,26 @@ OpenAI-compatible chat completion endpoint.
 }
 ```
 
-**Response (streaming, SSE)**:
+**Response (streaming, SSE):**
 ```
-data: {"id":"chatcmpl-abc123","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"I"},"finish_reason":null}]}
+data: {"id":"chatcmpl-0","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}
 
-data: {"id":"chatcmpl-abc123","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" am"},"finish_reason":null}]}
+data: {"id":"chatcmpl-0","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}
 
 ...
 
-data: {"id":"chatcmpl-abc123","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":42,"total_tokens":47}}
+data: {"id":"chatcmpl-0","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{...}}
 
 data: [DONE]
 ```
 
 ### GET /v1/models
 
-List available models.
-
 ```json
 {
     "object": "list",
     "data": [{
-        "id": "deepseek-r1-qwen3-8b",
+        "id": "DeepSeek-R1-Distill-Qwen-1.5B",
         "object": "model",
         "created": 1711234567
     }]
@@ -90,169 +118,164 @@ List available models.
 
 ### GET /health
 
-Health check endpoint.
-
 ```json
 {
     "status": "ok",
-    "active_requests": 3,
-    "pending_requests": 12,
-    "gpu_memory_used_mb": 8192,
-    "kv_block_utilization": 0.45
+    "model": "DeepSeek-R1-Distill-Qwen-1.5B",
+    "active_requests": 1,
+    "pending_requests": 0,
+    "active_sessions": 3,
+    "block_pool": {
+        "total_blocks": 50000,
+        "free_blocks": 48000,
+        "utilization": 0.04
+    }
 }
 ```
 
-## Server Architecture
+### DELETE /v1/sessions/:id
 
-```cpp
-// include/zedinfer/http_server.hpp
+Immediately frees KV cache blocks for a session. Called by the web UI on "New Chat".
 
-struct ServerConfig {
-    std::string host = "0.0.0.0";
-    int port = 8080;
-    int max_connections = 128;
-    int request_timeout_ms = 300000;  // 5 minutes
-};
-
-class HttpServer {
-public:
-    HttpServer(ServerConfig config,
-               std::shared_ptr<Scheduler> scheduler,
-               std::shared_ptr<InferenceEngine> engine);
-
-    void start();  // blocking
-    void stop();
-
-private:
-    ServerConfig config_;
-    std::shared_ptr<Scheduler> scheduler_;
-    std::shared_ptr<InferenceEngine> engine_;
-    std::unique_ptr<httplib::Server> server_;
-
-    // Handlers
-    void handle_chat_completions(const httplib::Request &req, httplib::Response &res);
-    void handle_chat_completions_stream(const httplib::Request &req, httplib::Response &res);
-    void handle_models(const httplib::Request &req, httplib::Response &res);
-    void handle_health(const httplib::Request &req, httplib::Response &res);
-
-    // Request conversion
-    std::unique_ptr<InferenceRequest> parse_chat_request(const nlohmann::json &body);
-    nlohmann::json format_response(const GenerationResult &result, const std::string &request_id);
-    std::string format_stream_chunk(const std::string &request_id, const std::string &token, bool is_done);
-};
+```json
+{"deleted": true}
 ```
+
+### GET /
+
+Serves the embedded web chat UI from `web/index.html`.
+
+### GET /images/*
+
+Serves static files from `web/images/` (icons, logos).
+
+## Session Management
+
+```
+InferenceSession (server-side, per session_id)
+  ├── block_table_     KV cache blocks (persistent across turns)
+  ├── past_len_        tokens already in KV cache
+  ├── is_first_turn_   BOS token handling
+  ├── chat_history_    conversation record
+  └── template_        chat formatting template
+
+SessionEntry (in HttpServer)
+  ├── session          unique_ptr<InferenceSession>
+  ├── last_access      timestamp for idle timeout
+  └── busy             atomic<bool> for concurrent access protection
+```
+
+**Lifecycle:**
+- Created lazily on first request with a `session_id`
+- Idle timeout: 30 minutes (configurable via `ServerConfig::session_idle_timeout`)
+- Max sessions: 100 (configurable, LRU eviction when at capacity)
+- Explicit deletion: `DELETE /v1/sessions/:id`
+- Concurrent access: per-session `busy` flag, returns HTTP 409 if busy
+
+**Session expiry fallback:**
+- When a session is accessed after expiry (recreated fresh), the server detects `past_len == 0`
+- Falls back to full messages prefill (same as stateless mode)
+- Logged as "fresh start, full prefill"
 
 ## Streaming Implementation
 
-For SSE streaming, the handler uses cpp-httplib's content provider:
-
-```cpp
-void HttpServer::handle_chat_completions_stream(
-    const httplib::Request &req, httplib::Response &res) {
-
-    auto body = nlohmann::json::parse(req.body);
-    auto inference_req = parse_chat_request(body);
-
-    // Set up streaming callback
-    std::string request_id = generate_request_id();
-    auto token_queue = std::make_shared<ThreadSafeQueue<std::string>>();
-
-    inference_req->stream_callback = [token_queue](const std::string &token) {
-        token_queue->push(token);
-    };
-
-    // Submit to scheduler
-    auto future = inference_req->result_promise.get_future();
-    scheduler_->submit(std::move(inference_req));
-
-    // Stream response via SSE
-    res.set_header("Content-Type", "text/event-stream");
-    res.set_header("Cache-Control", "no-cache");
-    res.set_header("Connection", "keep-alive");
-
-    res.set_content_provider(
-        "text/event-stream",
-        [token_queue, request_id, &future](size_t offset, httplib::DataSink &sink) {
-            std::string token;
-            while (token_queue->try_pop(token, std::chrono::milliseconds(100))) {
-                std::string chunk = format_stream_chunk(request_id, token, false);
-                sink.write(chunk.data(), chunk.size());
-            }
-            if (future.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
-                auto result = future.get();
-                std::string done_chunk = format_stream_chunk(request_id, "", true);
-                sink.write(done_chunk.data(), done_chunk.size());
-                sink.done();
-                return false;  // done
-            }
-            return true;  // continue
-        });
-}
-```
-
-## Request Flow
+SSE streaming uses a thread-safe `TokenQueue` to bridge the engine thread (producer) and HTTP thread (consumer):
 
 ```
-HTTP Request
-    |
-    v
-HttpServer::handle_chat_completions()
-    |-- parse JSON body
-    |-- tokenize prompt (engine->tokenizer_->encode())
-    |-- create InferenceRequest
-    |-- scheduler_->submit(request)
-    |
-    v
-Scheduler picks up request
-    |-- admission check
-    |-- schedule into batch
-    |-- model->forward_batch()
-    |-- sample tokens
-    |-- stream_callback(token_text)  // for streaming
-    |-- complete when EOS / max_tokens
-    |
-    v
-result_promise.set_value(result)
-    |
-    v
-HttpServer formats JSON response / SSE [DONE]
+Engine thread                    HTTP thread (content provider)
+    │                                      │
+    ├─ stream_callback(token) ──→ TokenQueue.push(token)
+    │                                      │
+    │                              TokenQueue.try_pop(50ms)
+    │                                      │
+    │                              UTF-8 validation ──→ SSE chunk
+    │                                      │
+    ├─ complete_request() ──────→ future ready
+    │                                      │
+    │                              drain queue ──→ final chunk + [DONE]
 ```
+
+**UTF-8 safety:** Tokens from BPE tokenizers may contain partial multi-byte characters. A forward-scanning `valid_utf8_length()` function buffers incomplete sequences until the next token completes them.
+
+**output_prefix:** For reasoning models (DeepSeek-R1), `<think> ` is sent as a separate SSE content delta before model tokens. Not stored in session history (consistent with CLI behavior).
 
 ## Error Handling
 
-| Error | HTTP Status | Response |
-|-------|------------|----------|
-| Invalid JSON body | 400 | `{"error": {"message": "...", "type": "invalid_request_error"}}` |
-| Queue full | 503 | `{"error": {"message": "Server overloaded", "type": "server_error"}}` |
-| Request timeout | 408 | `{"error": {"message": "Request timed out", "type": "timeout_error"}}` |
-| Internal error | 500 | `{"error": {"message": "...", "type": "internal_error"}}` |
+| Error | HTTP Status | Error Type | Code |
+|-------|------------|------------|------|
+| Invalid JSON body | 400 | `invalid_request_error` | `invalid_json` |
+| Missing messages | 400 | `invalid_request_error` | `missing_field` |
+| Prompt too long | 400 | `invalid_request_error` | `prompt_too_long` |
+| Session busy | 409 | `conflict_error` | `session_busy` |
+| Request timeout | 408 | `timeout_error` | `request_timeout` |
+| Queue full | 503 | `server_error` | `queue_full` |
+| Generation failed | 500 | `internal_error` | `generation_failed` |
 
-## Example Entry Point
+All errors use OpenAI-compatible format: `{"error": {"message": "...", "type": "...", "code": "..."}}`.
 
-```cpp
-// examples/serve.cpp
-int main(int argc, char *argv[]) {
-    auto model_path = parse_args(argc, argv);
-    auto device = device::Device::cuda(0);
-    auto engine = InferenceEngine::create(model_path, device);
+**Error recovery:** If a forward pass fails mid-generation, `InferenceSession::abort_turn()` syncs `past_len_` with the actual `block_table_.seq_len` so subsequent turns don't have state gaps.
 
-    SchedulerConfig sched_config;
-    auto scheduler = std::make_shared<Scheduler>(sched_config, engine->block_allocator());
+## Request Cancellation
 
-    ServerConfig server_config;
-    server_config.port = 8080;
+When a streaming client disconnects:
+1. cpp-httplib's `on_close` callback fires → sets `cancelled` flag on the request
+2. `Scheduler::process_results()` checks `cancelled` each decode step → completes request early
+3. Session state is recovered via `abort_turn()`
+4. KV cache blocks are freed normally
 
-    HttpServer server(server_config, scheduler, engine);
-    server.start();  // blocking
-}
+The web UI uses `AbortController` to abort the fetch on "Stop" button click, which triggers the same server-side cancellation.
+
+## Web UI
+
+Single-page chat application at `web/index.html`, served as static file.
+
+**Features:**
+- Clean light theme (ChatGPT-style), custom SVG icons
+- SSE streaming via `fetch()` + `ReadableStream`
+- Client-side `localStorage` persistence (survives page refresh)
+- Conversation history sidebar (switch, rename via double-click, delete)
+- Stop generation button (AbortController → server-side cancellation)
+- Adjustable `max_tokens` in settings panel
+- Markdown rendering: headers, tables, links, code blocks with copy button
+- Model name from `GET /v1/models`
+
+**Session management:**
+- `sessionId` generated on page load, stored in localStorage
+- "New Chat" saves current conversation to history, creates new sessionId, calls `DELETE /v1/sessions/:id`
+- Page refresh restores conversation from localStorage (same sessionId → server session may still be alive)
+- Switching to old conversation: if server session alive → continues. If expired → next message triggers full prefill fallback.
+
+## Entry Point
+
+```
+examples/serve.cpp
+  --host            (default: 0.0.0.0)
+  --port            (default: 8080)
+  --nvidia          (GPU backend)
+  --gpu-memory-utilization (default: 0.9)
+  --max-batch-tokens      (default: 2048)
+  --max-batch-requests    (default: 64)
 ```
 
-## Files to Create
+Signal handling: SIGINT/SIGTERM → `server.stop()` + `engine->stop_serving()` → graceful shutdown.
+
+## Files
 
 | File | Purpose |
 |------|---------|
-| `include/zedinfer/http_server.hpp` | Server class and config |
-| `src/zedinfer/http_server.cpp` | Endpoint handlers |
-| `include/zedinfer/api_types.hpp` | OpenAI-compatible request/response types |
-| `examples/serve.cpp` | HTTP serving entry point |
-| `third_party/include/httplib.h` | cpp-httplib header (or xmake dependency) |
+| `include/zedinfer/http_server.hpp` | `ServerConfig`, `HttpServer`, `SessionLock` |
+| `src/zedinfer/http_server.cpp` | All endpoint handlers, session management, SSE streaming |
+| `examples/serve.cpp` | HTTP serving entry point with CLI args |
+| `web/index.html` | Single-page chat UI |
+| `web/images/*.svg` | favicon, logo, user/bot avatars |
+| `third_party/cpp-httplib-0.38.0/httplib.h` | HTTP library (vendored) |
+
+## Known Limitations
+
+| Limitation | Reason | Future Direction |
+|-----------|--------|-----------------|
+| No temperature/sampling params | Sampler is per-engine (ArgmaxSampler), not per-request. Requires scheduler architecture change. | Per-request `GeneralSampler` in scheduler |
+| No prefix caching | Stateful sessions don't share KV blocks across sessions | Block reference counting + hash table |
+| No function calling | API format only, model capability dependent | Add tool/function_call message types |
+| No CORS | Same-origin web UI only | Add `--cors` flag |
+| Static file cache not hot-reloadable | Files cached at startup | Development convenience, not production issue |
