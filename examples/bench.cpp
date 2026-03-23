@@ -4,6 +4,7 @@
 #include "utils/system_info.hpp"
 #include "zedinfer.h"
 #include "zedinfer/engine.hpp"
+#include "zedinfer/scheduler.hpp"
 #include "zedinfer/session.hpp"
 
 #include <argparse/argparse.hpp>
@@ -43,7 +44,12 @@ int main(int argc, char *argv[]) {
     program.add_argument("--nvidia")
         .help("Use NVIDIA GPU backend")
         .default_value(false)
-        .implicit_value(true); // Treated as flag
+        .implicit_value(true);
+
+    program.add_argument("--gpu-memory-utilization")
+        .help("Fraction of GPU memory for KV cache (0.0-1.0)")
+        .default_value(0.9f)
+        .scan<'g', float>();
 
     try {
         program.parse_args(argc, argv);
@@ -58,17 +64,18 @@ int main(int argc, char *argv[]) {
     auto prefill_len = program.get<int>("--prefill-len");
     auto decode_len = program.get<int>("--decode-len");
     auto rounds = program.get<int>("--rounds");
-    bool use_nvidia = program.get<bool>("--nvidia"); // Correctly retrieve nvidia flag
+    bool use_nvidia = program.get<bool>("--nvidia");
 
-    // 3. Device Initialization
     zedinferDeviceType_t device_type = use_nvidia ? ZEDINFER_DEVICE_NVIDIA : ZEDINFER_DEVICE_CPU;
     device::Device device(device_type, 0);
+
+    SchedulerConfig sched_config;
+    sched_config.gpu_memory_utilization = program.get<float>("--gpu-memory-utilization");
 
     LOGI << "Initializing engine with device: " << (use_nvidia ? "NVIDIA" : "CPU");
     auto start = std::chrono::high_resolution_clock::now();
 
-    // Pass the actual model_path instead of hardcoded string
-    std::shared_ptr<InferenceEngine> engine = InferenceEngine::create(model_path, device);
+    auto engine = InferenceEngine::create(model_path, device, sched_config);
 
     auto end = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);

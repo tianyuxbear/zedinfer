@@ -5,6 +5,7 @@
 #include "zedinfer.h"
 #include "zedinfer/engine.hpp"
 #include "zedinfer/request.hpp"
+#include "zedinfer/scheduler.hpp"
 
 #include <argparse/argparse.hpp>
 #include <chrono>
@@ -51,6 +52,11 @@ int main(int argc, char *argv[]) {
         .default_value(false)
         .implicit_value(true);
 
+    program.add_argument("--gpu-memory-utilization")
+        .help("Fraction of GPU memory for KV cache (0.0-1.0)")
+        .default_value(0.9f)
+        .scan<'g', float>();
+
     try {
         program.parse_args(argc, argv);
     } catch (const std::exception &err) {
@@ -69,8 +75,10 @@ int main(int argc, char *argv[]) {
     zedinferDeviceType_t device_type = use_nvidia ? ZEDINFER_DEVICE_NVIDIA : ZEDINFER_DEVICE_CPU;
     device::Device device(device_type, 0);
 
-    // Initialize engine
-    auto engine = InferenceEngine::create(model_path, device);
+    SchedulerConfig sched_config;
+    sched_config.gpu_memory_utilization = program.get<float>("--gpu-memory-utilization");
+
+    auto engine = InferenceEngine::create(model_path, device, sched_config);
 
     // Also run single-request baseline for comparison
     printf("\n============ Single-Request Baseline ============\n");
