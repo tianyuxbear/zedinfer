@@ -1,5 +1,6 @@
 #include "zedinfer/scheduler.hpp"
 #include "backend/kvcache/block_pool.hpp"
+#include "backend/kvcache/prefix_cache.hpp"
 #include "frontend/sampler/sampler.hpp"
 #include "frontend/tokenizer/base.hpp"
 #include "utils/logging.hpp"
@@ -22,6 +23,10 @@ Scheduler::Scheduler(SchedulerConfig config) : config_(config) {}
 
 void Scheduler::set_block_allocator(kvcache::BlockAllocator *allocator) {
     block_allocator_ = allocator;
+}
+
+void Scheduler::set_prefix_cache(kvcache::PrefixCache *cache) {
+    prefix_cache_ = cache;
 }
 
 void Scheduler::submit(std::unique_ptr<InferenceRequest> request) {
@@ -138,14 +143,45 @@ ScheduledBatch Scheduler::schedule() {
         if (block_allocator_) {
             auto &bt = req->active_block_table();
             if (bt.num_layers == 0) {
-                // New request (batch mode): allocate from scratch
-                int est_tokens = std::min(
-                    static_cast<int>(req->input_ids.size()) + 256,
-                    static_cast<int>(req->input_ids.size()) + req->config.max_new_tokens);
-                if (req->block_table_ref) {
-                    *req->block_table_ref = block_allocator_->allocate_sequence(est_tokens);
+                // New request: try prefix cache match first
+                int cached_tokens = 0;
+                if (prefix_cache_ && !req->input_ids.empty()) {
+                    kvcache::SequenceBlockTable matched;
+                    cached_tokens = prefix_cache_->match_prefix(
+                        req->input_ids, block_allocator_->block_size(), matched);
+                    if (cached_tokens > 0) {
+                        // Use matched blocks as starting point
+                        if (req->block_table_ref) {
+                            *req->block_table_ref = std::move(matched);
+                        } else {
+                            req->block_table = std::move(matched);
+                        }
+                        req->prefill_progress = cached_tokens;
+                    }
+                }
+
+                auto &bt2 = req->active_block_table();
+                if (bt2.num_layers == 0) {
+                    // No prefix match — allocate from scratch
+                    int est_tokens = std::min(
+                        static_cast<int>(req->input_ids.size()) + 256,
+                        static_cast<int>(req->input_ids.size()) + req->config.max_new_tokens);
+                    if (req->block_table_ref) {
+                        *req->block_table_ref = block_allocator_->allocate_sequence(est_tokens);
+                    } else {
+                        req->block_table = block_allocator_->allocate_sequence(est_tokens);
+                    }
                 } else {
-                    req->block_table = block_allocator_->allocate_sequence(est_tokens);
+                    // Prefix matched — extend for remaining tokens
+                    int total_after = cached_tokens + (static_cast<int>(req->input_ids.size()) - cached_tokens) + 256;
+                    int bs = block_allocator_->block_size();
+                    int blocks_needed = (total_after + bs - 1) / bs;
+                    for (int layer = 0; layer < bt2.num_layers; ++layer) {
+                        while (static_cast<int>(bt2.k_blocks[layer].size()) < blocks_needed)
+                            block_allocator_->extend_sequence(bt2, layer, true);
+                        while (static_cast<int>(bt2.v_blocks[layer].size()) < blocks_needed)
+                            block_allocator_->extend_sequence(bt2, layer, false);
+                    }
                 }
             } else {
                 // Session multi-turn: extend blocks for new tokens
@@ -233,8 +269,14 @@ void Scheduler::process_results(
         if (req->phase == RequestPhase::DECODE ||
             req->prefill_progress >= static_cast<int>(req->input_ids.size())) {
             req->phase = RequestPhase::DECODE;
-            // Pass [offset : offset+chunk] to sampler — let getLastLogits pick the last row
-            // This matches run_one behavior (sampler gets multi-row tensor, slices internally)
+
+            // Insert full blocks into prefix cache after prefill completes
+            if (prefix_cache_ && block_allocator_) {
+                prefix_cache_->insert_blocks(
+                    req->input_ids, block_allocator_->block_size(),
+                    req->active_block_table());
+            }
+
             auto req_logits = logits->slice(0, offset, offset + chunk);
             int token = sampler.sample(req_logits);
 
@@ -262,9 +304,10 @@ void Scheduler::process_results(
 void Scheduler::complete_request(InferenceRequest &req) {
     req.phase = RequestPhase::COMPLETE;
 
-    // Free blocks only for owned tables (not borrowed session tables)
+    // Release blocks for owned tables (not borrowed session tables).
+    // Uses release (not free) so cached prefix blocks stay in the pool.
     if (block_allocator_ && !req.block_table_ref && req.block_table.num_layers > 0) {
-        block_allocator_->free_sequence(req.block_table);
+        block_allocator_->release_sequence(req.block_table);
     }
 
     GenerationResult result;

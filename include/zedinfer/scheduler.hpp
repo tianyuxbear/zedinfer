@@ -19,6 +19,7 @@ class Model;
 namespace kvcache {
 class KVCache;
 class BlockAllocator;
+class PrefixCache;
 }
 namespace sampler {
 class Sampler;
@@ -56,6 +57,9 @@ public:
     // Set block allocator for batched mode (called after engine creates block pool)
     void set_block_allocator(kvcache::BlockAllocator *allocator);
 
+    // Set prefix cache (optional, enables prefix sharing across requests)
+    void set_prefix_cache(kvcache::PrefixCache *cache);
+
     /**
      * Submit a new request. Thread-safe (can be called from HTTP threads).
      */
@@ -89,6 +93,7 @@ public:
 private:
     SchedulerConfig config_;
     kvcache::BlockAllocator *block_allocator_ = nullptr;
+    kvcache::PrefixCache *prefix_cache_ = nullptr;
     std::mutex submit_mutex_;
 
     std::deque<std::unique_ptr<InferenceRequest>> waiting_queue_;

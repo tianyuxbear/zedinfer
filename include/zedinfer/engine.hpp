@@ -2,6 +2,7 @@
 
 #include "backend/device/device.hpp"
 #include "backend/kvcache/block_pool.hpp"
+#include "backend/kvcache/prefix_cache.hpp"
 #include "frontend/models/base.hpp"
 #include "frontend/sampler/sampler.hpp"
 #include "frontend/tokenizer/base.hpp"
@@ -44,6 +45,7 @@ public:
     const std::vector<int> &stop_token_ids() const { return stop_token_ids_; }
     kvcache::BlockPool *block_pool() { return block_pool_.get(); }
     kvcache::BlockAllocator *block_allocator() { return block_allocator_.get(); }
+    kvcache::PrefixCache *prefix_cache() { return prefix_cache_.get(); }
     const std::string &model_name() const { return model_name_; }
     int pending_count() const { return serving_loop_ ? serving_loop_->pending_count() : 0; }
     int active_count() const { return serving_loop_ ? serving_loop_->active_count() : 0; }
@@ -87,6 +89,7 @@ private:
     std::string model_name_;
     std::unique_ptr<kvcache::BlockPool> block_pool_;
     std::unique_ptr<kvcache::BlockAllocator> block_allocator_;
+    std::unique_ptr<kvcache::PrefixCache> prefix_cache_;
 
     // Owned sub-components
     std::unique_ptr<ServingLoop> serving_loop_;

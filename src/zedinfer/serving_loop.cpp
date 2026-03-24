@@ -16,6 +16,9 @@ ServingLoop::ServingLoop(std::shared_ptr<InferenceEngine> engine,
     if (engine_->block_allocator()) {
         scheduler_.set_block_allocator(engine_->block_allocator());
     }
+    if (engine_->prefix_cache()) {
+        scheduler_.set_prefix_cache(engine_->prefix_cache());
+    }
 }
 
 // ============================================================================
