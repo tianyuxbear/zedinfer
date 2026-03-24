@@ -1,6 +1,7 @@
 #include "zedinfer/engine.hpp"
 #include "backend/core/context/context.hpp"
 #include "backend/device/runtime_api.hpp"
+#include "frontend/models/forward_config.hpp"
 #include "frontend/sampler/sampler.hpp"
 #include "frontend/tokenizer/hf_tokenizer.hpp"
 #include "utils/logging.hpp"
@@ -83,6 +84,13 @@ std::shared_ptr<InferenceEngine> InferenceEngine::create(
     if (engine->block_pool_ && engine->block_allocator_) {
         engine->prefix_cache_ = std::make_unique<kvcache::PrefixCache>(
             *engine->block_pool_, engine->block_allocator_->num_layers());
+    }
+
+    // Create decode scratch buffers (pre-allocated for N=1 decode)
+    {
+        auto fwd_cfg = engine->model_->forward_config();
+        engine->decode_scratch_ = model::DecodeScratch::create(
+            engine->model_->config(), fwd_cfg.has_qk_norm, engine->exec_config_);
     }
 
     // Create profiler and run warmup (exercises paged attention kernels)

@@ -34,10 +34,12 @@ public:
     int num_tokens() const override { return total_tokens_; }
     void prepare_inputs(tensor_t &ids, tensor_t &pos_ids,
                         const ExecutorConfig &exec_config) override;
+    void prepare_inputs_into(tensor_t ids, tensor_t pos_ids) override;
     void write_kv(int layer, tensor_t k, tensor_t v) override;
     tensor_t attend(int layer, tensor_t q_rope, float scale,
                     const ExecutorConfig &exec_config,
-                    size_t nhead, size_t nkvhead, size_t head_dim) override;
+                    size_t nhead, size_t nkvhead, size_t head_dim,
+                    tensor_t pre_alloc_out = nullptr) override;
     void finalize() override;
 
 private:

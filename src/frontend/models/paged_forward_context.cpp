@@ -58,6 +58,11 @@ void PagedForwardContext::prepare_inputs(
     pos_ids->load(position_ids_.data());
 }
 
+void PagedForwardContext::prepare_inputs_into(tensor_t ids, tensor_t pos_ids) {
+    ids->load(token_ids_.data());
+    pos_ids->load(position_ids_.data());
+}
+
 // ============================================================================
 // KV Write: scatter tokens to blocks per slot
 // ============================================================================
@@ -226,19 +231,18 @@ void PagedForwardContext::build_decode_cache(const ExecutorConfig &exec_config) 
 tensor_t PagedForwardContext::attend(
     int layer, tensor_t q_rope, float scale,
     const ExecutorConfig &exec_config,
-    size_t nhead, size_t nkvhead, size_t head_dim) {
-
-    auto make = [&](std::vector<size_t> shape) {
-        return Tensor::create(shape, exec_config.data_type,
-                              exec_config.device_type, exec_config.device_id);
-    };
+    size_t nhead, size_t nkvhead, size_t head_dim,
+    tensor_t pre_alloc_out) {
 
     ops::AttentionConfig attn_cfg{
         static_cast<int>(nhead), static_cast<int>(nkvhead), static_cast<int>(head_dim),
         scale, pool_.config().block_size,
         exec_config.data_type, exec_config.device_type, exec_config.device_id};
 
-    auto attn = make({static_cast<size_t>(total_tokens_), nhead, head_dim});
+    auto attn = pre_alloc_out ? pre_alloc_out
+                : Tensor::create({static_cast<size_t>(total_tokens_), nhead, head_dim},
+                                  exec_config.data_type, exec_config.device_type,
+                                  exec_config.device_id);
 
     // Build decode cache on first layer (uploads all layers' block tables at once)
     build_decode_cache(exec_config);

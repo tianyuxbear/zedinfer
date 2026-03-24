@@ -1,6 +1,7 @@
 #include "zedinfer/serving_loop.hpp"
 #include "zedinfer/engine.hpp"
 #include "frontend/models/forward_config.hpp"
+#include "frontend/models/decode_scratch.hpp"
 #include "frontend/models/paged_forward_context.hpp"
 #include "utils/logging.hpp"
 
@@ -119,8 +120,12 @@ bool ServingLoop::step() {
         auto t0 = std::chrono::high_resolution_clock::now();
 
         model::PagedForwardContext ctx(batch_ctx, *engine_->block_allocator());
+        // Use decode scratch for single-token decode (no prefill in batch)
+        bool is_pure_decode = batch.prefill_requests.empty() &&
+                              batch.decode_requests.size() == 1;
+        auto *scratch = is_pure_decode ? engine_->decode_scratch() : nullptr;
         tensor_t logits = model::transformer_forward(
-            engine_->model().forward_config(), ctx, engine_->exec_config());
+            engine_->model().forward_config(), ctx, engine_->exec_config(), scratch);
 
         auto t1 = std::chrono::high_resolution_clock::now();
         double step_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
