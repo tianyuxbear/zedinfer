@@ -43,9 +43,11 @@ struct ModelForwardConfig {
 
 // Shared transformer forward loop (defined in transformer_forward.cpp)
 class ForwardContext;
+struct DecodeScratch;
 tensor_t transformer_forward(
     const ModelForwardConfig &model,
     ForwardContext &ctx,
-    const ExecutorConfig &exec_config);
+    const ExecutorConfig &exec_config,
+    DecodeScratch *scratch = nullptr);
 
 } // namespace zedinfer::model
