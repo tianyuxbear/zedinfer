@@ -1,10 +1,12 @@
 #include "frontend/sampler/sampler.hpp"
+#include "backend/core/context/context.hpp"
 #include "backend/ops/ops.hpp"
 #include "zedinfer.h"
 #include "zedinfer/activation.hpp"
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <sstream>
 #include <stdexcept>
 
@@ -64,20 +66,35 @@ tensor_t Sampler::ensureCPU(tensor_t tensor) {
 int ArgmaxSampler::sample(tensor_t logits) {
     tensor_t last_logits = getLastLogits(logits);
 
-    // Create output tensors for argmax operation
-    tensor_t max_idx = Tensor::create({1}, ZEDINFER_DTYPE_I64,
-                                      last_logits->deviceType(),
-                                      last_logits->deviceId());
-    tensor_t max_val = Tensor::create({1}, exec_config_.data_type,
-                                      last_logits->deviceType(),
-                                      last_logits->deviceId());
+    // Lazy-init pre-allocated buffers on first call
+    if (!max_idx_dev_) {
+        max_idx_dev_ = Tensor::create({1}, ZEDINFER_DTYPE_I64,
+                                       last_logits->deviceType(),
+                                       last_logits->deviceId());
+        max_val_dev_ = Tensor::create({1}, exec_config_.data_type,
+                                       last_logits->deviceType(),
+                                       last_logits->deviceId());
+        // Pre-allocate pinned host buffer once — avoids per-call
+        // cudaMallocHost/cudaFreeHost which costs ~570us each when the
+        // CUDA pinned memory subsystem is cold.
+        if (last_logits->deviceType() != ZEDINFER_DEVICE_CPU) {
+            max_idx_host_ = Tensor::create({1}, ZEDINFER_DTYPE_I64,
+                                            ZEDINFER_DEVICE_CPU, 0);
+        }
+    }
 
-    // Use backend argmax kernel
-    ops::argmax(max_idx, max_val, last_logits);
+    // Run argmax kernel (writes into pre-allocated device buffers)
+    ops::argmax(max_idx_dev_, max_val_dev_, last_logits);
 
-    // Copy result to CPU and extract token id
-    max_idx = ensureCPU(max_idx);
-    return *reinterpret_cast<const int *>(max_idx->data());
+    // Copy result to CPU: reuse pinned host buffer, only memcpy
+    if (max_idx_host_) {
+        core::context().runtime().api()->memcpy_sync(
+            max_idx_host_->data(), max_idx_dev_->data(),
+            sizeof(int64_t), ZEDINFER_MEMCPY_D2H);
+        return static_cast<int>(*reinterpret_cast<const int64_t *>(max_idx_host_->data()));
+    }
+    // CPU path: read directly
+    return static_cast<int>(*reinterpret_cast<const int64_t *>(max_idx_dev_->data()));
 }
 
 // ============================================================================

@@ -68,6 +68,13 @@ public:
 
 private:
     ExecutorConfig exec_config_;
+
+    // Pre-allocated buffers to avoid per-call cudaMallocHost/cudaFreeHost.
+    // cudaMallocHost is expensive (~570us) when the pinned memory subsystem
+    // is not warmed up, causing a 20%+ decode throughput regression.
+    tensor_t max_idx_dev_;   // [1] I64 on device
+    tensor_t max_val_dev_;   // [1] dtype on device
+    tensor_t max_idx_host_;  // [1] I64 on host (pinned)
 };
 
 // General sampler: supports temperature + top_k + top_p filtering
