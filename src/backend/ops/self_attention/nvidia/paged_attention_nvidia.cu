@@ -86,18 +86,28 @@ __global__ void paged_attention_decode_kernel(
     const int lane_id = tid % WARP_SIZE;
     const int kvh = h / (nhead / nkvhead);
 
+    // Shared memory layout:
+    //   s_q[d]              - query vector
+    //   s_scores[PA_TILE_KV]- attention scores per tile
+    //   s_reduce[NUM_WARPS] - warp reduction scratch
+    //   s_phys[PA_TILE_KV]  - precomputed physical token indices per tile
+    //
+    // s_phys breaks the dependent-load chain in K scoring and V aggregation:
+    //   Before: block_table[global_load] → compute addr → K/V[global_load]
+    //   After:  s_phys[smem_load] → K/V[global_load]  (1 hop instead of 2)
     extern __shared__ float smem[];
     float *s_q = smem;
     float *s_scores = s_q + d;
     float *s_reduce = s_scores + PA_TILE_KV;
+    int *s_k_phys = reinterpret_cast<int *>(s_reduce + NUM_WARPS);
+    int *s_v_phys = s_k_phys + PA_TILE_KV;
 
     // Load Q into shared memory
     const T *q_ptr = Q + h * d;
     for (int i = tid; i < d; i += blockDim.x) s_q[i] = to_float(q_ptr[i]);
     __syncthreads();
 
-    // V aggregation: all threads participate, strided over dv dimensions
-    const int dv = d; // head_dim == d for standard transformers
+    const int dv = d;
     const int dv_idx = tid % dv;
     const int dv_group = blockDim.x / dv;
     const int dv_rank = tid / dv;
@@ -106,20 +116,24 @@ __global__ void paged_attention_decode_kernel(
 
     for (int kv_start = 0; kv_start < seq_len; kv_start += PA_TILE_KV) {
         const int tile_len = min(PA_TILE_KV, seq_len - kv_start);
-        float warp_max = -FLT_MAX;
 
-        // Q*K scoring with block-table-indexed K access
+        // Precompute physical token addresses for this tile (all threads cooperate)
+        for (int j = tid; j < tile_len; j += blockDim.x) {
+            const int j_global = kv_start + j;
+            const int blk = j_global / block_size;
+            const int off = j_global % block_size;
+            s_k_phys[j] = k_block_table[blk] * block_size + off;
+            s_v_phys[j] = v_block_table[blk] * block_size + off;
+        }
+        __syncthreads();
+
+        // Q*K scoring — block table lookup is now a fast smem read
+        float warp_max = -FLT_MAX;
         for (int j_base = 0; j_base < tile_len; j_base += NUM_WARPS) {
             const int j_local = j_base + warp_id;
             float score = -FLT_MAX;
             if (j_local < tile_len) {
-                const int j_global = kv_start + j_local;
-                // Block-table lookup: logical token -> physical token
-                const int block_idx = j_global / block_size;
-                const int block_offset = j_global % block_size;
-                const int k_physical = k_block_table[block_idx] * block_size + block_offset;
-
-                const T *k_ptr = pool_base + k_physical * nkvhead * d + kvh * d;
+                const T *k_ptr = pool_base + s_k_phys[j_local] * nkvhead * d + kvh * d;
                 float dot = 0.0f;
                 for (int dim = lane_id; dim < d; dim += WARP_SIZE)
                     dot += s_q[dim] * to_float(k_ptr[dim]);
@@ -147,17 +161,13 @@ __global__ void paged_attention_decode_kernel(
         prev_sum = prev_sum * alpha + tile_sum * beta;
         acc_out *= alpha;
 
-        // V aggregation with block-table-indexed V access
+        // V aggregation — single-hop global load (address from smem)
         {
             float weighted_v = 0.0f;
 #pragma unroll 4
             for (int j = dv_rank; j < tile_len; j += dv_group) {
-                const int j_global = kv_start + j;
-                const int block_idx = j_global / block_size;
-                const int block_offset = j_global % block_size;
-                const int v_physical = v_block_table[block_idx] * block_size + block_offset;
-
-                weighted_v += s_scores[j] * to_float(pool_base[v_physical * nkvhead * dv + kvh * dv + dv_idx]);
+                weighted_v += s_scores[j]
+                    * to_float(pool_base[s_v_phys[j] * nkvhead * dv + kvh * dv + dv_idx]);
             }
             acc_out += beta * weighted_v;
         }
@@ -166,7 +176,6 @@ __global__ void paged_attention_decode_kernel(
         __syncthreads();
     }
 
-    // Reduce across threads that share the same dv_idx
     if (dv_group > 1) {
         s_scores[tid] = acc_out;
         __syncthreads();
@@ -219,8 +228,9 @@ __global__ void paged_attention_decode_batched_kernel(
     float *s_q = smem;
     float *s_scores = s_q + d;
     float *s_reduce = s_scores + PA_TILE_KV;
+    int *s_k_phys = reinterpret_cast<int *>(s_reduce + NUM_WARPS);
+    int *s_v_phys = s_k_phys + PA_TILE_KV;
 
-    // Load this request's Q into shared memory
     const T *q_ptr = Q + req_idx * nhead * d + h * d;
     for (int i = tid; i < d; i += blockDim.x) s_q[i] = to_float(q_ptr[i]);
     __syncthreads();
@@ -234,18 +244,23 @@ __global__ void paged_attention_decode_batched_kernel(
 
     for (int kv_start = 0; kv_start < seq_len; kv_start += PA_TILE_KV) {
         const int tile_len = min(PA_TILE_KV, seq_len - kv_start);
-        float warp_max = -FLT_MAX;
 
+        // Precompute physical token addresses for this tile
+        for (int j = tid; j < tile_len; j += blockDim.x) {
+            const int j_global = kv_start + j;
+            const int blk = j_global / block_size;
+            const int off = j_global % block_size;
+            s_k_phys[j] = k_bt[blk] * block_size + off;
+            s_v_phys[j] = v_bt[blk] * block_size + off;
+        }
+        __syncthreads();
+
+        float warp_max = -FLT_MAX;
         for (int j_base = 0; j_base < tile_len; j_base += NUM_WARPS) {
             const int j_local = j_base + warp_id;
             float score = -FLT_MAX;
             if (j_local < tile_len) {
-                const int j_global = kv_start + j_local;
-                const int blk = j_global / block_size;
-                const int off = j_global % block_size;
-                const int k_phys = k_bt[blk] * block_size + off;
-
-                const T *k_ptr = pool_base + k_phys * nkvhead * d + kvh * d;
+                const T *k_ptr = pool_base + s_k_phys[j_local] * nkvhead * d + kvh * d;
                 float dot = 0.0f;
                 for (int dim = lane_id; dim < d; dim += WARP_SIZE)
                     dot += s_q[dim] * to_float(k_ptr[dim]);
@@ -277,11 +292,8 @@ __global__ void paged_attention_decode_batched_kernel(
             float weighted_v = 0.0f;
 #pragma unroll 4
             for (int j = dv_rank; j < tile_len; j += dv_group) {
-                const int j_global = kv_start + j;
-                const int blk = j_global / block_size;
-                const int off = j_global % block_size;
-                const int v_phys = v_bt[blk] * block_size + off;
-                weighted_v += s_scores[j] * to_float(pool_base[v_phys * nkvhead * dv + kvh * dv + dv_idx]);
+                weighted_v += s_scores[j]
+                    * to_float(pool_base[s_v_phys[j] * nkvhead * dv + kvh * dv + dv_idx]);
             }
             acc_out += beta * weighted_v;
         }
@@ -319,7 +331,9 @@ void paged_attention_decode(
 
     dim3 block(BLOCK_SIZE);
     dim3 grid(nhead);
-    size_t smem_size = (head_dim + PA_TILE_KV + NUM_WARPS) * sizeof(float);
+    // smem: s_q[d] + s_scores[PA_TILE_KV] + s_reduce[NUM_WARPS] + s_k_phys[PA_TILE_KV] + s_v_phys[PA_TILE_KV]
+    size_t smem_size = (head_dim + PA_TILE_KV + NUM_WARPS) * sizeof(float)
+                     + 2 * PA_TILE_KV * sizeof(int);
 
     switch (type) {
     case ZEDINFER_DTYPE_F32:
@@ -508,7 +522,8 @@ void paged_attention_decode_batched(
 
     dim3 block(BLOCK_SIZE);
     dim3 grid(num_reqs, nhead);
-    size_t smem_size = (head_dim + PA_TILE_KV + NUM_WARPS) * sizeof(float);
+    size_t smem_size = (head_dim + PA_TILE_KV + NUM_WARPS) * sizeof(float)
+                     + 2 * PA_TILE_KV * sizeof(int);
 
     switch (type) {
     case ZEDINFER_DTYPE_F32:
