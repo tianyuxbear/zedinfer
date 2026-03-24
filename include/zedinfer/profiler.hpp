@@ -10,7 +10,7 @@ class InferenceEngine;
 
 /**
  * Profiler: warmup and performance measurement.
- * Uses DynamicKVCache + ContiguousForwardContext (no block pool needed).
+ * Uses PagedForwardContext with temporary block table from the engine's block pool.
  */
 class Profiler {
 public:

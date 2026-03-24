@@ -76,14 +76,14 @@ std::shared_ptr<InferenceEngine> InferenceEngine::create(
 
     LOGI << "[Engine] Initialization complete";
 
-    // Create profiler and run warmup
+    // Create block pool first (warmup now uses paged path)
+    engine->init_block_pool();
+
+    // Create profiler and run warmup (exercises paged attention kernels)
     engine->profiler_ = std::make_unique<Profiler>(engine);
     LOG_VERBOSE_(utils::BOTH) << "[Engine] Performing warmup...";
     engine->profiler_->warmup();
     LOG_VERBOSE_(utils::BOTH) << "[Engine] Ready";
-
-    // Create block pool (after warmup so VRAM is settled)
-    engine->init_block_pool();
 
     // Create serving loop (after block pool)
     engine->serving_loop_ = std::make_unique<ServingLoop>(engine, engine->scheduler_config_);

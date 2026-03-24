@@ -49,14 +49,13 @@ void freeHost(void *ptr) {
     freeDevice(ptr);
 }
 
-void memcpySync(void *dst, const void *src, size_t size, zedinferMemcpyKind_t kind) {
-    ASSERT(kind == ZEDINFER_MEMCPY_H2H, "CPU only supports host-to-host memory copy");
+void memcpySync(void *dst, const void *src, size_t size, zedinferMemcpyKind_t /*kind*/) {
+    // On CPU, all memory is host memory — kind is irrelevant.
     std::memcpy(dst, src, size);
 }
 
-void memcpyAsync(void *dst, const void *src, size_t size, zedinferMemcpyKind_t kind, zedinferStream_t stream) {
-    ASSERT(stream == nullptr, "CPU does not support explicit streams");
-    memcpySync(dst, src, size, kind); // Async falls back to sync on CPU
+void memcpyAsync(void *dst, const void *src, size_t size, zedinferMemcpyKind_t kind, zedinferStream_t /*stream*/) {
+    memcpySync(dst, src, size, kind);
 }
 
 void getMemoryInfo(size_t *free, size_t *total) {

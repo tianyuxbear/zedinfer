@@ -1,8 +1,8 @@
 #include "zedinfer/profiler.hpp"
 #include "zedinfer/engine.hpp"
-#include "backend/kvcache/dynamic.hpp"
+#include "backend/kvcache/block_pool.hpp"
 #include "frontend/models/forward_config.hpp"
-#include "frontend/models/forward_context.hpp"
+#include "frontend/models/paged_forward_context.hpp"
 #include "utils/logging.hpp"
 #include "utils/random.hpp"
 #include "utils/types.hpp"
@@ -15,46 +15,62 @@ namespace zedinfer {
 Profiler::Profiler(std::shared_ptr<InferenceEngine> engine)
     : engine_(std::move(engine)) {}
 
+// Helper: ensure the block table has enough blocks allocated for `needed_len` tokens.
+// Follows the same pattern as Scheduler::schedule() (scheduler.cpp lines 99-110).
+static void ensure_blocks(kvcache::BlockAllocator &allocator,
+                          kvcache::SequenceBlockTable &bt,
+                          int needed_len) {
+    int bs = allocator.block_size();
+    int blocks_needed = (needed_len + bs - 1) / bs;
+    for (int layer = 0; layer < bt.num_layers; ++layer) {
+        while (static_cast<int>(bt.k_blocks[layer].size()) < blocks_needed)
+            allocator.extend_sequence(bt, layer, true);
+        while (static_cast<int>(bt.v_blocks[layer].size()) < blocks_needed)
+            allocator.extend_sequence(bt, layer, false);
+    }
+}
+
 void Profiler::warmup(size_t prefill_len, size_t decode_steps) {
     LOGI << "[Profiler] Warming up with prefill_len=" << prefill_len
          << ", decode_steps=" << decode_steps;
 
     auto t0 = std::chrono::high_resolution_clock::now();
 
+    auto *allocator = engine_->block_allocator();
+    auto *pool = engine_->block_pool();
     const auto &mc = engine_->model().config();
-
-    kvcache::DynamicKVCacheConfig kv_config;
-    kv_config.num_layers = mc.num_hidden_layers;
-    kv_config.num_kv_heads = mc.num_key_value_heads;
-    kv_config.head_dim = mc.hidden_size / mc.num_attention_heads;
-    kv_config.device_type = engine_->exec_config().device_type;
-    kv_config.device_id = engine_->exec_config().device_id;
-    kv_config.dtype = utils::str_to_dtype(mc.torch_dtype);
-    kv_config.initial_capacity = prefill_len + decode_steps;
-    kv_config.model_max_seq_len = engine_->tokenizer().get_config().model_max_length;
-
-    auto tmp_kv = kvcache::DynamicKVCache::create(kv_config);
     auto fwd_cfg = engine_->model().forward_config();
+
+    int estimated_tokens = static_cast<int>(prefill_len + decode_steps);
+    auto block_table = allocator->allocate_sequence(estimated_tokens);
 
     int min_id = 100, max_id = mc.vocab_size - 100;
     std::vector<int> dummy(prefill_len);
     for (auto &t : dummy) t = utils::randint(min_id, max_id);
 
+    // Prefill
     int past_len = 0;
+    ensure_blocks(*allocator, block_table, past_len + static_cast<int>(prefill_len));
     {
-        model::ContiguousForwardContext ctx(dummy, past_len, *tmp_kv);
+        model::PagedForwardContext ctx(dummy, past_len, block_table, *pool);
         auto logits = model::transformer_forward(fwd_cfg, ctx, engine_->exec_config());
         int next = engine_->sampler().sample(logits);
-        past_len += prefill_len;
+        block_table.seq_len += static_cast<int>(prefill_len);
+        past_len += static_cast<int>(prefill_len);
 
+        // Decode
         for (size_t i = 1; i < decode_steps; ++i) {
             std::vector<int> tok = {next};
-            model::ContiguousForwardContext dctx(tok, past_len, *tmp_kv);
+            ensure_blocks(*allocator, block_table, past_len + 1);
+            model::PagedForwardContext dctx(tok, past_len, block_table, *pool);
             logits = model::transformer_forward(fwd_cfg, dctx, engine_->exec_config());
             next = engine_->sampler().sample(logits);
+            block_table.seq_len += 1;
             past_len++;
         }
     }
+
+    allocator->free_sequence(block_table);
 
     auto t1 = std::chrono::high_resolution_clock::now();
     LOGI << "[Profiler] Warmup complete in "
@@ -65,47 +81,49 @@ std::pair<double, double> Profiler::profile(size_t prefill_len, size_t decode_st
     LOGI << "[Profiler] Profiling with prefill_len=" << prefill_len
          << ", decode_steps=" << decode_steps;
 
+    auto *allocator = engine_->block_allocator();
+    auto *pool = engine_->block_pool();
     const auto &mc = engine_->model().config();
-
-    kvcache::DynamicKVCacheConfig kv_config;
-    kv_config.num_layers = mc.num_hidden_layers;
-    kv_config.num_kv_heads = mc.num_key_value_heads;
-    kv_config.head_dim = mc.hidden_size / mc.num_attention_heads;
-    kv_config.device_type = engine_->exec_config().device_type;
-    kv_config.device_id = engine_->exec_config().device_id;
-    kv_config.dtype = utils::str_to_dtype(mc.torch_dtype);
-    kv_config.initial_capacity = prefill_len + decode_steps;
-    kv_config.model_max_seq_len = engine_->tokenizer().get_config().model_max_length;
-
-    auto tmp_kv = kvcache::DynamicKVCache::create(kv_config);
     auto fwd_cfg = engine_->model().forward_config();
+
+    int estimated_tokens = static_cast<int>(prefill_len + decode_steps);
+    auto block_table = allocator->allocate_sequence(estimated_tokens);
 
     int min_id = 100, max_id = mc.vocab_size - 100;
     std::vector<int> dummy(prefill_len);
     for (auto &t : dummy) t = utils::randint(min_id, max_id);
 
-    auto p0 = std::chrono::high_resolution_clock::now();
+    // Prefill
     int past_len = 0;
+    ensure_blocks(*allocator, block_table, past_len + static_cast<int>(prefill_len));
+
+    auto p0 = std::chrono::high_resolution_clock::now();
     tensor_t logits;
     int next;
     {
-        model::ContiguousForwardContext ctx(dummy, past_len, *tmp_kv);
+        model::PagedForwardContext ctx(dummy, past_len, block_table, *pool);
         logits = model::transformer_forward(fwd_cfg, ctx, engine_->exec_config());
         next = engine_->sampler().sample(logits);
     }
     auto p1 = std::chrono::high_resolution_clock::now();
 
-    past_len += prefill_len;
+    block_table.seq_len += static_cast<int>(prefill_len);
+    past_len += static_cast<int>(prefill_len);
 
+    // Decode
     auto d0 = std::chrono::high_resolution_clock::now();
     for (size_t i = 1; i < decode_steps; ++i) {
         std::vector<int> tok = {next};
-        model::ContiguousForwardContext ctx(tok, past_len, *tmp_kv);
+        ensure_blocks(*allocator, block_table, past_len + 1);
+        model::PagedForwardContext ctx(tok, past_len, block_table, *pool);
         logits = model::transformer_forward(fwd_cfg, ctx, engine_->exec_config());
         next = engine_->sampler().sample(logits);
+        block_table.seq_len += 1;
         past_len++;
     }
     auto d1 = std::chrono::high_resolution_clock::now();
+
+    allocator->free_sequence(block_table);
 
     return {
         std::chrono::duration<double, std::milli>(p1 - p0).count(),
