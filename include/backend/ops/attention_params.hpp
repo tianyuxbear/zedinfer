@@ -23,7 +23,6 @@ struct AttentionConfig {
 /**
  * Per-call attention parameters.
  * Mode is determined by which fields are set:
- *   - k_contiguous != nullptr  → contiguous mode (warmup/profile)
  *   - batched_k_block_tables != nullptr  → batched paged decode
  *   - k_block_table != nullptr && seqlen_q == 1  → single paged decode
  *   - k_block_table != nullptr && seqlen_q > 1   → single paged prefill
@@ -34,10 +33,6 @@ struct AttentionParams {
     // Output and query
     tensor_t out = nullptr;
     tensor_t q = nullptr;
-
-    // === Contiguous mode (warmup/profile) ===
-    tensor_t k_contiguous = nullptr;
-    tensor_t v_contiguous = nullptr;
 
     // === Paged mode ===
     const void *pool_base = nullptr;
@@ -57,9 +52,8 @@ struct AttentionParams {
     int max_blocks_per_seq = 0;
 
     // Helpers for dispatch
-    bool is_contiguous() const { return k_contiguous != nullptr; }
     bool is_batched() const { return batched_k_block_tables != nullptr; }
-    bool is_decode() const { return seq_len > 0 && !is_contiguous() && !is_batched(); }
+    bool is_decode() const { return seq_len > 0 && !is_batched(); }
 };
 
 } // namespace zedinfer::ops

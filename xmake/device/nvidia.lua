@@ -25,13 +25,6 @@ target("ops-nvidia")
     -- cuBLAS for optimized linear (GEMM/GEMV)
     add_links("cublas", "cublasLt")
 
-    -- cuDNN FlashAttention for prefill (optional)
-    -- Requires cuDNN installed in CUDA_HOME (or /usr/local/cuda)
-    -- Install: download cuDNN from https://developer.nvidia.com/cudnn-downloads
-    --          and copy headers/libs to $CUDA_HOME/include and $CUDA_HOME/lib64
-    if has_config("cudnn-flash") then
-        add_links("cudnn", "cuda", "nvrtc")
-    end
 
     on_install(function (target) end)
 target_end()

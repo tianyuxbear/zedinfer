@@ -122,7 +122,6 @@ static void paged_attention_prefill_(
     int nhead, int nkvhead, int head_dim, int block_size) {
 
     const int group_size = nhead / nkvhead;
-    const int total_len = past_len + seqlen_q;
 
 #pragma omp parallel for collapse(2)
     for (int qi = 0; qi < seqlen_q; ++qi) {

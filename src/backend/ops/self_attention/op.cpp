@@ -1,48 +1,13 @@
 #include "backend/core/context/context.hpp"
 #include "backend/core/core.hpp"
 #include "backend/ops/ops.hpp"
-#include "backend/ops/self_attention/cpu/self_attention_cpu.hpp"
 #include "backend/ops/self_attention/cpu/paged_attention_cpu.hpp"
-#include "backend/ops/self_attention/nvidia/self_attention_nvidia.cuh"
 #ifdef ENABLE_NVIDIA_API
 #include "backend/ops/self_attention/nvidia/paged_attention_nvidia.cuh"
 #endif
 #include "utils/check.hpp"
 
 namespace zedinfer::ops {
-
-// ============================================================================
-// Contiguous attention (warmup/profile only)
-// ============================================================================
-
-static void dispatch_contiguous(const AttentionParams &p) {
-    auto &c = p.config;
-
-    if (c.device_type == ZEDINFER_DEVICE_CPU) {
-        return cpu::self_attention(
-            p.out->data(), p.q->data(),
-            p.k_contiguous->data(), p.v_contiguous->data(),
-            c.scale, c.dtype,
-            p.q->dim(0), c.nhead, c.head_dim,
-            p.k_contiguous->dim(0), c.nkvhead, c.head_dim);
-    }
-
-    core::context().setDevice(c.device_type, c.device_id);
-
-    switch (c.device_type) {
-#ifdef ENABLE_NVIDIA_API
-    case ZEDINFER_DEVICE_NVIDIA:
-        return nvidia::self_attention(
-            p.out->data(), p.q->data(),
-            p.k_contiguous->data(), p.v_contiguous->data(),
-            c.scale, c.dtype,
-            p.q->dim(0), c.nhead, c.head_dim,
-            p.k_contiguous->dim(0), c.nkvhead, c.head_dim);
-#endif
-    default:
-        EXCEPTION_UNSUPPORTED_DEVICE;
-    }
-}
 
 // ============================================================================
 // Paged decode — single request
@@ -152,9 +117,6 @@ static void dispatch_paged_prefill(const AttentionParams &p) {
 // ============================================================================
 
 void attention(const AttentionParams &params) {
-    if (params.is_contiguous()) {
-        return dispatch_contiguous(params);
-    }
     if (params.is_batched()) {
         return dispatch_paged_decode_batched(params);
     }
