@@ -79,6 +79,12 @@ std::shared_ptr<InferenceEngine> InferenceEngine::create(
     // Create block pool first (warmup now uses paged path)
     engine->init_block_pool();
 
+    // Create prefix cache (after block pool, before serving loop)
+    if (engine->block_pool_ && engine->block_allocator_) {
+        engine->prefix_cache_ = std::make_unique<kvcache::PrefixCache>(
+            *engine->block_pool_, engine->block_allocator_->num_layers());
+    }
+
     // Create profiler and run warmup (exercises paged attention kernels)
     engine->profiler_ = std::make_unique<Profiler>(engine);
     LOG_VERBOSE_(utils::BOTH) << "[Engine] Performing warmup...";

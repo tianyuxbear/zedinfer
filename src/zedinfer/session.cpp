@@ -56,7 +56,7 @@ InferenceSession::InferenceSession(
 
 InferenceSession::~InferenceSession() {
     if (allocator_) {
-        allocator_->free_sequence(block_table_);
+        allocator_->release_sequence(block_table_);
     }
 }
 
