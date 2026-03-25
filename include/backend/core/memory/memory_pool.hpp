@@ -23,7 +23,7 @@ struct MemoryBlock {
 // Configuration for memory pool behavior.
 struct MemoryPoolConfig {
     size_t initial_block_size = 64 * 1024 * 1024;      // Initial raw block size (64 MB)
-    size_t max_pool_size = 24ULL * 1024 * 1024 * 1024; // Hard limit (24 GB)
+    size_t max_pool_size = 128ULL * 1024 * 1024 * 1024; // Hard limit (128 GB)
     size_t alignment = 64;                             // Allocation alignment (e.g., cache line)
     size_t min_split_size = 4 * 1024;                  // Minimum size to split a free block
     bool allow_growth = true;                          // Allow allocating new raw blocks
