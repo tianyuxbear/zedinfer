@@ -1,8 +1,10 @@
 <p align="center">
-  <img src="web/images/zedinfer.svg" alt="ZedInfer Logo" width="200"/>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="web/images/logo-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="web/images/logo-light.svg">
+    <img alt="ZedInfer Logo" src="web/images/logo-dark.svg" width="400">
+  </picture>
 </p>
-
-<h1 align="center">ZedInfer</h1>
 
 <p align="center">
   <strong>从零构建的高性能 C++17 大模型推理引擎</strong>
