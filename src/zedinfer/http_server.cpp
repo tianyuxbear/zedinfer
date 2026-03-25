@@ -303,8 +303,8 @@ void HttpServer::handle_health(const httplib::Request &, httplib::Response &res)
     json response;
     response["status"] = "ok";
     response["model"] = engine_->model_name();
-    response["active_requests"] = engine_->active_count();
-    response["pending_requests"] = engine_->pending_count();
+    response["active_requests"] = engine_->serving_loop().active_count();
+    response["pending_requests"] = engine_->serving_loop().pending_count();
 
     auto *pool = engine_->block_pool();
     if (pool) {
@@ -452,7 +452,7 @@ void HttpServer::handle_chat_completions(const httplib::Request &req,
     // 9. Submit
     std::future<GenerationResult> future;
     try {
-        future = engine_->submit_async(std::move(inference_req));
+        future = engine_->serving_loop().submit_async(std::move(inference_req));
     } catch (const std::runtime_error &) {
         send_error(res, 503, "Server overloaded, queue full", "server_error", "queue_full");
         return;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "backend/kvcache/block_pool.hpp"
+#include "backend/ops/attention_params.hpp"
 #include "backend/tensor/tensor.hpp"
 #include "zedinfer/activation.hpp"
 #include "zedinfer/batch_context.hpp"
@@ -59,6 +60,14 @@ private:
     // Input data (single-request mode stores locally, batch mode references BatchContext)
     std::vector<int> token_ids_;
     std::vector<int64_t> position_ids_;
+
+    // Attention sub-dispatchers
+    void attend_decode_single(int layer, tensor_t q_rope, tensor_t attn,
+                               const ops::AttentionConfig &cfg, size_t nhead, size_t head_dim);
+    void attend_decode_batched(int layer, tensor_t q_rope, tensor_t attn,
+                                const ops::AttentionConfig &cfg);
+    void attend_prefill(int layer, tensor_t q_rope, tensor_t attn,
+                         const ops::AttentionConfig &cfg);
 
     // Helpers
     void scatter_slot_kv(const Slot &slot, int layer, tensor_t k, tensor_t v);

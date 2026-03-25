@@ -78,7 +78,7 @@ std::string InferenceSession::chat(const std::string &user_input) {
     }
 
     // Generate using block table directly (no KVCache object needed)
-    std::string raw_output = engine_->generate(block_table_, input, config_);
+    std::string raw_output = engine_->serving_loop().generate(block_table_, input, config_);
 
     std::string output = template_.output_prefix + clean_output(raw_output, template_);
 

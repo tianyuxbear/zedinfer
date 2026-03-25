@@ -49,27 +49,10 @@ public:
     kvcache::PrefixCache *prefix_cache() { return prefix_cache_.get(); }
     model::DecodeScratch *decode_scratch() { return decode_scratch_.get(); }
     const std::string &model_name() const { return model_name_; }
-    int pending_count() const { return serving_loop_ ? serving_loop_->pending_count() : 0; }
-    int active_count() const { return serving_loop_ ? serving_loop_->active_count() : 0; }
 
-    // Delegation to ServingLoop (backward compat for existing callers)
-    std::string generate(kvcache::SequenceBlockTable &bt, const std::string &p, const GenerationConfig &c) {
-        return serving_loop_->generate(bt, p, c);
-    }
-    GenerationResult generate_tokens(kvcache::SequenceBlockTable &bt, const std::vector<int> &ids, const GenerationConfig &c) {
-        return serving_loop_->generate_tokens(bt, ids, c);
-    }
-    std::future<GenerationResult> submit_async(std::unique_ptr<InferenceRequest> r) {
-        return serving_loop_->submit_async(std::move(r));
-    }
-    bool step() { return serving_loop_->step(); }
-    void run_loop() { serving_loop_->run_loop(); }
-    void run_serving() { serving_loop_->run_serving(); }
-    void stop_serving() { serving_loop_->stop(); }
-
-    // Delegation to Profiler
-    void warmup(size_t pl = 128, size_t ds = 128) { profiler_->warmup(pl, ds); }
-    std::pair<double, double> profile(size_t pl = 128, size_t ds = 128) { return profiler_->profile(pl, ds); }
+    // Sub-component accessors (callers use these directly instead of delegation)
+    ServingLoop &serving_loop() { return *serving_loop_; }
+    Profiler &profiler() { return *profiler_; }
 
 private:
     InferenceEngine(
