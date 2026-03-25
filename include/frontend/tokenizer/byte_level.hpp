@@ -3,6 +3,7 @@
 #include <string>
 #include <unicode/unistr.h>
 #include <unordered_map>
+#include <vector>
 
 namespace zedinfer::tokenizer {
 
@@ -13,7 +14,7 @@ namespace zedinfer::tokenizer {
 class ByteLevel {
 public:
     // Map a single byte to its Unicode string representation.
-    static std::string byte_to_unicode(unsigned char byte);
+    static const std::string& byte_to_unicode(unsigned char byte);
 
     // Map a Unicode code point back to its original byte.
     static unsigned char unicode_to_byte(UChar32 unicode_char);
@@ -26,11 +27,11 @@ public:
 
 private:
     // Build static lookup tables.
-    static std::unordered_map<unsigned char, std::string> create_byte_to_unicode_map();
+    static std::vector<std::string> create_byte_to_unicode_map();
     static std::unordered_map<UChar32, unsigned char> create_unicode_to_byte_map();
 
     // Precomputed bidirectional mappings.
-    static const std::unordered_map<unsigned char, std::string> byte_to_unicode_map_;
+    static const std::vector<std::string> byte_to_unicode_table_;
     static const std::unordered_map<UChar32, unsigned char> unicode_to_byte_map_;
 };
 

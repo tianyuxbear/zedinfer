@@ -9,6 +9,9 @@
 #include <iostream>
 #include <nlohmann/json.hpp>
 #include <plog/Log.h>
+#include <thread>
+#include <immintrin.h>
+#include <algorithm>
 
 using json = nlohmann::json;
 
@@ -98,35 +101,37 @@ void HFTokenizer::load_from_file(const std::string& tokenizer_path) {
         tokenizer_config_path.replace_filename("tokenizer_config.json");
         load_config_file(tokenizer_config_path.string());
     }
+    precompute_int_merges();
 }
 
-std::vector<int> HFTokenizer::encode(const std::string& text) {
+std::vector<int> HFTokenizer::encode(const std::string &text) {
+    // Set threshold for parallel execution: 8KB
+    const size_t PARALLEL_THRESHOLD =8*1024;
+
+    std::vector<int> core_tokens;
+    
+    if (text.size() < PARALLEL_THRESHOLD) {
+        core_tokens = encode_core(text);
+    } else {
+        core_tokens = encode_parallel(text);
+    }
+
     std::vector<int> result;
+    // Reserve space for BOS and EOS tokens
+    result.reserve(core_tokens.size() + 2); 
 
     if (config_.add_bos_token && special_tokens_.bos_token_id != -1) {
         result.push_back(special_tokens_.bos_token_id);
     }
 
-    // Split text by special tokens
-    std::vector<std::string> segments = split_by_special_tokens(text);
-    for (const auto& segment : segments) {
-        if (special_tokens_.is_special_token(segment)) {
-            result.push_back(special_tokens_.token_to_id[segment]);
-        } else {
-            auto words = pre_tokenize(segment);
-            for (const auto& word : words) {
-                auto word_tokens = bpe_encode(word);
-                result.insert(result.end(), word_tokens.begin(), word_tokens.end());
-            }
-        }
-    }
+    result.insert(result.end(), core_tokens.begin(), core_tokens.end());
 
     if (config_.add_eos_token && special_tokens_.eos_token_id != -1) {
         result.push_back(special_tokens_.eos_token_id);
     }
 
     // Truncate to model_max_length, preserving EOS if present
-    if (result.size() > static_cast<size_t>(config_.model_max_length)) {
+    if (config_.model_max_length > 0 && result.size() > static_cast<size_t>(config_.model_max_length)) {
         bool has_eos = false;
         if (config_.add_eos_token && !result.empty() && result.back() == special_tokens_.eos_token_id) {
             result.pop_back();
@@ -217,7 +222,11 @@ void HFTokenizer::load_config_file(const std::string& tokenizer_config_path) {
     }
 
     json config;
-    file >> config;
+    try {
+        file >> config;
+    } catch (...) {
+        return; 
+    }
 
     if (config.contains("add_bos_token") && config["add_bos_token"].is_boolean()) {
         config_.add_bos_token = config["add_bos_token"].get<bool>();
@@ -401,50 +410,45 @@ std::vector<int> HFTokenizer::bpe_encode(const std::string& word) {
         return {};
     }
 
+    // Return early if the full word is already in the vocabulary
     auto vocab_it = vocab_.find(word);
     if (vocab_it != vocab_.end()) {
         return {vocab_it->second};
     }
 
-    // Apply byte-level encoding
-    std::string byte_encoded_word = ByteLevel::bytes_to_unicode(word);
+    // Map raw bytes directly to Token IDs: Raw Byte -> Byte-Level Unicode -> Vocab ID
+    std::vector<int> ids;
+    ids.reserve(word.size()); 
 
-    // Split into Unicode characters
-    std::vector<std::string> chars;
-    icu::UnicodeString uWord = icu::UnicodeString::fromUTF8(byte_encoded_word);
-    for (int32_t i = 0; i < uWord.length(); ++i) {
-        icu::UnicodeString uChar = uWord.tempSubString(i, 1);
-        std::string char_str;
-        uChar.toUTF8String(char_str);
-        chars.push_back(char_str);
-    }
-
-    // Perform BPE merges
-    while (chars.size() > 1) {
-        auto best_pair = find_best_mergeable_pair(chars);
-        if (best_pair.first == -1) {
-            break;
-        }
-        chars = merge_pair(chars, best_pair.first, best_pair.second);
-    }
-
-    // Map to token IDs
-    std::vector<int> result;
-    for (const auto& token : chars) {
-        auto it = vocab_.find(token);
+    for (unsigned char byte : word) {
+        const std::string& char_str = ByteLevel::byte_to_unicode(byte);
+        
+        auto it = vocab_.find(char_str);
         if (it != vocab_.end()) {
-            result.push_back(it->second);
+            ids.push_back(it->second);
         } else {
-            LOG_ERROR_(utils::BOTH) << "Token not in vocab after BPE: [" << token << "]" << std::endl;
+            // UNK
             if (special_tokens_.unk_token_id != -1) {
-                result.push_back(special_tokens_.unk_token_id);
-            } else {
-                throw std::runtime_error("Token not in vocab and no UNK token: " + token);
+                ids.push_back(special_tokens_.unk_token_id);
             }
         }
     }
 
-    return result;
+    // Perform merges on integer sequences
+    while (ids.size() > 1) {
+        std::pair<int, MergeRule> result = find_best_mergeable_pair_int(ids);
+        int best_idx = result.first;
+        if (best_idx == -1) {
+            break;
+        }
+        ids[best_idx] = result.second.new_id;
+        for (size_t i = best_idx + 1; i < ids.size() - 1; ++i) {
+            ids[i] = ids[i + 1];
+        }
+        ids.pop_back();
+    }
+
+    return ids;
 }
 
 std::string HFTokenizer::cleanup_spaces(const std::string& text) {
@@ -479,34 +483,188 @@ std::string HFTokenizer::cleanup_spaces(const std::string& text) {
     return result;
 }
 
-// Find the highest-priority mergeable pair
-std::pair<int, int> HFTokenizer::find_best_mergeable_pair(const std::vector<std::string>& chars) {
-    int best_rank = INT_MAX;
-    int best_i = -1;
+// Precompute integer merge rules
+void HFTokenizer::precompute_int_merges() {
+    if (merges_.empty() || vocab_.empty()) return;
 
-    for (size_t i = 0; i < chars.size() - 1; ++i) {
-        std::string pair = chars[i] + " " + chars[i + 1];
-        auto it = merges_.find(pair);
-        if (it != merges_.end() && it->second < best_rank) {
-            best_rank = it->second;
-            best_i = static_cast<int>(i);
+    int_merges_.clear();
+    int_merges_.reserve(merges_.size());
+
+    for (const auto &entry : merges_) {
+        const std::string &pair_str = entry.first;
+        int rank = entry.second;
+
+        size_t space_pos = pair_str.find(' ');
+        if (space_pos == std::string::npos) {
+            continue; 
+        }
+
+        std::string p1 = pair_str.substr(0, space_pos);
+        std::string p2 = pair_str.substr(space_pos + 1);
+
+        auto it1 = vocab_.find(p1);
+        auto it2 = vocab_.find(p2);
+        
+        if (it1 != vocab_.end() && it2 != vocab_.end()) {
+            int id1 = it1->second;
+            int id2 = it2->second;
+            std::string combined = p1 + p2;
+            auto it_combined = vocab_.find(combined);
+            
+            if (it_combined != vocab_.end()) {
+                int new_id = it_combined->second;
+                int_merges_[get_pair_key(id1, id2)] = {rank, new_id};
+            }
         }
     }
-
-    return {best_i, best_i == -1 ? -1 : best_i + 1};
 }
 
-// Merge a pair of adjacent tokens
-std::vector<std::string> HFTokenizer::merge_pair(const std::vector<std::string>& chars, int i, int j) {
-    std::vector<std::string> result;
-    for (size_t idx = 0; idx < chars.size(); ++idx) {
-        if (static_cast<int>(idx) == i) {
-            result.push_back(chars[i] + chars[j]);
-        } else if (static_cast<int>(idx) != j) {
-            result.push_back(chars[idx]);
+std::pair<int, HFTokenizer::MergeRule> 
+HFTokenizer::find_best_mergeable_pair_int(const std::vector<int>& ids) const {
+    int best_idx = -1;
+    MergeRule best_rule = {2147483647, -1}; // INT_MAX
+
+    if (ids.size() < 2) {
+        return {best_idx, best_rule};
+    }
+
+    for (size_t i = 0; i < ids.size() - 1; ++i) {
+        uint64_t key = get_pair_key(ids[i], ids[i+1]);    
+        auto it = int_merges_.find(key);
+        if (it != int_merges_.end()) {
+            if (it->second.rank < best_rule.rank) {
+                best_rule = it->second;
+                best_idx = static_cast<int>(i);
+            }
         }
     }
+
+    return {best_idx, best_rule};
+}
+
+
+// Helper: SIMD-accelerated search for safe split points
+__attribute__((target("avx2")))
+inline void scan_boundaries_simd(const char* data, size_t len, 
+                                 size_t& best_p1, size_t& best_p2, size_t& best_p3) {
+    __m256i v_newline = _mm256_set1_epi8('\n');          // Priority 1
+    __m256i v_dot     = _mm256_set1_epi8('.');           // Priority 2
+    __m256i v_excl    = _mm256_set1_epi8('!');
+    __m256i v_ques    = _mm256_set1_epi8('?');
+    __m256i v_space   = _mm256_set1_epi8(' ');           // Priority 3
+    __m256i v_tab     = _mm256_set1_epi8('\t');
+
+    for (size_t i = 0; i + 32 <= len; i += 32) {
+        __m256i v_data = _mm256_loadu_si256((const __m256i*)(data + i));
+
+        if (best_p1 == 0) {
+            uint32_t m1 = _mm256_movemask_epi8(_mm256_cmpeq_epi8(v_data, v_newline));
+            if (m1 != 0) {
+                best_p1 = i + __builtin_ctz(m1) + 1; 
+                return; 
+            }
+        }
+
+        if (best_p2 == 0) {
+            uint32_t m2 = _mm256_movemask_epi8(_mm256_or_si256(
+                _mm256_or_si256(_mm256_cmpeq_epi8(v_data, v_dot), _mm256_cmpeq_epi8(v_data, v_excl)),
+                _mm256_cmpeq_epi8(v_data, v_ques)
+            ));
+            if (m2 != 0) best_p2 = i + __builtin_ctz(m2) + 1;
+        }
+
+        if (best_p3 == 0) {
+            uint32_t m3 = _mm256_movemask_epi8(_mm256_or_si256(
+                _mm256_cmpeq_epi8(v_data, v_space), _mm256_cmpeq_epi8(v_data, v_tab)
+            ));
+            if (m3 != 0) best_p3 = i + __builtin_ctz(m3) + 1;
+        }
+    }
+}
+
+size_t HFTokenizer::find_safe_split_point(const std::string &text, size_t target_pos) const {
+    if (target_pos >= text.size()) return text.size();
+    
+    size_t search_limit = std::min(text.size(), target_pos + 5000); 
+    size_t len = search_limit - target_pos;
+    
+    size_t best_p1 = 0, best_p2 = 0, best_p3 = 0;
+
+    scan_boundaries_simd(text.data() + target_pos, len, best_p1, best_p2, best_p3);
+
+    if (best_p1 != 0) return target_pos + best_p1;
+    if (best_p2 != 0) return target_pos + best_p2;
+    if (best_p3 != 0) return target_pos + best_p3;
+
+    return search_limit;
+}
+
+std::vector<int> HFTokenizer::encode_core(const std::string &text) {
+    std::vector<int> result;
+
+    std::vector<std::string> segments = split_by_special_tokens(text);
+    
+    for (const auto &segment : segments) {
+        if (special_tokens_.is_special_token(segment)) {
+            result.push_back(special_tokens_.token_to_id[segment]);
+        } else {
+            auto words = pre_tokenize(segment);
+            for (const auto &word : words) {
+                auto word_tokens = bpe_encode(word);
+                result.insert(result.end(), word_tokens.begin(), word_tokens.end());
+            }
+        }
+    }
+
     return result;
+}
+
+std::vector<int> HFTokenizer::encode_parallel(const std::string &text) {
+    // Manually set thread count (adjust for performance tuning).
+    int num_threads = 24; 
+
+    std::vector<size_t> boundaries;
+    boundaries.push_back(0); 
+
+    size_t rough_chunk_size = text.size() / num_threads;
+    size_t current_pos = 0;
+
+    for (int i = 0; i < num_threads - 1; ++i) {
+        current_pos += rough_chunk_size;
+        if (current_pos >= text.size()) break;
+
+        size_t safe_pos = find_safe_split_point(text, current_pos);
+        if (safe_pos < text.size()) {
+            boundaries.push_back(safe_pos);
+            current_pos = safe_pos; 
+        } else {
+            break;
+        }
+    }
+    boundaries.push_back(text.size()); 
+
+    int actual_chunks = boundaries.size() - 1;
+    std::vector<std::vector<int>> partial_results(actual_chunks);
+
+    #pragma omp parallel for
+    for (int i = 0; i < actual_chunks; ++i) {
+        size_t start = boundaries[i];
+        size_t len = boundaries[i + 1] - start;
+        partial_results[i] = encode_core(text.substr(start, len));
+    }
+
+    std::vector<int> final_result;
+    size_t total_tokens = 0;
+    for (const auto& res : partial_results) {
+        total_tokens += res.size();
+    }
+    final_result.reserve(total_tokens+2);
+
+    for (auto& res : partial_results) {
+        final_result.insert(final_result.end(), res.begin(), res.end());
+    }
+
+    return final_result;
 }
 
 } // namespace zedinfer::tokenizer

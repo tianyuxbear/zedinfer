@@ -8,13 +8,15 @@
 namespace zedinfer::tokenizer {
 
 // Static member definitions.
-const std::unordered_map<unsigned char, std::string> ByteLevel::byte_to_unicode_map_
-    = ByteLevel::create_byte_to_unicode_map();
+const std::vector<std::string>
+    ByteLevel::byte_to_unicode_table_ = ByteLevel::create_byte_to_unicode_map();
 
 const std::unordered_map<UChar32, unsigned char> ByteLevel::unicode_to_byte_map_
     = ByteLevel::create_unicode_to_byte_map();
 
-std::unordered_map<unsigned char, std::string> ByteLevel::create_byte_to_unicode_map() {
+std::vector<std::string>
+ByteLevel::create_byte_to_unicode_map() {
+    std::vector<std::string> table(256);
     std::vector<int> bytes;
     // Printable ASCII: '!' to '~' (33–126)
     for (int b = 33; b <= 126; ++b) { bytes.push_back(b); }
@@ -31,15 +33,13 @@ std::unordered_map<unsigned char, std::string> ByteLevel::create_byte_to_unicode
             ++n;
         }
     }
-
-    std::unordered_map<unsigned char, std::string> map;
     for (size_t i = 0; i < bytes.size(); ++i) {
         icu::UnicodeString uStr(static_cast<UChar32>(unicode_chars[i]));
         std::string utf8;
         uStr.toUTF8String(utf8);
-        map[static_cast<unsigned char>(bytes[i])] = utf8;
+        table[static_cast<unsigned char>(bytes[i])] = utf8; 
     }
-    return map;
+    return table;
 }
 
 std::unordered_map<UChar32, unsigned char> ByteLevel::create_unicode_to_byte_map() {
@@ -64,14 +64,8 @@ std::unordered_map<UChar32, unsigned char> ByteLevel::create_unicode_to_byte_map
     return map;
 }
 
-std::string ByteLevel::byte_to_unicode(unsigned char byte) {
-    auto it = byte_to_unicode_map_.find(byte);
-    if (it != byte_to_unicode_map_.end()) {
-        return it->second;
-    }
-    // Should never happen: all 256 bytes are mapped.
-    LOG_ERROR_(utils::BOTH) << "[ByteLevel] Warning: No mapping for byte " << static_cast<int>(byte) << '\n';
-    return std::string(1, static_cast<char>(byte));
+const std::string& ByteLevel::byte_to_unicode(unsigned char byte) {
+    return byte_to_unicode_table_[byte];    
 }
 
 unsigned char ByteLevel::unicode_to_byte(UChar32 unicode_char) {

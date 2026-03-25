@@ -44,6 +44,19 @@ private:
     std::unordered_map<std::string, int> vocab_;
     std::unordered_map<int, std::string> id_to_token_;
     std::unordered_map<std::string, int> merges_;
+    
+    // Integer-based BPE
+    struct MergeRule{
+        int rank; // Rank
+        int new_id; // token ID
+    };
+    // Merge Table
+    std::unordered_map<uint64_t,MergeRule> int_merges_;
+    static inline uint64_t get_pair_key(int left, int right) {
+        return (static_cast<uint64_t>(left) << 32) | static_cast<uint32_t>(right);
+    }
+    void precompute_int_merges();
+    std::pair<int, MergeRule> find_best_mergeable_pair_int(const std::vector<int>& ids) const;
 
     // Pre-tokenization regex.
     std::string pattern_;
@@ -62,12 +75,19 @@ private:
     std::string regex_escape(const std::string& str);
 
     // BPE encoding logic.
-    std::vector<int> bpe_encode(const std::string& word);
-    std::pair<int, int> find_best_mergeable_pair(const std::vector<std::string>& chars);
-    std::vector<std::string> merge_pair(const std::vector<std::string>& chars, int i, int j);
+    std::vector<int> bpe_encode(const std::string &word);
 
     // Post-decode cleanup.
-    std::string cleanup_spaces(const std::string& text);
+    std::string cleanup_spaces(const std::string &text);
+    
+    // Process a single large chunk.
+    std::vector<int> encode_core(const std::string &text); 
+    
+    // Split oversized text and dispatch to multiple threads.
+    std::vector<int> encode_parallel(const std::string &text); 
+    
+    // Smart boundary detection.
+    size_t find_safe_split_point(const std::string &text, size_t target_pos) const;
 };
 
 } // namespace zedinfer::tokenizer

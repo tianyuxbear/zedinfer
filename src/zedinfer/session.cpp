@@ -5,7 +5,6 @@
 #include <iomanip>
 #include <random>
 #include <sstream>
-
 namespace zedinfer {
 
 static std::string clean_output(const std::string& raw, const ChatTemplate& tmpl) {
