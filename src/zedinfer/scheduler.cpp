@@ -105,14 +105,7 @@ ScheduledBatch Scheduler::schedule() {
         if (block_allocator_) {
             auto &bt = req_ptr->active_block_table();
             int next_pos = bt.seq_len + 1;
-            int bs = block_allocator_->block_size();
-            int blocks_needed = (next_pos + bs - 1) / bs;
-            for (int layer = 0; layer < bt.num_layers; ++layer) {
-                while (static_cast<int>(bt.k_blocks[layer].size()) < blocks_needed)
-                    block_allocator_->extend_sequence(bt, layer, true);
-                while (static_cast<int>(bt.v_blocks[layer].size()) < blocks_needed)
-                    block_allocator_->extend_sequence(bt, layer, false);
-            }
+            block_allocator_->ensure_blocks(bt, next_pos);
         }
 
         batch.decode_requests.push_back(req_ptr.get());
@@ -174,26 +167,12 @@ ScheduledBatch Scheduler::schedule() {
                 } else {
                     // Prefix matched — extend for remaining tokens
                     int total_after = cached_tokens + (static_cast<int>(req->input_ids.size()) - cached_tokens) + 256;
-                    int bs = block_allocator_->block_size();
-                    int blocks_needed = (total_after + bs - 1) / bs;
-                    for (int layer = 0; layer < bt2.num_layers; ++layer) {
-                        while (static_cast<int>(bt2.k_blocks[layer].size()) < blocks_needed)
-                            block_allocator_->extend_sequence(bt2, layer, true);
-                        while (static_cast<int>(bt2.v_blocks[layer].size()) < blocks_needed)
-                            block_allocator_->extend_sequence(bt2, layer, false);
-                    }
+                    block_allocator_->ensure_blocks(bt2, total_after);
                 }
             } else {
                 // Session multi-turn: extend blocks for new tokens
                 int total_after = bt.seq_len + static_cast<int>(req->input_ids.size()) + 256;
-                int bs = block_allocator_->block_size();
-                int blocks_needed = (total_after + bs - 1) / bs;
-                for (int layer = 0; layer < bt.num_layers; ++layer) {
-                    while (static_cast<int>(bt.k_blocks[layer].size()) < blocks_needed)
-                        block_allocator_->extend_sequence(bt, layer, true);
-                    while (static_cast<int>(bt.v_blocks[layer].size()) < blocks_needed)
-                        block_allocator_->extend_sequence(bt, layer, false);
-                }
+                block_allocator_->ensure_blocks(bt, total_after);
             }
         }
 

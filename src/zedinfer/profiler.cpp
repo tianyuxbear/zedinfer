@@ -16,21 +16,6 @@ namespace zedinfer {
 Profiler::Profiler(std::shared_ptr<InferenceEngine> engine)
     : engine_(std::move(engine)) {}
 
-// Helper: ensure the block table has enough blocks allocated for `needed_len` tokens.
-// Follows the same pattern as Scheduler::schedule() (scheduler.cpp lines 99-110).
-static void ensure_blocks(kvcache::BlockAllocator &allocator,
-                          kvcache::SequenceBlockTable &bt,
-                          int needed_len) {
-    int bs = allocator.block_size();
-    int blocks_needed = (needed_len + bs - 1) / bs;
-    for (int layer = 0; layer < bt.num_layers; ++layer) {
-        while (static_cast<int>(bt.k_blocks[layer].size()) < blocks_needed)
-            allocator.extend_sequence(bt, layer, true);
-        while (static_cast<int>(bt.v_blocks[layer].size()) < blocks_needed)
-            allocator.extend_sequence(bt, layer, false);
-    }
-}
-
 void Profiler::warmup(size_t prefill_len, size_t decode_steps) {
     LOGI << "[Profiler] Warming up with prefill_len=" << prefill_len
          << ", decode_steps=" << decode_steps;
@@ -52,7 +37,7 @@ void Profiler::warmup(size_t prefill_len, size_t decode_steps) {
 
     // Prefill (no scratch — N > 1)
     int past_len = 0;
-    ensure_blocks(*allocator, block_table, past_len + static_cast<int>(prefill_len));
+    allocator->ensure_blocks(block_table, past_len + static_cast<int>(prefill_len));
     {
         model::PagedForwardContext ctx(dummy, past_len, block_table, *pool);
         auto logits = model::transformer_forward(fwd_cfg, ctx, engine_->exec_config());
@@ -63,7 +48,7 @@ void Profiler::warmup(size_t prefill_len, size_t decode_steps) {
         // Decode (with scratch — N == 1)
         for (size_t i = 1; i < decode_steps; ++i) {
             std::vector<int> tok = {next};
-            ensure_blocks(*allocator, block_table, past_len + 1);
+            allocator->ensure_blocks(block_table, past_len + 1);
             model::PagedForwardContext dctx(tok, past_len, block_table, *pool);
             logits = model::transformer_forward(fwd_cfg, dctx, engine_->exec_config(), scratch);
             next = engine_->sampler().sample(logits);
@@ -98,7 +83,7 @@ std::pair<double, double> Profiler::profile(size_t prefill_len, size_t decode_st
 
     // Prefill (no scratch)
     int past_len = 0;
-    ensure_blocks(*allocator, block_table, past_len + static_cast<int>(prefill_len));
+    allocator->ensure_blocks(block_table, past_len + static_cast<int>(prefill_len));
 
     auto p0 = std::chrono::high_resolution_clock::now();
     tensor_t logits;
@@ -117,7 +102,7 @@ std::pair<double, double> Profiler::profile(size_t prefill_len, size_t decode_st
     auto d0 = std::chrono::high_resolution_clock::now();
     for (size_t i = 1; i < decode_steps; ++i) {
         std::vector<int> tok = {next};
-        ensure_blocks(*allocator, block_table, past_len + 1);
+        allocator->ensure_blocks(block_table, past_len + 1);
         model::PagedForwardContext ctx(tok, past_len, block_table, *pool);
         logits = model::transformer_forward(fwd_cfg, ctx, engine_->exec_config(), scratch);
         next = engine_->sampler().sample(logits);

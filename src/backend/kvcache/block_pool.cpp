@@ -31,7 +31,9 @@ BlockPool::BlockPool(BlockConfig config, int num_blocks,
       device_id_(device_id),
       num_blocks_(num_blocks),
       block_bytes_(config.block_bytes()),
-      block_meta_(num_blocks) {
+      block_meta_(num_blocks),
+      free_count_(num_blocks),
+      evictable_count_(0) {
 
     if (num_blocks <= 0) {
         throw std::invalid_argument("[BlockPool] num_blocks must be positive");
@@ -64,21 +66,26 @@ BlockPool::~BlockPool() {
 
 int BlockPool::allocate() {
     // First try: find a truly free block (ref_count==0, hash==0)
-    for (int i = 0; i < num_blocks_; ++i) {
-        int idx = (next_free_ + i) % num_blocks_;
-        auto &meta = block_meta_[idx];
-        if (meta.ref_count == 0 && meta.content_hash == 0) {
-            meta.ref_count = 1;
-            meta.last_access = ++access_counter_;
-            next_free_ = (idx + 1) % num_blocks_;
-            return idx;
+    if (free_count_ > 0) {
+        for (int i = 0; i < num_blocks_; ++i) {
+            int idx = (next_free_ + i) % num_blocks_;
+            auto &meta = block_meta_[idx];
+            if (meta.ref_count == 0 && meta.content_hash == 0) {
+                meta.ref_count = 1;
+                meta.last_access = ++access_counter_;
+                next_free_ = (idx + 1) % num_blocks_;
+                free_count_--;
+                return idx;
+            }
         }
     }
     // Second try: evict an evictable block (ref_count==0, hash!=0)
     int evicted = evict_one();
     if (evicted >= 0) {
+        // evict_one already moved evictable→free (evictable_count_--, free_count_++)
         block_meta_[evicted].ref_count = 1;
         block_meta_[evicted].last_access = ++access_counter_;
+        free_count_--;
         return evicted;
     }
     return -1;
@@ -89,6 +96,17 @@ void BlockPool::free(int block_id) {
         throw std::out_of_range("[BlockPool] Invalid block_id: " + std::to_string(block_id));
     }
     auto &meta = block_meta_[block_id];
+    // Update counters based on previous state
+    if (meta.ref_count > 0) {
+        // was used → becoming free
+    } else if (meta.content_hash != 0) {
+        // was evictable → becoming free
+        evictable_count_--;
+    } else {
+        // already free — no counter change
+        return;
+    }
+    free_count_++;
     meta.ref_count = 0;
     meta.content_hash = 0;
     meta.last_access = 0;
@@ -97,6 +115,11 @@ void BlockPool::free(int block_id) {
 
 void BlockPool::share(int block_id) {
     auto &meta = block_meta_[block_id];
+    if (meta.ref_count == 0) {
+        // Transitioning from free/evictable → used
+        if (meta.content_hash != 0) evictable_count_--;
+        else free_count_--;
+    }
     meta.ref_count++;
     meta.last_access = ++access_counter_;
 }
@@ -104,8 +127,13 @@ void BlockPool::share(int block_id) {
 void BlockPool::release(int block_id) {
     if (block_id < 0 || block_id >= num_blocks_) return;
     auto &meta = block_meta_[block_id];
-    if (meta.ref_count > 0) meta.ref_count--;
-    // When ref_count reaches 0, block stays with its hash (evictable/cacheable).
+    if (meta.ref_count <= 0) return;
+    meta.ref_count--;
+    if (meta.ref_count == 0) {
+        // Transitioning used → evictable or free
+        if (meta.content_hash != 0) evictable_count_++;
+        else free_count_++;
+    }
 }
 
 int BlockPool::ref_count(int block_id) const {
@@ -113,7 +141,14 @@ int BlockPool::ref_count(int block_id) const {
 }
 
 void BlockPool::set_content_hash(int block_id, uint64_t hash) {
-    block_meta_[block_id].content_hash = hash;
+    auto &meta = block_meta_[block_id];
+    if (meta.ref_count == 0) {
+        bool was_evictable = (meta.content_hash != 0);
+        bool will_be_evictable = (hash != 0);
+        if (was_evictable && !will_be_evictable) { evictable_count_--; free_count_++; }
+        else if (!was_evictable && will_be_evictable) { free_count_--; evictable_count_++; }
+    }
+    meta.content_hash = hash;
 }
 
 uint64_t BlockPool::content_hash(int block_id) const {
@@ -133,6 +168,7 @@ void BlockPool::touch(int block_id) {
 }
 
 int BlockPool::evict_one() {
+    if (evictable_count_ == 0) return -1;
     int best = -1;
     uint64_t oldest = UINT64_MAX;
     for (int i = 0; i < num_blocks_; ++i) {
@@ -143,19 +179,17 @@ int BlockPool::evict_one() {
         }
     }
     if (best >= 0) {
-        // Hard free the evicted block
         block_meta_[best].content_hash = 0;
         block_meta_[best].last_access = 0;
         block_meta_[best].immutable = false;
+        evictable_count_--;
+        free_count_++;
     }
     return best;
 }
 
 int BlockPool::evictable_count() const {
-    int count = 0;
-    for (auto &meta : block_meta_)
-        if (meta.ref_count == 0 && meta.content_hash != 0) count++;
-    return count;
+    return evictable_count_;
 }
 
 void *BlockPool::block_data(int block_id) const {
@@ -165,23 +199,9 @@ void *BlockPool::block_data(int block_id) const {
     return static_cast<std::byte *>(pool_memory_) + static_cast<size_t>(block_id) * block_bytes_;
 }
 
-int BlockPool::free_blocks() const {
-    int count = 0;
-    for (auto &meta : block_meta_)
-        if (meta.ref_count == 0 && meta.content_hash == 0) count++;
-    return count;
-}
-
-int BlockPool::used_blocks() const {
-    int count = 0;
-    for (auto &meta : block_meta_)
-        if (meta.ref_count > 0) count++;
-    return count;
-}
-
-int BlockPool::available_blocks() const {
-    return free_blocks() + evictable_count();
-}
+int BlockPool::free_blocks() const { return free_count_; }
+int BlockPool::used_blocks() const { return num_blocks_ - free_count_ - evictable_count_; }
+int BlockPool::available_blocks() const { return free_count_ + evictable_count_; }
 
 size_t BlockPool::memory_usage() const {
     return static_cast<size_t>(num_blocks_) * block_bytes_;
@@ -200,7 +220,7 @@ SequenceBlockTable BlockAllocator::allocate_sequence(int estimated_tokens) {
 
     // Total blocks needed: blocks_per_layer * num_layers * 2 (K + V)
     int total_needed = blocks_per_layer * num_layers_ * 2;
-    if (total_needed > pool_.free_blocks()) {
+    if (total_needed > pool_.available_blocks()) {
         throw std::runtime_error(
             "[BlockAllocator] Not enough blocks: need " + std::to_string(total_needed) +
             ", available " + std::to_string(pool_.free_blocks()));
@@ -242,6 +262,17 @@ int BlockAllocator::extend_sequence(SequenceBlockTable &table, int layer, bool i
         table.v_blocks[layer].push_back(block_id);
     }
     return block_id;
+}
+
+void BlockAllocator::ensure_blocks(SequenceBlockTable &table, int needed_len) {
+    int bs = pool_.config().block_size;
+    int blocks_needed = (needed_len + bs - 1) / bs;
+    for (int layer = 0; layer < table.num_layers; ++layer) {
+        while (static_cast<int>(table.k_blocks[layer].size()) < blocks_needed)
+            extend_sequence(table, layer, true);
+        while (static_cast<int>(table.v_blocks[layer].size()) < blocks_needed)
+            extend_sequence(table, layer, false);
+    }
 }
 
 void BlockAllocator::free_sequence(SequenceBlockTable &table) {
