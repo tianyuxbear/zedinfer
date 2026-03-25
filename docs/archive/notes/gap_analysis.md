@@ -159,7 +159,7 @@
 - No HTTP server code exists
 - No request/response types
 - No API endpoints
-- `chat.cpp` uses readline for interactive CLI
+- `chat.cpp` uses linenoise for interactive CLI
 
 ### Gap
 - Need HTTP server (e.g., cpp-httplib, Boost.Beast, or similar lightweight C++ HTTP lib)

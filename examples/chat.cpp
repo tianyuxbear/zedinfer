@@ -11,7 +11,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <memory>
-#include <readline/readline.h>
+#include <linenoise.h>
 #include <string>
 
 using namespace zedinfer;
@@ -90,11 +90,12 @@ int main(int argc, char *argv[]) {
     std::setlocale(LC_ALL, "en_US.UTF-8");
 
     while (true) {
-        char *input = readline("\n\033[1;32mUser:\033[0m ");
+        printf("\n");
+        char *input = linenoise("\033[1;32mUser:\033[0m ");
         if (!input) break; // EOF (Ctrl+D)
 
         std::string user_input(input);
-        free(input);
+        linenoiseFree(input);
 
         // Trim
         user_input.erase(0, user_input.find_first_not_of(" \t\n\r"));

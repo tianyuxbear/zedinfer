@@ -10,7 +10,7 @@
 - **Standard**: C++17
 - **Dependencies**:
   - `icu4c` - Unicode processing (tokenizer regex)
-  - `readline` - Interactive CLI (chat example)
+  - `linenoise` - Interactive CLI (chat example, BSD-2-Clause)
   - `gtest` - Unit testing
   - `pybind11` - Optional Python operator test bindings
   - `nlohmann/json` - JSON parsing (model config, tokenizer)
@@ -85,7 +85,7 @@ zedinfer/
   src/                              # Implementations matching include/ structure
   examples/
     bench.cpp                       # Benchmarking (prefill/decode latency measurement)
-    chat.cpp                        # Interactive multi-turn chat with readline
+    chat.cpp                        # Interactive multi-turn chat with linenoise
     ping.cpp                        # Quick single-turn test
   tests/
     core/test_memory_pool.cpp       # Memory pool tests
@@ -104,7 +104,7 @@ zedinfer/
 | Binary | Source | Purpose |
 |--------|--------|---------|
 | `bench` | `examples/bench.cpp` | Performance benchmarking (configurable prefill/decode lengths, rounds, device) |
-| `chat` | `examples/chat.cpp` | Interactive multi-turn chat with readline (hardcoded NVIDIA device) |
+| `chat` | `examples/chat.cpp` | Interactive multi-turn chat with linenoise (hardcoded NVIDIA device) |
 | `ping` | `examples/ping.cpp` | Quick single-turn test (hardcoded model path and NVIDIA device) |
 
 ## Supported Models
