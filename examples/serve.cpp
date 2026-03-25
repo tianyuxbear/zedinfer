@@ -6,7 +6,7 @@
 #include "zedinfer/http_server.hpp"
 #include "zedinfer/scheduler.hpp"
 
-#include <argparse/argparse.hpp>
+#include <argparse.hpp>
 #include <csignal>
 #include <cstdio>
 #include <iostream>
