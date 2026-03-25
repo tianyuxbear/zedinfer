@@ -142,7 +142,7 @@ xmake run ping /path/to/model --nvidia
 
 ```bash
 # 单请求基准测试
-xmake run bench /path/to/model --nvidia -p 128 -d 128 -r 3 --gpu-memory-utilization 0.1
+xmake run bench /path/to/model --nvidia -p 128 -d 128 -r 3
 
 # 多请求批量基准测试
 xmake run batch_bench /path/to/model --nvidia -p 128 -d 128 --batch 4
@@ -179,7 +179,7 @@ ZEDINFER_TEST_MODEL_PATH=/path/to/model xmake run test-loader
 ```bash
 # 启用 Python 绑定编译
 xmake f -m release --nv-gpu=y --onednn=y --pytest=y
-xmake build
+xmake build zedinfer_ops
 
 # 安装 Python 包
 uv pip install -e python/
