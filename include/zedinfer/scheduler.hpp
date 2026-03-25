@@ -102,6 +102,7 @@ private:
     uint64_t next_request_id_ = 1;
 
     bool can_admit(const InferenceRequest &req) const;
+    void allocate_blocks_for_request(InferenceRequest *req);
     void complete_request(InferenceRequest &req);
 };
 

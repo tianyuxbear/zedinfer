@@ -438,7 +438,7 @@ void HttpServer::handle_chat_completions(const httplib::Request &req,
     inference_req->config.max_new_tokens = max_tokens;
     inference_req->arrival_time = std::chrono::steady_clock::now();
     inference_req->cancelled = cancel_flag;
-    if (use_session && session) inference_req->block_table_ref = &session->block_table();
+    if (use_session && session) inference_req->borrow_block_table(session->block_table());
 
     std::shared_ptr<TokenQueue<std::string>> token_queue;
     if (stream) {

@@ -37,7 +37,7 @@ PagedForwardContext::PagedForwardContext(
 
     for (const auto &s : batch.slots) {
         bool is_decode = !s.is_prefill;
-        slots_.push_back({&s.request->active_block_table(), s.token_offset,
+        slots_.push_back({&s.request->block_table(), s.token_offset,
                           s.num_tokens, s.past_len, is_decode});
     }
 }

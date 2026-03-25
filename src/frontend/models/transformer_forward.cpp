@@ -1,5 +1,5 @@
 #include "frontend/models/forward_config.hpp"
-#include "frontend/models/forward_context.hpp"
+#include "frontend/models/paged_forward_context.hpp"
 #include "frontend/models/decode_scratch.hpp"
 #include "backend/ops/ops.hpp"
 
@@ -16,7 +16,7 @@ namespace zedinfer::model {
  */
 tensor_t transformer_forward(
     const ModelForwardConfig &model,
-    ForwardContext &ctx,
+    PagedForwardContext &ctx,
     const ExecutorConfig &exec_config,
     DecodeScratch *scratch) {
 

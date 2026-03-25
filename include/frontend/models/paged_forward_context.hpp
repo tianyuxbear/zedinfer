@@ -1,7 +1,8 @@
 #pragma once
 
-#include "frontend/models/forward_context.hpp"
 #include "backend/kvcache/block_pool.hpp"
+#include "backend/tensor/tensor.hpp"
+#include "zedinfer/activation.hpp"
 #include "zedinfer/batch_context.hpp"
 
 #include <vector>
@@ -9,15 +10,15 @@
 namespace zedinfer::model {
 
 /**
- * Unified paged forward context for both single-request and batched execution.
- * A single request is just a batch of size 1.
+ * Paged forward context for single-request and batched execution.
+ * Directly used by transformer_forward (no virtual dispatch).
  *
  * Handles:
  *   - Token scatter to blocks (write_kv)
  *   - Paged attention dispatch (attend) — decode and prefill
  *   - Direct-to-block decode writes (zero-copy via is_mmap)
  */
-class PagedForwardContext : public ForwardContext {
+class PagedForwardContext {
 public:
     // Single-request mode (session-based, run_one)
     PagedForwardContext(
@@ -31,16 +32,16 @@ public:
         const BatchContext &batch,
         kvcache::BlockAllocator &allocator);
 
-    int num_tokens() const override { return total_tokens_; }
+    int num_tokens() const { return total_tokens_; }
     void prepare_inputs(tensor_t &ids, tensor_t &pos_ids,
-                        const ExecutorConfig &exec_config) override;
-    void prepare_inputs_into(tensor_t ids, tensor_t pos_ids) override;
-    void write_kv(int layer, tensor_t k, tensor_t v) override;
+                        const ExecutorConfig &exec_config);
+    void prepare_inputs_into(tensor_t ids, tensor_t pos_ids);
+    void write_kv(int layer, tensor_t k, tensor_t v);
     tensor_t attend(int layer, tensor_t q_rope, float scale,
                     const ExecutorConfig &exec_config,
                     size_t nhead, size_t nkvhead, size_t head_dim,
-                    tensor_t pre_alloc_out = nullptr) override;
-    void finalize() override;
+                    tensor_t pre_alloc_out = nullptr);
+    void finalize();
 
 private:
     struct Slot {
