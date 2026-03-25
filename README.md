@@ -142,7 +142,7 @@ xmake run ping /path/to/model --nvidia
 
 ```bash
 # Single-request benchmark
-xmake run bench /path/to/model --nvidia -p 128 -d 128 -r 3 --gpu-memory-utilization 0.1
+xmake run bench /path/to/model --nvidia -p 128 -d 128 -r 3
 
 # Multi-request batch benchmark
 xmake run batch_bench /path/to/model --nvidia -p 128 -d 128 --batch 4
@@ -179,7 +179,7 @@ Operators are tested via Python bindings against PyTorch reference implementatio
 ```bash
 # Build with Python bindings
 xmake f -m release --nv-gpu=y --onednn=y --pytest=y
-xmake build
+xmake build zedinfer_ops
 
 # Install Python package
 uv pip install -e python/
