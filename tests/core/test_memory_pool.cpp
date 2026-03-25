@@ -210,29 +210,29 @@ TEST_F(MemoryPoolTest, LargestFreeBlockTracking) {
 
 // Test 4: Block Coalescing
 TEST_F(MemoryPoolTest, BlockCoalescing) {
-    // 1. 创建10MB连续区域
+    // 1. Create a 10MB contiguous region
     auto base = pool_->allocate(10 * 1024 * 1024);
     pool_->deallocate(base);
 
-    // 2. 分配4个2MB块
+    // 2. Allocate 4 x 2MB blocks
     auto ptr1 = pool_->allocate(2 * 1024 * 1024);
     auto ptr2 = pool_->allocate(2 * 1024 * 1024);
     auto ptr3 = pool_->allocate(2 * 1024 * 1024);
     auto ptr4 = pool_->allocate(2 * 1024 * 1024);
 
-    // 3. 全部释放
+    // 3. Free all
     pool_->deallocate(ptr1);
     pool_->deallocate(ptr2);
     pool_->deallocate(ptr3);
     pool_->deallocate(ptr4);
 
-    // 4. 触发合并
+    // 4. Trigger coalescing
     for (int i = 0; i < 124; ++i) {
         auto p = pool_->allocate(4096);
         pool_->deallocate(p);
     }
 
-    // 5. 验证：能分配8MB（4个2MB合并的结果）
+    // 5. Verify: can allocate 8MB (result of coalescing 4 x 2MB blocks)
     auto large = pool_->allocate(8 * 1024 * 1024);
     EXPECT_EQ(large, base);
 
@@ -240,13 +240,13 @@ TEST_F(MemoryPoolTest, BlockCoalescing) {
 }
 
 TEST_F(MemoryPoolTest, IncrementalCoalescing) {
-    // 分配3个512KB块（更小，更容易控制）
+    // Allocate 3 x 512KB blocks (smaller, easier to control)
     std::vector<std::byte *> ptrs;
     for (int i = 0; i < 3; ++i) {
         ptrs.push_back(pool_->allocate(512 * 1024));
     }
 
-    // 逐个释放，观察增量合并
+    // Free one by one, observe incremental coalescing
     pool_->deallocate(ptrs[1]);
     auto stats1 = pool_->getDetailedFragmentation();
 

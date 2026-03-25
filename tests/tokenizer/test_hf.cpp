@@ -1,15 +1,20 @@
 #include "frontend/tokenizer/hf_tokenizer.hpp"
+#include "zedinfer/chat_template.hpp"
 
+#include <cstdlib>
 #include <gtest/gtest.h>
 #include <string>
 #include <vector>
 
 using namespace zedinfer::tokenizer;
 
-// For server1
-const std::string tokenizer_json_path("/mnt/hdd0/shared/models/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B/tokenizer.json");
-// For server2/server3
-// const std::string tokenizer_json_path("/mnt/hdd/shared/models/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B/tokenizer.json");
+static std::string get_tokenizer_path() {
+    const char *env = std::getenv("ZEDINFER_TEST_MODEL_PATH");
+    std::string base = env ? std::string(env)
+        : "/mnt/hdd0/shared/models/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B";
+    return base + "/tokenizer.json";
+}
+const std::string tokenizer_json_path = get_tokenizer_path();
 
 class HFTokenizerTest : public ::testing::Test {
 protected:
@@ -17,27 +22,28 @@ protected:
 
     void SetUp() override {
         tokenizer = HFTokenizer::create(tokenizer_json_path);
+        if (!tokenizer) GTEST_SKIP() << "Tokenizer not found at: " << tokenizer_json_path;
     }
 };
 
-// ============ 基础功能测试 ============
+// ============ Basic functionality ============
 TEST_F(HFTokenizerTest, HelloTest) {
     std::string text = "Hello, world!";
     auto tokens = tokenizer->encode(text);
 
-    EXPECT_GT(tokens.size(), 0) << "编码结果不应为空";
+    EXPECT_GT(tokens.size(), 0) << "Encoded result should not be empty";
 
     std::string decoded = tokenizer->decode(tokens);
-    EXPECT_EQ(decoded, text) << "解码结果应与原文一致";
+    EXPECT_EQ(decoded, text) << "Decoded text should match original";
 }
 
 TEST_F(HFTokenizerTest, EmptyTest) {
     std::string text = "";
     auto tokens = tokenizer->encode(text);
 
-    // 只有BOS token（如果配置了add_bos_token=true）
+    // Only BOS token (if add_bos_token=true is configured)
     EXPECT_EQ(tokens.size(), 1);
-    EXPECT_EQ(tokens[0], 151646) << "BOS token ID应为151646";
+    EXPECT_EQ(tokens[0], 151646) << "BOS token ID should be 151646";
 }
 
 TEST_F(HFTokenizerTest, MathTest) {
@@ -49,14 +55,14 @@ TEST_F(HFTokenizerTest, MathTest) {
 }
 
 TEST_F(HFTokenizerTest, SpacesTest) {
-    std::string text = "a  b   c"; // 多个空格
+    std::string text = "a  b   c"; // multiple spaces
     auto tokens = tokenizer->encode(text);
     std::string decoded = tokenizer->decode(tokens);
 
     EXPECT_EQ(decoded, "a  b   c");
 }
 
-// ============ 问答模板测试 ============
+// ============ Chat template tests ============
 TEST_F(HFTokenizerTest, PromptTest) {
     std::string prompt = "Who are you?";
     std::string expected_input = "<｜begin▁of▁sentence｜><｜User｜>Who are you?<｜Assistant｜><think>\n";
@@ -70,9 +76,10 @@ TEST_F(HFTokenizerTest, PromptTest) {
     std::vector<std::pair<std::string, std::string>> messages = {
         {"user", prompt}};
 
-    std::string actual_input = hf_tokenizer->apply_chat_template(messages, true);
+    auto tmpl = zedinfer::ChatTemplate::default_deepseek_r1();
+    std::string actual_input = hf_tokenizer->apply_chat_template(messages, tmpl, true);
     EXPECT_EQ(actual_input, expected_input)
-        << "模板应用后不匹配";
+        << "Template application result mismatch";
 }
 
 TEST_F(HFTokenizerTest, EncodePromptTest) {
@@ -84,13 +91,13 @@ TEST_F(HFTokenizerTest, EncodePromptTest) {
     auto actual_ids = tokenizer->encode(input_content);
 
     EXPECT_EQ(actual_ids.size(), expected_ids.size())
-        << "Token数量应匹配。实际: " << actual_ids.size()
-        << ", 期望: " << expected_ids.size();
+        << "Token count should match. actual: " << actual_ids.size()
+        << ", expected: " << expected_ids.size();
 
     for (size_t i = 0; i < std::min(actual_ids.size(), expected_ids.size()); i++) {
         EXPECT_EQ(actual_ids[i], expected_ids[i])
-            << "位置 " << i << " token不匹配。实际: " << actual_ids[i]
-            << ", 期望: " << expected_ids[i];
+            << "Position " << i << " token mismatch. actual: " << actual_ids[i]
+            << ", expected: " << expected_ids[i];
     }
 }
 
@@ -100,23 +107,23 @@ TEST_F(HFTokenizerTest, DecodePromptTest) {
 
     std::string decoded = tokenizer->decode(input_ids);
 
-    // 解码后应包含用户问题
+    // Decoded result should contain the user question
     EXPECT_NE(decoded.find("Who are you?"), std::string::npos)
-        << "解码结果应包含原始问题";
+        << "Decoded result should contain the original question";
 }
 
-// ============ 边界情况测试 ============
+// ============ Edge cases ============
 
 TEST_F(HFTokenizerTest, LongTextTest) {
     std::string long_text = "The quick brown fox jumps over the lazy dog. ";
     for (int i = 0; i < 10; i++) {
-        long_text += long_text; // 指数增长
+        long_text += long_text; // exponential growth
     }
 
     auto tokens = tokenizer->encode(long_text);
     EXPECT_GT(tokens.size(), 100);
 
-    // 解码应该不崩溃
+    // decode should not crash
     std::string decoded = tokenizer->decode(tokens);
     EXPECT_EQ(decoded, long_text);
 }
@@ -129,7 +136,7 @@ TEST_F(HFTokenizerTest, SpecialCharactersTest) {
     EXPECT_EQ(decoded, text);
 }
 
-// ============ 批量测试 ============
+// ============ Batch tests ============
 
 TEST_F(HFTokenizerTest, BatchEncodingTest) {
     std::vector<std::string> texts = {
@@ -143,11 +150,11 @@ TEST_F(HFTokenizerTest, BatchEncodingTest) {
         auto tokens = tokenizer->encode(text);
         std::string decoded = tokenizer->decode(tokens);
 
-        EXPECT_EQ(decoded, text) << "批量测试失败于: " << text;
+        EXPECT_EQ(decoded, text) << "Batch test failed for: " << text;
     }
 }
 
-// ============ 性能测试 ============
+// ============ Performance tests ============
 
 TEST_F(HFTokenizerTest, PerformanceTest) {
     std::string text = "This is a performance test. ";
@@ -165,11 +172,11 @@ TEST_F(HFTokenizerTest, PerformanceTest) {
     auto end = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
 
-    std::cout << "100次编码解码耗时: " << duration.count() << "ms" << std::endl;
-    EXPECT_LT(duration.count(), 10000) << "性能测试超时";
+    std::cout << "100 encode/decode iterations took: " << duration.count() << "ms" << std::endl;
+    EXPECT_LT(duration.count(), 10000) << "Performance test timeout";
 }
 
-// ========== 中文测试 ==========
+// ========== Chinese text tests ==========
 TEST_F(HFTokenizerTest, PromptTest_ZH) {
     std::string prompt = "你好，世界！";
     std::string expected_input = "<｜begin▁of▁sentence｜><｜User｜>你好，世界！<｜Assistant｜><think>\n";
@@ -184,9 +191,10 @@ TEST_F(HFTokenizerTest, PromptTest_ZH) {
     std::vector<std::pair<std::string, std::string>> messages = {
         {"user", prompt}};
 
-    std::string actual_input = hf_tokenizer->apply_chat_template(messages, true);
+    auto tmpl = zedinfer::ChatTemplate::default_deepseek_r1();
+    std::string actual_input = hf_tokenizer->apply_chat_template(messages, tmpl, true);
     EXPECT_EQ(actual_input, expected_input)
-        << "模板应用后不匹配";
+        << "Template application result mismatch";
 }
 
 TEST_F(HFTokenizerTest, EncodePromptTest_ZH) {
@@ -199,13 +207,13 @@ TEST_F(HFTokenizerTest, EncodePromptTest_ZH) {
     auto actual_ids = tokenizer->encode(input_content);
 
     EXPECT_EQ(actual_ids.size(), expected_ids.size())
-        << "Token数量应匹配。实际: " << actual_ids.size()
-        << ", 期望: " << expected_ids.size();
+        << "Token count should match. actual: " << actual_ids.size()
+        << ", expected: " << expected_ids.size();
 
     for (size_t i = 0; i < std::min(actual_ids.size(), expected_ids.size()); i++) {
         EXPECT_EQ(actual_ids[i], expected_ids[i])
-            << "位置 " << i << " token不匹配。实际: " << actual_ids[i]
-            << ", 期望: " << expected_ids[i];
+            << "Position " << i << " token mismatch. actual: " << actual_ids[i]
+            << ", expected: " << expected_ids[i];
     }
 }
 
@@ -216,9 +224,9 @@ TEST_F(HFTokenizerTest, DecodePromptTest_ZH) {
 
     std::string decoded = tokenizer->decode(input_ids);
 
-    // 解码后应包含用户问题
+    // Decoded result should contain the user question
     EXPECT_NE(decoded.find("你好，世界！"), std::string::npos)
-        << "解码结果应包含原始问题";
+        << "Decoded result should contain the original question";
 }
 
 TEST_F(HFTokenizerTest, DecodeAnswerTest_ZH) {
@@ -230,7 +238,7 @@ TEST_F(HFTokenizerTest, DecodeAnswerTest_ZH) {
     std::cout << "decoded: \n"
               << decoded << std::endl;
 
-    // 解码后应包含用户问题
+    // Decoded result should contain the user question
     EXPECT_NE(decoded.find("你好，世界！"), std::string::npos)
-        << "解码结果应包含原始问题";
+        << "Decoded result should contain the original question";
 }

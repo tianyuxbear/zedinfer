@@ -5,6 +5,7 @@
 
 #include <cmath>
 #include <cstddef>
+#include <cstdlib>
 #include <gtest/gtest.h>
 #include <iomanip>
 #include <iostream>
@@ -13,15 +14,17 @@ using namespace zedinfer::loader;
 
 class ModelLoaderTest : public ::testing::Test {
 protected:
-    // For server1
-    std::string model_path = "/mnt/hdd0/shared/models/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B";
-    // For server2/server3
-    // std::string model_path = "/mnt/hdd/shared/models/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B";
+    std::string model_path = []() {
+        const char *env = std::getenv("ZEDINFER_TEST_MODEL_PATH");
+        if (env) return std::string(env);
+        return std::string("/mnt/hdd0/shared/models/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B");
+    }();
 
     std::unique_ptr<IModelLoader> loader;
 
     void SetUp() override {
         loader = SafeTensorsLoader::create(model_path);
+        if (!loader) GTEST_SKIP() << "Model not found at: " << model_path;
     }
 
     void TearDown() override {
@@ -30,7 +33,7 @@ protected:
 };
 
 // ============================================
-// 基本加载测试
+// Basic loading tests
 // ============================================
 
 TEST_F(ModelLoaderTest, ModelLoadsSuccessfully) {
@@ -49,12 +52,12 @@ TEST_F(ModelLoaderTest, HasMultipleSafetensorsFiles) {
     size_t num_files = loader->get_num_files();
     std::cout << "Number of safetensors files: " << num_files << std::endl;
 
-    // DeepSeek-R1-Distill-Qwen-1.5B 通常有多个分片文件
+    // DeepSeek-R1-Distill-Qwen-1.5B typically has multiple shard files
     EXPECT_GE(num_files, 1);
 }
 
 // ============================================
-// 模型结构测试
+// Model structure tests
 // ============================================
 
 TEST_F(ModelLoaderTest, HasEmbeddingLayer) {
@@ -158,14 +161,14 @@ TEST_F(ModelLoaderTest, HasNormalizationLayers) {
 }
 
 // ============================================
-// Tensor信息测试
+// Tensor info tests
 // ============================================
 
 TEST_F(ModelLoaderTest, TensorInfoIsValid) {
     auto names = loader->get_all_tensor_names();
     ASSERT_FALSE(names.empty());
 
-    // 测试第一个tensor
+    // Test the first tensor
     const std::string &first_tensor = names[0];
     const TensorInfo *info = loader->get_tensor_info(first_tensor);
 
@@ -222,7 +225,7 @@ TEST_F(ModelLoaderTest, ListAllTensorNames) {
             }
             std::cout << "]";
 
-            // 显示数据类型
+            // Display data type
             std::cout << " (";
             switch (info->dtype) {
             case ZEDINFER_DTYPE_F32:
@@ -245,14 +248,14 @@ TEST_F(ModelLoaderTest, ListAllTensorNames) {
 }
 
 // ============================================
-// Tensor数据测试
+// Tensor data tests
 // ============================================
 
 TEST_F(ModelLoaderTest, CanAccessTensorData) {
     auto names = loader->get_all_tensor_names();
     ASSERT_FALSE(names.empty());
 
-    // 测试前5个tensor的数据访问
+    // Test data access for the first 5 tensors
     size_t test_count = std::min(5UL, names.size());
 
     for (size_t i = 0; i < test_count; ++i) {
@@ -266,7 +269,7 @@ TEST_F(ModelLoaderTest, CanAccessTensorData) {
 TEST_F(ModelLoaderTest, TensorDataIsNotNull) {
     auto names = loader->get_all_tensor_names();
 
-    // 随机测试10个tensor
+    // Test 10 tensors
     size_t test_count = std::min(10UL, names.size());
 
     for (size_t i = 0; i < test_count; ++i) {
@@ -298,7 +301,7 @@ TEST_F(ModelLoaderTest, CanReadFloatData) {
 
             const zedinfer::bf16_t *bf16_data = reinterpret_cast<const zedinfer::bf16_t *>(data);
 
-            // 简单验证：检查前几个值不是NaN或Inf
+            // Simple validation: check first few values are not NaN or Inf
             for (size_t i = 0; i < std::min(10UL, info->numel()); ++i) {
                 float item = zedinfer::utils::cast<float>(bf16_data[i]);
                 EXPECT_FALSE(std::isnan(item))
@@ -331,7 +334,7 @@ TEST_F(ModelLoaderTest, ReadNormData) {
 }
 
 // ============================================
-// 内存测试
+// Memory tests
 // ============================================
 
 TEST_F(ModelLoaderTest, CalculateTotalParameters) {
@@ -349,7 +352,7 @@ TEST_F(ModelLoaderTest, CalculateTotalParameters) {
               << " (~" << std::fixed << std::setprecision(2)
               << (total_params / 1e9) << "B)" << std::endl;
 
-    // DeepSeek-R1-Distill-Qwen-1.5B 应该约有1.5B参数
+    // DeepSeek-R1-Distill-Qwen-1.5B should have approximately 1.5B parameters
     EXPECT_GT(total_params, 1e9) << "Parameter count seems too low";
     EXPECT_LT(total_params, 3e9) << "Parameter count seems too high";
 }
@@ -357,7 +360,7 @@ TEST_F(ModelLoaderTest, CalculateTotalParameters) {
 TEST_F(ModelLoaderTest, MemoryMappingWorks) {
     auto names = loader->get_all_tensor_names();
 
-    // 多次访问同一个tensor，应该返回相同的指针（mmap）
+    // Accessing the same tensor multiple times should return the same pointer (mmap)
     if (!names.empty()) {
         const void *ptr1 = loader->get_tensor_data(names[0]);
         const void *ptr2 = loader->get_tensor_data(names[0]);
