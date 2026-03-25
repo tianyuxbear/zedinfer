@@ -228,6 +228,74 @@ void PagedForwardContext::build_decode_cache(const ExecutorConfig &exec_config) 
     decode_cache_built_ = true;
 }
 
+void PagedForwardContext::attend_decode_single(
+    int layer, tensor_t q_rope, tensor_t attn,
+    const ops::AttentionConfig &cfg, size_t nhead, size_t head_dim) {
+
+    auto *dt = slots_[0].block_table;
+    for (const auto &slot : slots_) {
+        if (slot.is_decode) { dt = slot.block_table; break; }
+    }
+
+    auto decode_q = q_rope->slice(0, cached_decode_start_, cached_decode_start_ + 1);
+    auto decode_out = attn->slice(0, cached_decode_start_, cached_decode_start_ + 1);
+
+    ops::AttentionParams params{cfg};
+    params.out = decode_out->view({nhead, head_dim});
+    params.q = decode_q->view({nhead, head_dim});
+    params.pool_base = pool_.block_data(0);
+    params.k_block_table = dt->k_blocks[layer].data();
+    params.v_block_table = dt->v_blocks[layer].data();
+    params.seq_len = dt->seq_len + 1;
+    params.seqlen_q = 1;
+    ops::attention(params);
+}
+
+void PagedForwardContext::attend_decode_batched(
+    int layer, tensor_t q_rope, tensor_t attn,
+    const ops::AttentionConfig &cfg) {
+
+    auto decode_q = q_rope->slice(0, cached_decode_start_,
+                                   cached_decode_start_ + cached_num_decode_);
+    auto decode_out = attn->slice(0, cached_decode_start_,
+                                   cached_decode_start_ + cached_num_decode_);
+
+    ops::AttentionParams params{cfg};
+    params.out = decode_out;
+    params.q = decode_q;
+    params.pool_base = pool_.block_data(0);
+    params.batched_k_block_tables = reinterpret_cast<const int *>(
+        decode_layer_cache_[layer].k_bt_gpu->data());
+    params.batched_v_block_tables = reinterpret_cast<const int *>(
+        decode_layer_cache_[layer].v_bt_gpu->data());
+    params.batched_seq_lens = reinterpret_cast<const int *>(seq_lens_gpu_->data());
+    params.num_requests = cached_num_decode_;
+    params.max_blocks_per_seq = cached_max_blocks_;
+    ops::attention(params);
+}
+
+void PagedForwardContext::attend_prefill(
+    int layer, tensor_t q_rope, tensor_t attn,
+    const ops::AttentionConfig &cfg) {
+
+    for (const auto &slot : slots_) {
+        if (slot.is_decode) continue;
+
+        auto pf_q = q_rope->slice(0, slot.token_offset, slot.token_offset + slot.num_tokens);
+        auto pf_out = attn->slice(0, slot.token_offset, slot.token_offset + slot.num_tokens);
+
+        ops::AttentionParams params{cfg};
+        params.out = pf_out;
+        params.q = pf_q;
+        params.pool_base = pool_.block_data(0);
+        params.k_block_table = slot.block_table->k_blocks[layer].data();
+        params.v_block_table = slot.block_table->v_blocks[layer].data();
+        params.seqlen_q = slot.num_tokens;
+        params.past_len = slot.past_len;
+        ops::attention(params);
+    }
+}
+
 tensor_t PagedForwardContext::attend(
     int layer, tensor_t q_rope, float scale,
     const ExecutorConfig &exec_config,
@@ -244,69 +312,12 @@ tensor_t PagedForwardContext::attend(
                                   exec_config.data_type, exec_config.device_type,
                                   exec_config.device_id);
 
-    // Build decode cache on first layer (uploads all layers' block tables at once)
     build_decode_cache(exec_config);
 
-    // Decode attention
-    if (cached_num_decode_ > 0) {
-        if (cached_num_decode_ == 1) {
-            // Single decode: use non-batched kernel (no GPU block table needed)
-            auto decode_q = q_rope->slice(0, cached_decode_start_, cached_decode_start_ + 1);
-            auto decode_out = attn->slice(0, cached_decode_start_, cached_decode_start_ + 1);
+    if (cached_num_decode_ == 1)       attend_decode_single(layer, q_rope, attn, attn_cfg, nhead, head_dim);
+    else if (cached_num_decode_ > 1)   attend_decode_batched(layer, q_rope, attn, attn_cfg);
 
-            auto *dt = slots_[0].block_table; // first slot is decode for single request
-            for (const auto &slot : slots_) {
-                if (slot.is_decode) { dt = slot.block_table; break; }
-            }
-
-            ops::AttentionParams params{attn_cfg};
-            params.out = decode_out->view({nhead, head_dim});
-            params.q = decode_q->view({nhead, head_dim});
-            params.pool_base = pool_.block_data(0);
-            params.k_block_table = dt->k_blocks[layer].data();
-            params.v_block_table = dt->v_blocks[layer].data();
-            params.seq_len = dt->seq_len + 1;
-            params.seqlen_q = 1;
-            ops::attention(params);
-        } else {
-            // Multi decode: use cached GPU block tables
-            auto decode_q = q_rope->slice(0, cached_decode_start_,
-                                           cached_decode_start_ + cached_num_decode_);
-            auto decode_out = attn->slice(0, cached_decode_start_,
-                                           cached_decode_start_ + cached_num_decode_);
-
-            ops::AttentionParams params{attn_cfg};
-            params.out = decode_out;
-            params.q = decode_q;
-            params.pool_base = pool_.block_data(0);
-            params.batched_k_block_tables = reinterpret_cast<const int *>(
-                decode_layer_cache_[layer].k_bt_gpu->data());
-            params.batched_v_block_tables = reinterpret_cast<const int *>(
-                decode_layer_cache_[layer].v_bt_gpu->data());
-            params.batched_seq_lens = reinterpret_cast<const int *>(seq_lens_gpu_->data());
-            params.num_requests = cached_num_decode_;
-            params.max_blocks_per_seq = cached_max_blocks_;
-            ops::attention(params);
-        }
-    }
-
-    // Prefill attention (per-request sequential)
-    for (const auto &slot : slots_) {
-        if (slot.is_decode) continue;
-
-        auto pf_q = q_rope->slice(0, slot.token_offset, slot.token_offset + slot.num_tokens);
-        auto pf_out = attn->slice(0, slot.token_offset, slot.token_offset + slot.num_tokens);
-
-        ops::AttentionParams params{attn_cfg};
-        params.out = pf_out;
-        params.q = pf_q;
-        params.pool_base = pool_.block_data(0);
-        params.k_block_table = slot.block_table->k_blocks[layer].data();
-        params.v_block_table = slot.block_table->v_blocks[layer].data();
-        params.seqlen_q = slot.num_tokens;
-        params.past_len = slot.past_len;
-        ops::attention(params);
-    }
+    attend_prefill(layer, q_rope, attn, attn_cfg);
 
     return attn;
 }

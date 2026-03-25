@@ -83,7 +83,7 @@ int main(int argc, char *argv[]) {
 
     // 4. Warmup Phase (Critical for accurate benchmarking)
     LOGI << "Starting warmup...";
-    engine->warmup(prefill_len, decode_len);
+    engine->profiler().warmup(prefill_len, decode_len);
 
     // 5. Benchmarking Loop
     double total_prefill_time = 0.0;
@@ -92,7 +92,7 @@ int main(int argc, char *argv[]) {
     std::cout << "\n[ZedInfer] Running " << rounds << " rounds of profiling..." << std::endl;
 
     for (int i = 0; i < rounds; ++i) {
-        auto res = engine->profile(prefill_len, decode_len);
+        auto res = engine->profiler().profile(prefill_len, decode_len);
         total_prefill_time += res.first;
         total_decode_time += res.second;
         // Optional: Log per-round progress

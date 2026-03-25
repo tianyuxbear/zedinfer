@@ -23,7 +23,7 @@ static std::shared_ptr<InferenceEngine> g_engine = nullptr;
 
 static void signal_handler(int) {
     if (g_server) g_server->stop();
-    if (g_engine) g_engine->stop_serving();
+    if (g_engine) g_engine->serving_loop().stop();
 }
 
 int main(int argc, char *argv[]) {
@@ -93,7 +93,7 @@ int main(int argc, char *argv[]) {
 
     // Start engine serving loop on a dedicated thread
     std::thread engine_thread([&engine] {
-        engine->run_serving();
+        engine->serving_loop().run_serving();
     });
 
     // Create HTTP server
@@ -119,7 +119,7 @@ int main(int argc, char *argv[]) {
     server.start();  // blocks until stop()
 
     // Cleanup
-    engine->stop_serving();
+    engine->serving_loop().stop();
     engine_thread.join();
     g_server = nullptr;
     g_engine = nullptr;

@@ -83,7 +83,7 @@ int main(int argc, char *argv[]) {
     // Also run single-request baseline for comparison
     printf("\n============ Single-Request Baseline ============\n");
     {
-        auto res = engine->profile(prefill_len, decode_len);
+        auto res = engine->profiler().profile(prefill_len, decode_len);
         double prefill_tps = prefill_len / res.first * 1000.0;
         double decode_tps = decode_len / res.second * 1000.0;
         printf("Prefill: %8.2f ms | %8.2f tok/s\n", res.first, prefill_tps);
@@ -118,11 +118,11 @@ int main(int argc, char *argv[]) {
             req->config.verbose = false;
             req->arrival_time = std::chrono::steady_clock::now();
 
-            futures.push_back(engine->submit_async(std::move(req)));
+            futures.push_back(engine->serving_loop().submit_async(std::move(req)));
         }
 
         // Run engine loop until all requests complete
-        engine->run_loop();
+        engine->serving_loop().run_loop();
 
         auto t1 = std::chrono::high_resolution_clock::now();
         double round_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
