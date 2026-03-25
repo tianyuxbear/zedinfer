@@ -97,7 +97,9 @@ private:
     void *pool_memory_ = nullptr;
     std::vector<BlockMeta> block_meta_;
     uint64_t access_counter_ = 0;
-    int next_free_ = 0; // hint for allocation scan
+    int next_free_ = 0;       // hint for allocation scan
+    int free_count_ = 0;      // blocks with ref_count==0 && hash==0
+    int evictable_count_ = 0; // blocks with ref_count==0 && hash!=0
 };
 
 /**
@@ -113,6 +115,9 @@ public:
 
     // Allocate one additional block for a layer+type when current blocks are full.
     int extend_sequence(SequenceBlockTable &table, int layer, bool is_k);
+
+    // Ensure the block table has enough blocks for needed_len tokens across all layers.
+    void ensure_blocks(SequenceBlockTable &table, int needed_len);
 
     // Free all blocks held by a sequence (hard free, clears hash).
     void free_sequence(SequenceBlockTable &table);
