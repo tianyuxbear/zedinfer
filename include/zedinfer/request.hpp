@@ -58,18 +58,35 @@ struct InferenceRequest {
 
     // Continuous batching fields
     int prefill_progress = 0;                        // tokens already prefilled (chunked prefill)
-    kvcache::SequenceBlockTable block_table;          // owned block table (batch mode)
-    kvcache::SequenceBlockTable *block_table_ref = nullptr; // borrowed block table (session mode)
     std::promise<GenerationResult> result_promise;    // async result delivery
     std::shared_ptr<std::atomic<bool>> cancelled;     // set by HTTP handler on client disconnect
 
-    // Access the active block table (borrowed if set, otherwise owned)
-    kvcache::SequenceBlockTable &active_block_table() {
-        return block_table_ref ? *block_table_ref : block_table;
+    // Block table: always accessed via block_table().
+    // Session mode: points to session's table (borrowed, not freed by scheduler).
+    // Batch mode: points to owned_block_table_ (freed by scheduler on completion).
+    kvcache::SequenceBlockTable &block_table() { return *block_table_ptr_; }
+    const kvcache::SequenceBlockTable &block_table() const { return *block_table_ptr_; }
+
+    // Set borrowed block table (session mode — session owns the table)
+    void borrow_block_table(kvcache::SequenceBlockTable &bt) {
+        block_table_ptr_ = &bt;
+        owns_block_table_ = false;
     }
-    const kvcache::SequenceBlockTable &active_block_table() const {
-        return block_table_ref ? *block_table_ref : block_table;
+
+    // Set owned block table (batch mode — scheduler allocated it)
+    void own_block_table(kvcache::SequenceBlockTable bt) {
+        owned_block_table_ = std::move(bt);
+        block_table_ptr_ = &owned_block_table_;
+        owns_block_table_ = true;
     }
+
+    bool has_block_table() const { return block_table_ptr_ != nullptr; }
+    bool owns_block_table() const { return owns_block_table_; }
+
+private:
+    kvcache::SequenceBlockTable *block_table_ptr_ = nullptr;
+    kvcache::SequenceBlockTable owned_block_table_;
+    bool owns_block_table_ = false;
 };
 
 } // namespace zedinfer

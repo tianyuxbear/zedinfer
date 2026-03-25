@@ -75,7 +75,7 @@ GenerationResult ServingLoop::generate_tokens(
 
     // Build request borrowing the session's block table
     auto request = build_request(input_ids, config);
-    request->block_table_ref = &block_table;
+    request->borrow_block_table(block_table);
     auto future = submit_async(std::move(request));
 
     while (future.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) {
@@ -217,9 +217,9 @@ void ServingLoop::fail_batch(ScheduledBatch &batch, const std::string &error_msg
         if (!req) return;
         req->phase = RequestPhase::COMPLETE;
         // Free owned blocks
-        if (engine_->block_allocator() && !req->block_table_ref &&
-            req->block_table.num_layers > 0) {
-            engine_->block_allocator()->free_sequence(req->block_table);
+        if (engine_->block_allocator() && req->owns_block_table() &&
+            req->block_table().num_layers > 0) {
+            engine_->block_allocator()->free_sequence(req->block_table());
         }
         try {
             req->result_promise.set_exception(
