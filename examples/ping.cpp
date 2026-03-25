@@ -6,7 +6,7 @@
 #include "zedinfer/scheduler.hpp"
 #include "zedinfer/session.hpp"
 
-#include <argparse/argparse.hpp>
+#include <argparse.hpp>
 #include <chrono>
 #include <iostream>
 #include <memory>

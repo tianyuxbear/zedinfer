@@ -16,7 +16,6 @@ add_rules("plugin.compile_commands.autoupdate", {outputdir = "build"})
 -- Include directories
 add_includedirs("include")
 add_includedirs("third_party/include")
-add_includedirs("third_party/cpp-httplib-0.38.0")
 
 -- Platform-specific flags
 if not is_plat("windows") then
