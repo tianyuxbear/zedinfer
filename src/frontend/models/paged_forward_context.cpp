@@ -228,6 +228,15 @@ void PagedForwardContext::build_decode_cache(const ExecutorConfig &exec_config) 
     decode_cache_built_ = true;
 }
 
+// Helper: upload a host int vector to a GPU tensor
+static tensor_t upload_to_gpu(const std::vector<int> &host_data,
+                               zedinferDeviceType_t dev, int dev_id) {
+    if (dev == ZEDINFER_DEVICE_CPU) return nullptr; // CPU doesn't need upload
+    auto t = Tensor::create({host_data.size()}, ZEDINFER_DTYPE_I32, dev, dev_id);
+    t->load(host_data.data());
+    return t;
+}
+
 void PagedForwardContext::attend_decode_single(
     int layer, tensor_t q_rope, tensor_t attn,
     const ops::AttentionConfig &cfg, size_t nhead, size_t head_dim) {
@@ -240,12 +249,19 @@ void PagedForwardContext::attend_decode_single(
     auto decode_q = q_rope->slice(0, cached_decode_start_, cached_decode_start_ + 1);
     auto decode_out = attn->slice(0, cached_decode_start_, cached_decode_start_ + 1);
 
+    // Upload block tables to GPU (host pointers are not accessible from GPU kernels
+    // on all devices — e.g., RTX 4090 lacks HMM support)
+    auto k_bt_gpu = upload_to_gpu(dt->k_blocks[layer], cfg.device_type, cfg.device_id);
+    auto v_bt_gpu = upload_to_gpu(dt->v_blocks[layer], cfg.device_type, cfg.device_id);
+
     ops::AttentionParams params{cfg};
     params.out = decode_out->view({nhead, head_dim});
     params.q = decode_q->view({nhead, head_dim});
     params.pool_base = pool_.block_data(0);
-    params.k_block_table = dt->k_blocks[layer].data();
-    params.v_block_table = dt->v_blocks[layer].data();
+    params.k_block_table = k_bt_gpu ? reinterpret_cast<const int *>(k_bt_gpu->data())
+                                     : dt->k_blocks[layer].data();
+    params.v_block_table = v_bt_gpu ? reinterpret_cast<const int *>(v_bt_gpu->data())
+                                     : dt->v_blocks[layer].data();
     params.seq_len = dt->seq_len + 1;
     params.seqlen_q = 1;
     ops::attention(params);
@@ -284,12 +300,17 @@ void PagedForwardContext::attend_prefill(
         auto pf_q = q_rope->slice(0, slot.token_offset, slot.token_offset + slot.num_tokens);
         auto pf_out = attn->slice(0, slot.token_offset, slot.token_offset + slot.num_tokens);
 
+        auto k_bt_gpu = upload_to_gpu(slot.block_table->k_blocks[layer], cfg.device_type, cfg.device_id);
+        auto v_bt_gpu = upload_to_gpu(slot.block_table->v_blocks[layer], cfg.device_type, cfg.device_id);
+
         ops::AttentionParams params{cfg};
         params.out = pf_out;
         params.q = pf_q;
         params.pool_base = pool_.block_data(0);
-        params.k_block_table = slot.block_table->k_blocks[layer].data();
-        params.v_block_table = slot.block_table->v_blocks[layer].data();
+        params.k_block_table = k_bt_gpu ? reinterpret_cast<const int *>(k_bt_gpu->data())
+                                         : slot.block_table->k_blocks[layer].data();
+        params.v_block_table = v_bt_gpu ? reinterpret_cast<const int *>(v_bt_gpu->data())
+                                         : slot.block_table->v_blocks[layer].data();
         params.seqlen_q = slot.num_tokens;
         params.past_len = slot.past_len;
         ops::attention(params);
