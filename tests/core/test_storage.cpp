@@ -9,7 +9,7 @@
 #include <vector>
 
 namespace zedinfer::test {
-// 全局 Mock 状态
+// Global mock state
 struct MockState {
     std::unordered_map<void *, size_t> allocated_memory;
     int current_device = 0;
@@ -33,7 +33,7 @@ struct MockState {
 
 static MockState g_mock_state;
 
-// Mock 函数实现
+// Mock function implementations
 static void *mock_malloc_device(size_t size) {
     void *ptr = ::operator new(size);
     g_mock_state.allocated_memory[ptr] = size;
@@ -84,7 +84,7 @@ static void mock_stream_synchronize(void *stream) {
     ASSERT(stream == (void *)0x1234, "CPU does not support explicit streams");
 }
 
-// 创建 Mock API
+// Create mock API
 static ZedinferRuntimeAPI createMockAPI() {
     ZedinferRuntimeAPI api;
     api.malloc_device = mock_malloc_device;
@@ -111,7 +111,7 @@ const ZedinferRuntimeAPI *getRuntimeAPI(zedinferDeviceType_t device) {
 } // namespace zedinfer::device
 
 // ============================================================================
-// Storage 测试
+// Storage tests
 // ============================================================================
 using namespace zedinfer::core;
 using namespace zedinfer::test;
@@ -123,7 +123,7 @@ protected:
     }
 
     void TearDown() override {
-        // 验证没有内存泄漏
+        // Verify no memory leaks
         EXPECT_EQ(g_mock_state.getAllocatedCount(), 0)
             << "Memory leak detected: "
             << g_mock_state.getAllocatedCount() << " blocks not freed";
@@ -175,10 +175,10 @@ TEST_F(StorageTest, StorageAutoRelease) {
     {
         auto storage = ctx.runtime().allocateDeviceStorage(1024);
         EXPECT_GE(g_mock_state.getAllocatedCount(), count_before);
-    } // storage 离开作用域，自动释放
+    } // storage goes out of scope, automatically released
 
-    // 内存应该被释放（可能还有内存池中的块）
-    // 所以这里只验证 storage 本身的内存被管理了
+    // Memory should be freed (there may still be blocks in the memory pool)
+    // So here we only verify that the storage's own memory was managed
     ctx.reset();
 }
 
@@ -210,13 +210,13 @@ TEST_F(StorageTest, StorageMemoryAccess) {
 
     auto storage = ctx.runtime().allocateDeviceStorage(1024);
 
-    // 写入数据
+    // Write data
     std::byte *mem = storage->memory();
     for (size_t i = 0; i < 1024; ++i) {
         mem[i] = static_cast<std::byte>(i % 256);
     }
 
-    // 验证数据
+    // Verify data
     for (size_t i = 0; i < 1024; ++i) {
         EXPECT_EQ(mem[i], static_cast<std::byte>(i % 256));
     }
@@ -228,17 +228,17 @@ TEST_F(StorageTest, StorageMemoryAccess) {
 TEST_F(StorageTest, StorageOnDifferentDevices) {
     Context &ctx = context();
 
-    // 在设备 0 上分配
+    // Allocate on device 0
     ctx.setDevice(ZEDINFER_DEVICE_CPU, 0);
     auto storage0 = ctx.runtime().allocateDeviceStorage(1024);
     EXPECT_EQ(storage0->deviceId(), 0);
 
-    // 在设备 1 上分配
+    // Allocate on device 1
     ctx.setDevice(ZEDINFER_DEVICE_CPU, 1);
     auto storage1 = ctx.runtime().allocateDeviceStorage(1024);
     EXPECT_EQ(storage1->deviceId(), 1);
 
-    // 两个 storage 应该在不同设备上
+    // The two storages should be on different devices
     EXPECT_NE(storage0->deviceId(), storage1->deviceId());
 
     storage0.reset();
