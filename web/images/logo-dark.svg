@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 440 140" width="880" height="280">
+  <defs>
+    <linearGradient id="zGradient" x1="100%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#00C6FF" />
+      <stop offset="100%" stop-color="#0072FF" />
+    </linearGradient>
+  </defs>
+
+  <g transform="translate(15, 22)">
+    <line x1="15" y1="15" x2="85" y2="75" stroke="#00C6FF" stroke-width="2" opacity="0.8"/>
+    
+    <line x1="15" y1="15" x2="85" y2="15" stroke="#00C6FF" stroke-width="12" stroke-linecap="round"/>
+    <line x1="15" y1="75" x2="85" y2="75" stroke="#0072FF" stroke-width="12" stroke-linecap="round"/>
+    <line x1="85" y1="15" x2="15" y2="75" stroke="url(#zGradient)" stroke-width="12" stroke-linecap="round"/>
+
+    <circle cx="15" cy="15" r="9" fill="#FFFFFF" stroke="#00C6FF" stroke-width="4"/>
+    <circle cx="85" cy="15" r="9" fill="#FFFFFF" stroke="#00C6FF" stroke-width="4"/>
+    <circle cx="15" cy="75" r="9" fill="#FFFFFF" stroke="#0072FF" stroke-width="4"/>
+    <circle cx="85" cy="75" r="9" fill="#FFFFFF" stroke="#0072FF" stroke-width="4"/>
+
+    <circle cx="50" cy="45" r="4.5" fill="#0072FF" />
+  </g>
+
+  <text x="135" y="82" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="54" font-weight="500" letter-spacing="-0.5">
+    <tspan fill="#FFFFFF">Zed</tspan><tspan fill="#0072FF">Infer</tspan>
+  </text>
+
+  <text x="140" y="114" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="500" fill="#9CA3AF" letter-spacing="5">
+    INFERENCE ENGINE
+  </text>
+</svg>
