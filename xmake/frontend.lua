@@ -1,9 +1,12 @@
 target("tokenizer")
     set_kind("static")
     add_packages("icu4c", {public = true})
+    -- Enable OpenMP support for multi-threaded BPE encoding.
+    add_cxflags("-fopenmp")
+    add_ldflags("-fopenmp")
     add_files("../src/frontend/tokenizer/*.cpp")
     on_install(function (target) end)
-target_end()
+target_end()    
 
 target("sampler")
     set_kind("static")
