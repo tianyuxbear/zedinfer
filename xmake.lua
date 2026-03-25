@@ -29,8 +29,8 @@ end
 -- Enable compiler warnings
 add_cxxflags("-Wall", "-Wextra")
 
--- Deps: Unicode processing & interactive CLI
-add_requires("icu4c", "readline")
+-- Deps: Unicode processing
+add_requires("icu4c")
 
 -- Deps: Google Test framework (enable default main function)
 add_requires("gtest", { configs = { main = true } })

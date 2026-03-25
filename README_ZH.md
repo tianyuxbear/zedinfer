@@ -76,7 +76,7 @@
 | 库 | 用途 | 开源协议 | 是否必需 |
 |----|------|----------|----------|
 | [ICU4C](https://icu.unicode.org/) | Unicode 正则（BPE 分词器） | Unicode License | 是 |
-| [readline](https://tiswww.case.edu/php/chet/readline/rltop.html) | 交互式命令行（chat 示例） | GPL-3.0 | 仅 chat |
+| [linenoise](https://github.com/antirez/linenoise) | 交互式命令行编辑（chat） | BSD-2-Clause | 已内置 |
 | [Google Test](https://github.com/google/googletest) | 单元测试框架 | BSD-3-Clause | 仅测试 |
 | [pybind11](https://github.com/pybind/pybind11) | Python 算子测试绑定 | BSD-3-Clause | 可选 |
 
@@ -242,7 +242,7 @@ zedinfer/
 ├── examples/
 │   ├── bench.cpp                    # 单请求基准测试
 │   ├── batch_bench.cpp              # 多请求批量基准测试
-│   ├── chat.cpp                     # 交互式多轮对话（readline）
+│   ├── chat.cpp                     # 交互式多轮对话（linenoise）
 │   ├── ping.cpp                     # 快速单轮测试
 │   └── serve.cpp                    # HTTP 服务入口
 ├── tests/

@@ -76,7 +76,7 @@ Adding a new Qwen-family model requires only defining a `ModelForwardConfig` (bi
 | Library | Purpose | License | Required |
 |---------|---------|---------|----------|
 | [ICU4C](https://icu.unicode.org/) | Unicode regex for BPE tokenizer | Unicode License | Yes |
-| [readline](https://tiswww.case.edu/php/chet/readline/rltop.html) | Interactive CLI (chat example) | GPL-3.0 | Yes (chat only) |
+| [linenoise](https://github.com/antirez/linenoise) | Interactive CLI line editing (chat) | BSD-2-Clause | Vendored |
 | [Google Test](https://github.com/google/googletest) | Unit testing framework | BSD-3-Clause | Test only |
 | [pybind11](https://github.com/pybind/pybind11) | Python operator test bindings | BSD-3-Clause | Optional |
 
@@ -242,7 +242,7 @@ zedinfer/
 ├── examples/
 │   ├── bench.cpp                    # Single-request benchmark
 │   ├── batch_bench.cpp              # Multi-request batch benchmark
-│   ├── chat.cpp                     # Interactive multi-turn chat (readline)
+│   ├── chat.cpp                     # Interactive multi-turn chat (linenoise)
 │   ├── ping.cpp                     # Quick single-turn test
 │   └── serve.cpp                    # HTTP server entry point
 ├── tests/

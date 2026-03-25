@@ -1,0 +1,3 @@
+[submodule "third_party/linenoise"]
+	path = third_party/linenoise
+	url = git@github.com:zebra-uestc/linenoise.git
