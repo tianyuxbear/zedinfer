@@ -8,7 +8,11 @@ target("ops-cpu")
     set_kind("static")
     add_deps("tensor")
     -- CPU-specific and OpenMP flags
-    add_cxflags("-march=native", "-fopenmp", {force = true})
+    if has_config("portable") then
+        add_cxflags("-march=x86-64-v3", "-fopenmp", {force = true})
+    else
+        add_cxflags("-march=native", "-fopenmp", {force = true})
+    end
 
     -- link flags: keep -fopenmp for the linker as well
     add_ldflags("-fopenmp", {force = true})
