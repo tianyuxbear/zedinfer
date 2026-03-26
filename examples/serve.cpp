@@ -7,6 +7,7 @@
 #include "zedinfer/scheduler.hpp"
 
 #include <argparse.hpp>
+#include "zedinfer/version.hpp"
 #include <csignal>
 #include <cstdio>
 #include <iostream>
@@ -27,10 +28,8 @@ static void signal_handler(int) {
 }
 
 int main(int argc, char *argv[]) {
-    utils::initLoggerWithOverwrite(plog::info, "logs/serve.log");
-    LOG_VERBOSE_(utils::BOTH) << utils::get_runtime_info();
-
-    argparse::ArgumentParser program("ZedInfer Server");
+    argparse::ArgumentParser program("ZedInfer Server",
+        std::string("zedinfer ") + ZEDINFER_VERSION + " (build " + ZEDINFER_GIT_HASH + ", " + ZEDINFER_BUILD_DATE + ")");
 
     program.add_argument("model_path")
         .help("Path to the model directory");
@@ -71,6 +70,9 @@ int main(int argc, char *argv[]) {
         std::cerr << program;
         return 1;
     }
+
+    utils::initLoggerWithOverwrite(plog::info, "logs/serve.log");
+    LOG_VERBOSE_(utils::BOTH) << utils::get_runtime_info();
 
     auto model_path = program.get<std::string>("model_path");
     auto host = program.get<std::string>("--host");

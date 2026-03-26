@@ -38,6 +38,14 @@ sudo systemctl restart docker
 docker build -t zedinfer:latest .
 ```
 
+### Embed git hash
+
+Pass the current commit hash so `--version` shows it instead of "unknown":
+
+```bash
+docker build --build-arg GIT_HASH=$(git rev-parse --short HEAD) -t zedinfer:latest .
+```
+
 ### Version tagging
 
 ```bash
