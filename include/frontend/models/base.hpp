@@ -51,8 +51,8 @@ struct QuantizationConfig {
     json config_groups_raw;
     json raw;
 
-    bool is_layer_ignored(const std::string &layer_name) const {
-        for (const auto &name : ignored_layers) {
+    bool is_layer_ignored(const std::string& layer_name) const {
+        for (const auto& name : ignored_layers) {
             if (layer_name.find(name) != std::string::npos) {
                 return true;
             }
@@ -105,9 +105,7 @@ public:
 
     const auto& get_all_weights() const { return weights_; }
 
-    void retain_resource(std::shared_ptr<void> resource) {
-        resources_.push_back(std::move(resource));
-    }
+    void retain_resource(std::shared_ptr<void> resource) { resources_.push_back(std::move(resource)); }
 
 private:
     std::unordered_map<std::string, tensor_t> weights_;
@@ -136,8 +134,7 @@ public:
     static std::shared_ptr<Model> parse(const std::string& model_path, zedinferDeviceType_t target_device);
     static void load_base_config(ModelConfig& config, const json& j);
     static std::unique_ptr<ModelConfig> load_config(const std::string& config_path);
-    static std::unique_ptr<ModelWeights> load_weights(const std::string& model_path,
-                                                      zedinferDeviceType_t target_device,
+    static std::unique_ptr<ModelWeights> load_weights(const std::string& model_path, zedinferDeviceType_t target_device,
                                                       const ModelConfig& config);
     static std::string map_weight_name(const std::string& raw_name);
 

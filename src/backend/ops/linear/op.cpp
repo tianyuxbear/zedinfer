@@ -21,14 +21,14 @@ static tensor_t permute_quantized_linear_input(tensor_t input, tensor_t g_idx) {
     zedinfer::core::context().setDevice(input->deviceType(), input->deviceId());
 
     switch (input->deviceType()) {
-    case ZEDINFER_DEVICE_CPU:
-        return cpu::permute_cols(input, g_idx);
+        case ZEDINFER_DEVICE_CPU:
+            return cpu::permute_cols(input, g_idx);
 #ifdef ENABLE_NVIDIA_API
-    case ZEDINFER_DEVICE_NVIDIA:
-        return nvidia::permute_cols(input, g_idx);
+        case ZEDINFER_DEVICE_NVIDIA:
+            return nvidia::permute_cols(input, g_idx);
 #endif
-    default:
-        EXCEPTION_UNSUPPORTED_DEVICE;
+        default:
+            EXCEPTION_UNSUPPORTED_DEVICE;
     }
 }
 
@@ -74,7 +74,8 @@ void linear(tensor_t out, tensor_t in, tensor_t weight, tensor_t bias) {
     }
 }
 
-void linear_quantized(tensor_t out, tensor_t in, tensor_t weight, tensor_t bias, tensor_t scale, tensor_t g_idx, int num_bits, int group_size) {
+void linear_quantized(tensor_t out, tensor_t in, tensor_t weight, tensor_t bias, tensor_t scale, tensor_t g_idx,
+                      int num_bits, int group_size) {
     if (bias) {
         if (g_idx) {
             CHECK_SAME_DEVICE(out, in, weight, scale, bias, g_idx);
@@ -89,9 +90,8 @@ void linear_quantized(tensor_t out, tensor_t in, tensor_t weight, tensor_t bias,
         }
     }
 
-    ASSERT(weight->dtype() == ZEDINFER_DTYPE_I32 ||
-           weight->dtype() == ZEDINFER_DTYPE_I8 ||
-           weight->dtype() == ZEDINFER_DTYPE_U8,
+    ASSERT(weight->dtype() == ZEDINFER_DTYPE_I32 || weight->dtype() == ZEDINFER_DTYPE_I8
+               || weight->dtype() == ZEDINFER_DTYPE_U8,
            "Quantized linear weight must be INT32, INT8, or UINT8.");
     CHECK_SAME_DTYPE(out->dtype(), in->dtype(), scale->dtype());
     if (bias) {
@@ -101,8 +101,7 @@ void linear_quantized(tensor_t out, tensor_t in, tensor_t weight, tensor_t bias,
         ASSERT(g_idx->dtype() == ZEDINFER_DTYPE_I32, "Linear quantized g_idx must be INT32.");
     }
 
-    ASSERT(out->isContiguous() && in->isContiguous() &&
-           weight->isContiguous() && scale->isContiguous(),
+    ASSERT(out->isContiguous() && in->isContiguous() && weight->isContiguous() && scale->isContiguous(),
            "Linear quantized: tensors must be contiguous.");
     if (bias) {
         ASSERT(bias->isContiguous(), "Linear quantized bias must be contiguous.");
@@ -111,10 +110,8 @@ void linear_quantized(tensor_t out, tensor_t in, tensor_t weight, tensor_t bias,
         ASSERT(g_idx->isContiguous(), "Linear quantized g_idx must be contiguous.");
     }
 
-    ASSERT(num_bits == 4 || num_bits == 8,
-           "Linear quantized supports only INT4 and INT8 weights.");
-    ASSERT(group_size == -1 || group_size > 0,
-           "Linear quantized group_size must be -1 or positive.");
+    ASSERT(num_bits == 4 || num_bits == 8, "Linear quantized supports only INT4 and INT8 weights.");
+    ASSERT(group_size == -1 || group_size > 0, "Linear quantized group_size must be -1 or positive.");
 
     tensor_t current_input = in;
     if (g_idx) {
@@ -122,39 +119,36 @@ void linear_quantized(tensor_t out, tensor_t in, tensor_t weight, tensor_t bias,
         g_idx = nullptr;
     }
 
-    std::byte *bias_data = bias ? bias->data() : nullptr;
-    std::byte *g_idx_data = nullptr;
+    std::byte* bias_data = bias ? bias->data() : nullptr;
+    std::byte* g_idx_data = nullptr;
 
     if (out->deviceType() == ZEDINFER_DEVICE_CPU) {
-        return cpu::linear_quantized(
-            out->data(), current_input->data(), weight->data(), bias_data,
-            scale->data(), g_idx_data, out->dtype(), num_bits, group_size,
-            out->dim(0), out->dim(1), current_input->dim(1));
+        return cpu::linear_quantized(out->data(), current_input->data(), weight->data(), bias_data, scale->data(),
+                                     g_idx_data, out->dtype(), num_bits, group_size, out->dim(0), out->dim(1),
+                                     current_input->dim(1));
     }
 
     zedinfer::core::context().setDevice(out->deviceType(), out->deviceId());
 
     switch (out->deviceType()) {
-    case ZEDINFER_DEVICE_CPU:
-        return cpu::linear_quantized(
-            out->data(), current_input->data(), weight->data(), bias_data,
-            scale->data(), g_idx_data, out->dtype(), num_bits, group_size,
-            out->dim(0), out->dim(1), current_input->dim(1));
+        case ZEDINFER_DEVICE_CPU:
+            return cpu::linear_quantized(out->data(), current_input->data(), weight->data(), bias_data, scale->data(),
+                                         g_idx_data, out->dtype(), num_bits, group_size, out->dim(0), out->dim(1),
+                                         current_input->dim(1));
 #ifdef ENABLE_NVIDIA_API
-    case ZEDINFER_DEVICE_NVIDIA:
-        if (num_bits == 8 && group_size <= 0 && scale->numel() > out->dim(1)) {
-            const size_t scale_groups = scale->numel() / out->dim(1);
-            if (scale_groups > 1 && (current_input->dim(1) % scale_groups) == 0) {
-                group_size = static_cast<int>(current_input->dim(1) / scale_groups);
+        case ZEDINFER_DEVICE_NVIDIA:
+            if (num_bits == 8 && group_size <= 0 && scale->numel() > out->dim(1)) {
+                const size_t scale_groups = scale->numel() / out->dim(1);
+                if (scale_groups > 1 && (current_input->dim(1) % scale_groups) == 0) {
+                    group_size = static_cast<int>(current_input->dim(1) / scale_groups);
+                }
             }
-        }
-        return nvidia::linear_quantized(
-            out->data(), current_input->data(), weight->data(), bias_data,
-            scale->data(), g_idx_data, out->dtype(), num_bits, group_size,
-            out->dim(0), out->dim(1), current_input->dim(1));
+            return nvidia::linear_quantized(out->data(), current_input->data(), weight->data(), bias_data,
+                                            scale->data(), g_idx_data, out->dtype(), num_bits, group_size, out->dim(0),
+                                            out->dim(1), current_input->dim(1));
 #endif
-    default:
-        EXCEPTION_UNSUPPORTED_DEVICE;
+        default:
+            EXCEPTION_UNSUPPORTED_DEVICE;
     }
 }
 } // namespace zedinfer::ops

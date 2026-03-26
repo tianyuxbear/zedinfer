@@ -23,60 +23,56 @@ namespace zedinfer {
 
 namespace {
 
-double read_tensor_scalar(const std::byte *data, zedinferDataType_t dtype, size_t index) {
+double read_tensor_scalar(const std::byte* data, zedinferDataType_t dtype, size_t index) {
     switch (dtype) {
-    case ZEDINFER_DTYPE_F16:
-        return utils::cast<float>(reinterpret_cast<const fp16_t *>(data)[index]);
-    case ZEDINFER_DTYPE_BF16:
-        return utils::cast<float>(reinterpret_cast<const bf16_t *>(data)[index]);
-    case ZEDINFER_DTYPE_F32:
-        return reinterpret_cast<const float *>(data)[index];
-    case ZEDINFER_DTYPE_F64:
-        return reinterpret_cast<const double *>(data)[index];
-    case ZEDINFER_DTYPE_I8:
-        return reinterpret_cast<const int8_t *>(data)[index];
-    case ZEDINFER_DTYPE_I16:
-        return reinterpret_cast<const int16_t *>(data)[index];
-    case ZEDINFER_DTYPE_I32:
-        return reinterpret_cast<const int32_t *>(data)[index];
-    case ZEDINFER_DTYPE_I64:
-        return static_cast<double>(reinterpret_cast<const int64_t *>(data)[index]);
-    case ZEDINFER_DTYPE_U8:
-        return reinterpret_cast<const uint8_t *>(data)[index];
-    case ZEDINFER_DTYPE_U16:
-        return reinterpret_cast<const uint16_t *>(data)[index];
-    case ZEDINFER_DTYPE_U32:
-        return reinterpret_cast<const uint32_t *>(data)[index];
-    case ZEDINFER_DTYPE_U64:
-        return static_cast<double>(reinterpret_cast<const uint64_t *>(data)[index]);
-    default:
-        throw std::runtime_error("Unsupported logits dtype for perplexity evaluation");
+        case ZEDINFER_DTYPE_F16:
+            return utils::cast<float>(reinterpret_cast<const fp16_t*>(data)[index]);
+        case ZEDINFER_DTYPE_BF16:
+            return utils::cast<float>(reinterpret_cast<const bf16_t*>(data)[index]);
+        case ZEDINFER_DTYPE_F32:
+            return reinterpret_cast<const float*>(data)[index];
+        case ZEDINFER_DTYPE_F64:
+            return reinterpret_cast<const double*>(data)[index];
+        case ZEDINFER_DTYPE_I8:
+            return reinterpret_cast<const int8_t*>(data)[index];
+        case ZEDINFER_DTYPE_I16:
+            return reinterpret_cast<const int16_t*>(data)[index];
+        case ZEDINFER_DTYPE_I32:
+            return reinterpret_cast<const int32_t*>(data)[index];
+        case ZEDINFER_DTYPE_I64:
+            return static_cast<double>(reinterpret_cast<const int64_t*>(data)[index]);
+        case ZEDINFER_DTYPE_U8:
+            return reinterpret_cast<const uint8_t*>(data)[index];
+        case ZEDINFER_DTYPE_U16:
+            return reinterpret_cast<const uint16_t*>(data)[index];
+        case ZEDINFER_DTYPE_U32:
+            return reinterpret_cast<const uint32_t*>(data)[index];
+        case ZEDINFER_DTYPE_U64:
+            return static_cast<double>(reinterpret_cast<const uint64_t*>(data)[index]);
+        default:
+            throw std::runtime_error("Unsupported logits dtype for perplexity evaluation");
     }
 }
 
-double compute_row_nll(
-    const std::byte *data, zedinferDataType_t dtype, size_t row_idx,
-    int target_token, size_t vocab_size, ptrdiff_t row_stride, ptrdiff_t col_stride) {
+double compute_row_nll(const std::byte* data, zedinferDataType_t dtype, size_t row_idx, int target_token,
+                       size_t vocab_size, ptrdiff_t row_stride, ptrdiff_t col_stride) {
     if (target_token < 0 || static_cast<size_t>(target_token) >= vocab_size) {
         throw std::runtime_error("Target token is out of vocabulary range");
     }
 
     double max_logit = -std::numeric_limits<double>::infinity();
     for (size_t v = 0; v < vocab_size; ++v) {
-        size_t idx = static_cast<size_t>(
-            row_idx * row_stride + static_cast<ptrdiff_t>(v) * col_stride);
+        size_t idx = static_cast<size_t>(row_idx * row_stride + static_cast<ptrdiff_t>(v) * col_stride);
         max_logit = std::max(max_logit, read_tensor_scalar(data, dtype, idx));
     }
 
     double exp_sum = 0.0;
     for (size_t v = 0; v < vocab_size; ++v) {
-        size_t idx = static_cast<size_t>(
-            row_idx * row_stride + static_cast<ptrdiff_t>(v) * col_stride);
+        size_t idx = static_cast<size_t>(row_idx * row_stride + static_cast<ptrdiff_t>(v) * col_stride);
         exp_sum += std::exp(read_tensor_scalar(data, dtype, idx) - max_logit);
     }
 
-    size_t target_idx = static_cast<size_t>(
-        row_idx * row_stride + static_cast<ptrdiff_t>(target_token) * col_stride);
+    size_t target_idx = static_cast<size_t>(row_idx * row_stride + static_cast<ptrdiff_t>(target_token) * col_stride);
     double target_logit = read_tensor_scalar(data, dtype, target_idx);
     double log_denom = max_logit + std::log(exp_sum);
     return log_denom - target_logit;
@@ -185,9 +181,8 @@ std::unique_ptr<InferenceSession> InferenceEngine::create_session(const Generati
                                                                   block_allocator_.get(), config, chat_template_));
 }
 
-PerplexityStats InferenceEngine::evaluate_perplexity(
-    const std::vector<std::string> &samples,
-    const PerplexityEvalConfig &config) {
+PerplexityStats InferenceEngine::evaluate_perplexity(const std::vector<std::string>& samples,
+                                                     const PerplexityEvalConfig& config) {
     if (!block_allocator_ || !block_pool_) {
         throw std::runtime_error("[PPL] Paged KV cache/block pool is unavailable");
     }
@@ -196,15 +191,12 @@ PerplexityStats InferenceEngine::evaluate_perplexity(
     result.total_samples = samples.size();
     result.samples.reserve(samples.size());
 
-    auto now = std::chrono::time_point_cast<std::chrono::milliseconds>(
-        std::chrono::system_clock::now());
+    auto now = std::chrono::time_point_cast<std::chrono::milliseconds>(std::chrono::system_clock::now());
     result.run_id = static_cast<uint64_t>(now.time_since_epoch().count());
 
-    const size_t model_max_len = std::min(
-        exec_config_.max_seq_len,
-        static_cast<size_t>(tokenizer_->get_config().model_max_length));
-    const size_t context_window =
-        (config.context_window == 0) ? model_max_len : config.context_window;
+    const size_t model_max_len
+        = std::min(exec_config_.max_seq_len, static_cast<size_t>(tokenizer_->get_config().model_max_length));
+    const size_t context_window = (config.context_window == 0) ? model_max_len : config.context_window;
     if (context_window < 2) {
         throw std::invalid_argument("context_window must be >= 2");
     }
@@ -226,19 +218,15 @@ PerplexityStats InferenceEngine::evaluate_perplexity(
     auto fwd_cfg = model_->forward_config();
 
     if (config.verbose) {
-        LOGI << "[PPL] Start evaluation"
-             << ", run_id=" << result.run_id
-             << ", samples=" << result.total_samples
-             << ", context_window=" << context_window
-             << ", calc_chunk=" << calc_chunk
-             << ", eval_from=" << eval_from
+        LOGI << "[PPL] Start evaluation" << ", run_id=" << result.run_id << ", samples=" << result.total_samples
+             << ", context_window=" << context_window << ", calc_chunk=" << calc_chunk << ", eval_from=" << eval_from
              << ", max_length=" << config.max_length;
     }
 
     auto eval_start = std::chrono::high_resolution_clock::now();
 
     for (size_t sample_idx = 0; sample_idx < samples.size(); ++sample_idx) {
-        const auto &text = samples[sample_idx];
+        const auto& text = samples[sample_idx];
         PerplexitySampleStats sample_stats;
         auto sample_start = std::chrono::high_resolution_clock::now();
 
@@ -250,10 +238,8 @@ PerplexityStats InferenceEngine::evaluate_perplexity(
         result.total_input_tokens += tokens.size();
 
         if (config.verbose) {
-            LOGI << "[PPL] Sample " << (sample_idx + 1) << "/" << samples.size()
-                 << " begin"
-                 << ", chars=" << text.size()
-                 << ", tokens=" << tokens.size();
+            LOGI << "[PPL] Sample " << (sample_idx + 1) << "/" << samples.size() << " begin"
+                 << ", chars=" << text.size() << ", tokens=" << tokens.size();
         }
 
         if (tokens.size() < 2 * calc_chunk) {
@@ -262,8 +248,7 @@ PerplexityStats InferenceEngine::evaluate_perplexity(
             result.skipped_samples++;
 
             if (config.verbose) {
-                LOGI << "[PPL] Sample " << (sample_idx + 1)
-                     << " skipped: " << sample_stats.skip_reason;
+                LOGI << "[PPL] Sample " << (sample_idx + 1) << " skipped: " << sample_stats.skip_reason;
             }
 
             result.samples.push_back(std::move(sample_stats));
@@ -272,8 +257,7 @@ PerplexityStats InferenceEngine::evaluate_perplexity(
 
         const size_t n_chunk = tokens.size() / calc_chunk;
         if (config.verbose) {
-            LOGI << "[PPL] Sample " << (sample_idx + 1)
-                 << ": calculating perplexity over " << n_chunk
+            LOGI << "[PPL] Sample " << (sample_idx + 1) << ": calculating perplexity over " << n_chunk
                  << " chunks, n_ctx=" << context_window;
         }
 
@@ -285,9 +269,8 @@ PerplexityStats InferenceEngine::evaluate_perplexity(
                 size_t begin = chunk_idx * calc_chunk;
                 size_t end = begin + calc_chunk;
 
-                std::vector<int> chunk(
-                    tokens.begin() + static_cast<ptrdiff_t>(begin),
-                    tokens.begin() + static_cast<ptrdiff_t>(end));
+                std::vector<int> chunk(tokens.begin() + static_cast<ptrdiff_t>(begin),
+                                       tokens.begin() + static_cast<ptrdiff_t>(end));
 
                 if (bos_token_id >= 0 && !chunk.empty()) {
                     chunk[0] = bos_token_id;
@@ -300,28 +283,21 @@ PerplexityStats InferenceEngine::evaluate_perplexity(
 
                 size_t local_begin = 0;
                 while (local_begin + 1 < chunk.size()) {
-                    size_t local_end = std::min(
-                        local_begin + eval_block_size,
-                        chunk.size() - 1);
-                    std::vector<int> input_block(
-                        chunk.begin() + static_cast<ptrdiff_t>(local_begin),
-                        chunk.begin() + static_cast<ptrdiff_t>(local_end));
+                    size_t local_end = std::min(local_begin + eval_block_size, chunk.size() - 1);
+                    std::vector<int> input_block(chunk.begin() + static_cast<ptrdiff_t>(local_begin),
+                                                 chunk.begin() + static_cast<ptrdiff_t>(local_end));
 
                     tensor_t logits;
                     try {
-                        block_allocator_->ensure_blocks(
-                            block_table, static_cast<int>(local_end));
-                        model::PagedForwardContext ctx(
-                            input_block, static_cast<int>(local_begin),
-                            block_table, *block_pool_);
-                        logits = model::transformer_forward(
-                            fwd_cfg, ctx, exec_config_);
-                    } catch (const std::runtime_error &) {
+                        block_allocator_->ensure_blocks(block_table, static_cast<int>(local_end));
+                        model::PagedForwardContext ctx(input_block, static_cast<int>(local_begin), block_table,
+                                                       *block_pool_);
+                        logits = model::transformer_forward(fwd_cfg, ctx, exec_config_);
+                    } catch (const std::runtime_error&) {
                         if (eval_block_size > 1) {
                             eval_block_size = std::max<size_t>(1, eval_block_size / 2);
                             if (config.verbose) {
-                                LOGI << "[PPL] Reducing eval block size to "
-                                     << eval_block_size
+                                LOGI << "[PPL] Reducing eval block size to " << eval_block_size
                                      << " due to allocation/runtime pressure";
                             }
                             continue;
@@ -335,19 +311,16 @@ PerplexityStats InferenceEngine::evaluate_perplexity(
                         logits = logits->to(ZEDINFER_DEVICE_CPU, 0);
                     }
 
-                    const auto &shape = logits->shape();
-                    const auto &strides = logits->strides();
-                    if (shape.size() != 2 ||
-                        shape[0] != input_block.size() ||
-                        shape[1] == 0) {
-                        throw std::runtime_error(
-                            "Expected logits shape [block, vocab_size] for perplexity eval");
+                    const auto& shape = logits->shape();
+                    const auto& strides = logits->strides();
+                    if (shape.size() != 2 || shape[0] != input_block.size() || shape[1] == 0) {
+                        throw std::runtime_error("Expected logits shape [block, vocab_size] for perplexity eval");
                     }
 
                     const size_t vocab_size = shape[1];
                     const ptrdiff_t row_stride = strides[0];
                     const ptrdiff_t col_stride = strides[1];
-                    const std::byte *data = logits->data();
+                    const std::byte* data = logits->data();
                     const zedinferDataType_t dtype = logits->dtype();
 
                     for (size_t i = 0; i < input_block.size(); ++i) {
@@ -357,9 +330,7 @@ PerplexityStats InferenceEngine::evaluate_perplexity(
                         }
 
                         int target_token = chunk[local_begin + i + 1];
-                        double nll = compute_row_nll(
-                            data, dtype, i, target_token, vocab_size,
-                            row_stride, col_stride);
+                        double nll = compute_row_nll(data, dtype, i, target_token, vocab_size, row_stride, col_stride);
 
                         sample_stats.nll_sum += nll;
                         sample_stats.eval_tokens++;
@@ -371,8 +342,7 @@ PerplexityStats InferenceEngine::evaluate_perplexity(
                 }
 
                 if (window_eval_tokens > 0) {
-                    double chunk_avg_nll =
-                        window_nll_sum / static_cast<double>(window_eval_tokens);
+                    double chunk_avg_nll = window_nll_sum / static_cast<double>(window_eval_tokens);
                     double chunk_ppl = std::exp(chunk_avg_nll);
 
                     chunk_count++;
@@ -386,19 +356,14 @@ PerplexityStats InferenceEngine::evaluate_perplexity(
                     chunk_ppl_m2 += delta_ppl * (chunk_ppl - chunk_ppl_mean);
 
                     if (config.verbose) {
-                        std::cout << "[" << chunk_count << "]"
-                                  << std::fixed << std::setprecision(4)
-                                  << chunk_ppl << ",";
+                        std::cout << "[" << chunk_count << "]" << std::fixed << std::setprecision(4) << chunk_ppl
+                                  << ",";
                         std::cout.flush();
                     }
                 }
 
-                if (config.verbose &&
-                    (chunk_idx == 0 ||
-                     ((chunk_idx + 1) % 16 == 0) ||
-                     (chunk_idx + 1 == n_chunk))) {
-                    LOGI << "[PPL] Sample " << (sample_idx + 1)
-                         << " chunk " << (chunk_idx + 1) << "/" << n_chunk
+                if (config.verbose && (chunk_idx == 0 || ((chunk_idx + 1) % 16 == 0) || (chunk_idx + 1 == n_chunk))) {
+                    LOGI << "[PPL] Sample " << (sample_idx + 1) << " chunk " << (chunk_idx + 1) << "/" << n_chunk
                          << ", token_range=[" << begin << ", " << end << ")"
                          << ", eval_tokens=" << sample_stats.eval_tokens;
                 }
@@ -416,16 +381,14 @@ PerplexityStats InferenceEngine::evaluate_perplexity(
             result.skipped_samples++;
 
             if (config.verbose) {
-                LOGI << "[PPL] Sample " << (sample_idx + 1)
-                     << " skipped: " << sample_stats.skip_reason;
+                LOGI << "[PPL] Sample " << (sample_idx + 1) << " skipped: " << sample_stats.skip_reason;
             }
 
             result.samples.push_back(std::move(sample_stats));
             continue;
         }
 
-        sample_stats.avg_nll =
-            sample_stats.nll_sum / static_cast<double>(sample_stats.eval_tokens);
+        sample_stats.avg_nll = sample_stats.nll_sum / static_cast<double>(sample_stats.eval_tokens);
         sample_stats.ppl = std::exp(sample_stats.avg_nll);
 
         result.evaluated_samples++;
@@ -434,28 +397,19 @@ PerplexityStats InferenceEngine::evaluate_perplexity(
 
         if (config.verbose) {
             auto sample_end = std::chrono::high_resolution_clock::now();
-            double sample_ms = std::chrono::duration<double, std::milli>(
-                sample_end - sample_start).count();
-            double sample_tok_per_s = sample_ms > 0.0
-                                        ? (sample_stats.eval_tokens * 1000.0 / sample_ms)
-                                        : 0.0;
-            LOGI << "[PPL] Sample " << (sample_idx + 1) << " done"
-                 << ", eval_tokens=" << sample_stats.eval_tokens
-                 << ", avg_nll=" << sample_stats.avg_nll
-                 << ", ppl=" << sample_stats.ppl
-                 << ", elapsed_ms=" << sample_ms
+            double sample_ms = std::chrono::duration<double, std::milli>(sample_end - sample_start).count();
+            double sample_tok_per_s = sample_ms > 0.0 ? (sample_stats.eval_tokens * 1000.0 / sample_ms) : 0.0;
+            LOGI << "[PPL] Sample " << (sample_idx + 1) << " done" << ", eval_tokens=" << sample_stats.eval_tokens
+                 << ", avg_nll=" << sample_stats.avg_nll << ", ppl=" << sample_stats.ppl << ", elapsed_ms=" << sample_ms
                  << ", tok_per_s=" << sample_tok_per_s;
 
-            if (((sample_idx + 1) % 10 == 0 || (sample_idx + 1) == samples.size()) &&
-                result.total_eval_tokens > 0) {
-                double running_avg_nll =
-                    result.nll_sum / static_cast<double>(result.total_eval_tokens);
+            if (((sample_idx + 1) % 10 == 0 || (sample_idx + 1) == samples.size()) && result.total_eval_tokens > 0) {
+                double running_avg_nll = result.nll_sum / static_cast<double>(result.total_eval_tokens);
                 double running_ppl = std::exp(running_avg_nll);
                 LOGI << "[PPL] Progress " << (sample_idx + 1) << "/" << samples.size()
                      << ", evaluated_samples=" << result.evaluated_samples
                      << ", skipped_samples=" << result.skipped_samples
-                     << ", total_eval_tokens=" << result.total_eval_tokens
-                     << ", running_avg_nll=" << running_avg_nll
+                     << ", total_eval_tokens=" << result.total_eval_tokens << ", running_avg_nll=" << running_avg_nll
                      << ", running_ppl=" << running_ppl;
             }
         }
@@ -478,29 +432,21 @@ PerplexityStats InferenceEngine::evaluate_perplexity(
     }
 
     auto eval_end = std::chrono::high_resolution_clock::now();
-    result.elapsed_ms = std::chrono::duration<double, std::milli>(
-        eval_end - eval_start).count();
+    result.elapsed_ms = std::chrono::duration<double, std::milli>(eval_end - eval_start).count();
 
     if (config.verbose) {
         if (result.total_chunks > 0) {
             std::cout << std::endl;
         }
-        LOGI << "[PPL] run_id=" << result.run_id
-             << ", samples=" << result.total_samples
-             << ", evaluated=" << result.evaluated_samples
-             << ", skipped=" << result.skipped_samples
-             << ", chunks=" << result.total_chunks
-             << ", context_window=" << result.context_window
-             << ", eval_tokens=" << result.total_eval_tokens
-             << ", avg_nll=" << result.avg_nll
-             << ", avg_nll_se=" << result.avg_nll_se
-             << ", ppl=" << result.ppl
-             << ", ppl_se=" << result.ppl_se
+        LOGI << "[PPL] run_id=" << result.run_id << ", samples=" << result.total_samples
+             << ", evaluated=" << result.evaluated_samples << ", skipped=" << result.skipped_samples
+             << ", chunks=" << result.total_chunks << ", context_window=" << result.context_window
+             << ", eval_tokens=" << result.total_eval_tokens << ", avg_nll=" << result.avg_nll
+             << ", avg_nll_se=" << result.avg_nll_se << ", ppl=" << result.ppl << ", ppl_se=" << result.ppl_se
              << ", elapsed_ms=" << result.elapsed_ms;
 
-        LOGI << "[PPL] Final estimate: PPL = "
-             << std::fixed << std::setprecision(4) << result.ppl
-             << " +/- " << result.ppl_se;
+        LOGI << "[PPL] Final estimate: PPL = " << std::fixed << std::setprecision(4) << result.ppl << " +/- "
+             << result.ppl_se;
     }
 
     return result;

@@ -8,20 +8,14 @@
 
 namespace zedinfer::model {
 
-static void dispatch_linear(
-    const ModelForwardConfig &model,
-    tensor_t out,
-    tensor_t in,
-    const std::string &prefix,
-    tensor_t bias) {
+static void dispatch_linear(const ModelForwardConfig& model, tensor_t out, tensor_t in, const std::string& prefix,
+                            tensor_t bias) {
     if (model.has_quantized_linear(prefix)) {
         auto quant = model.quant_linear(prefix);
         if (!bias) {
             bias = quant.bias;
         }
-        ops::linear_quantized(
-            out, in, quant.weight, bias, quant.scale, quant.g_idx,
-            quant.num_bits, quant.group_size);
+        ops::linear_quantized(out, in, quant.weight, bias, quant.scale, quant.g_idx, quant.num_bits, quant.group_size);
         return;
     }
 

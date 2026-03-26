@@ -8,7 +8,7 @@
 using namespace zedinfer::model;
 namespace fs = std::filesystem;
 
-static std::string write_temp_config(const std::string &content) {
+static std::string write_temp_config(const std::string& content) {
     const auto temp_path = fs::temp_directory_path() / "zedinfer_test_config.json";
     std::ofstream out(temp_path);
     out << content;
@@ -72,7 +72,7 @@ TEST(ModelConfigParseTest, ParsesExtendedQuantizationFields) {
     EXPECT_EQ(config->architectures.size(), 1);
     EXPECT_EQ(config->architectures[0], "Qwen3ForCausalLM");
 
-    const auto &quant = config->quant_config;
+    const auto& quant = config->quant_config;
     EXPECT_TRUE(quant.enabled);
     EXPECT_EQ(quant.quant_method, "compressed-tensors");
     EXPECT_EQ(quant.format, "pack-quantized");
@@ -216,7 +216,7 @@ TEST(ModelConfigParseTest, ParsesCompressedTensorsWithArrayEosTokenIds) {
     EXPECT_EQ(config->eos_token_ids[1], 151645);
     EXPECT_EQ(config->eos_token_id, 151643);
 
-    const auto &quant = config->quant_config;
+    const auto& quant = config->quant_config;
     EXPECT_TRUE(quant.enabled);
     EXPECT_EQ(quant.quant_method, "compressed-tensors");
     EXPECT_EQ(quant.format, "int-quantized");

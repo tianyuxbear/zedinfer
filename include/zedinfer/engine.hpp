@@ -74,9 +74,8 @@ public:
 
     std::unique_ptr<InferenceSession> create_session(const GenerationConfig& gen_config);
 
-    PerplexityStats evaluate_perplexity(
-        const std::vector<std::string> &samples,
-        const PerplexityEvalConfig &config = PerplexityEvalConfig());
+    PerplexityStats evaluate_perplexity(const std::vector<std::string>& samples,
+                                        const PerplexityEvalConfig& config = PerplexityEvalConfig());
 
     // Resource accessors (used by ServingLoop, Profiler, Session)
     model::Model& model() { return *model_; }

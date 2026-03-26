@@ -32,12 +32,11 @@ struct ModelForwardConfig {
     // Weight accessor
     tensor_t W(const std::string& name) const { return weights.get_tensor(name); }
 
-    bool has_quantized_linear(const std::string &prefix) const {
-        return weights.has_tensor(prefix + ".weight_packed") &&
-               weights.has_tensor(prefix + ".weight_scale");
+    bool has_quantized_linear(const std::string& prefix) const {
+        return weights.has_tensor(prefix + ".weight_packed") && weights.has_tensor(prefix + ".weight_scale");
     }
 
-    QuantizedLinearRef quant_linear(const std::string &prefix) const {
+    QuantizedLinearRef quant_linear(const std::string& prefix) const {
         if (!has_quantized_linear(prefix)) {
             throw std::runtime_error("Quantized linear not found: " + prefix);
         }
@@ -56,8 +55,7 @@ struct ModelForwardConfig {
         ref.group_size = config.quant_config.weights.group_size;
 
         if (ref.num_bits <= 0) {
-            throw std::runtime_error(
-                "Quantized linear metadata missing num_bits for: " + prefix);
+            throw std::runtime_error("Quantized linear metadata missing num_bits for: " + prefix);
         }
 
         return ref;
