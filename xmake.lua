@@ -50,6 +50,15 @@ if has_config("nv-gpu") then
     includes("xmake/device/nvidia.lua")
 end
 
+-- Portable build: use x86-64-v3 (AVX2) baseline instead of -march=native
+-- for Docker/distribution builds that must run on different CPU generations.
+-- oneDNN is unaffected (runtime ISA dispatch via JIT).
+option("portable")
+    set_default(false)
+    set_showmenu(true)
+    set_description("Build portable binaries with x86-64-v3 (AVX2) baseline instead of -march=native")
+option_end()
+
 -- oneDNN for optimized CPU linear (optional)
 option("onednn")
     set_default(false)
@@ -86,7 +95,11 @@ includes("xmake/backend.lua")
 -- Utility library with CPU optimizations
 target("utils")
     set_kind("static")
-    add_cxflags("-march=native", "-fopenmp", {force = true})
+    if has_config("portable") then
+        add_cxflags("-march=x86-64-v3", "-fopenmp", {force = true})
+    else
+        add_cxflags("-march=native", "-fopenmp", {force = true})
+    end
     add_ldflags("-fopenmp", {force = true})
     add_files("src/utils/*.cpp")
     on_install(function (target) end)
