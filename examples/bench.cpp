@@ -8,6 +8,7 @@
 #include "zedinfer/session.hpp"
 
 #include <argparse.hpp>
+#include "zedinfer/version.hpp"
 #include <chrono>
 #include <iostream>
 #include <memory>
@@ -16,12 +17,9 @@
 using namespace zedinfer;
 
 int main(int argc, char *argv[]) {
-    // Initialize logger
-    utils::initLoggerWithOverwrite(plog::verbose, "logs/bench.log");
-    LOG_VERBOSE_(utils::BOTH) << utils::get_runtime_info();
-
     // 1. Argument Parsing Setup
-    argparse::ArgumentParser program("ZedInfer Benchmarks");
+    argparse::ArgumentParser program("ZedInfer Benchmarks",
+        std::string("zedinfer ") + ZEDINFER_VERSION + " (build " + ZEDINFER_GIT_HASH + ", " + ZEDINFER_BUILD_DATE + ")");
 
     program.add_argument("model_path")
         .help("Path to the model directory");
@@ -58,6 +56,9 @@ int main(int argc, char *argv[]) {
         std::cerr << program;
         return 1;
     }
+
+    utils::initLoggerWithOverwrite(plog::verbose, "logs/bench.log");
+    LOG_VERBOSE_(utils::BOTH) << utils::get_runtime_info();
 
     // 2. Retrieve Arguments
     auto model_path = program.get<std::string>("model_path");

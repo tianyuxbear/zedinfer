@@ -16,6 +16,11 @@ ENV PATH="/root/.local/bin:$PATH"
 WORKDIR /build
 COPY . .
 
+# Git hash passed from host (docker build --build-arg GIT_HASH=...)
+# Read by xmake on_config as fallback when .git/ is unavailable.
+ARG GIT_HASH=unknown
+ENV ZEDINFER_GIT_HASH=${GIT_HASH}
+
 # Build release binaries (portable AVX2 baseline + GPU + oneDNN)
 ENV XMAKE_ROOT=y
 RUN xmake f -m release --nv-gpu=y --onednn=y --portable=y -y \

@@ -132,5 +132,19 @@ target("zedinfer")
     add_deps("frontend")
     add_deps("backend")
     add_files("src/zedinfer/*.cpp")
+
+    -- Inject git hash and build date as compile-time defines.
+    -- Propagated to all dependent binaries (serve, bench, etc.) via {public = true}.
+    -- Priority: git command > ZEDINFER_GIT_HASH env var > "unknown" fallback in version.hpp.
+    on_config(function (target)
+        local git_hash = try { function () return os.iorunv("git", {"rev-parse", "--short", "HEAD"}) end }
+        if git_hash then
+            target:add("defines", 'ZEDINFER_GIT_HASH="' .. git_hash:trim() .. '"', {public = true})
+        elseif os.getenv("ZEDINFER_GIT_HASH") then
+            target:add("defines", 'ZEDINFER_GIT_HASH="' .. os.getenv("ZEDINFER_GIT_HASH") .. '"', {public = true})
+        end
+        target:add("defines", 'ZEDINFER_BUILD_DATE="' .. os.date("%Y-%m-%d") .. '"', {public = true})
+    end)
+
     on_install(function (target) end)
 target_end()
