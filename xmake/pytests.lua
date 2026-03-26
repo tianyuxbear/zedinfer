@@ -4,7 +4,7 @@ target("zedinfer_ops")
 
     -- Deps & source
     add_deps("ops", "tensor", "core", "device", "utils")
-    add_files("../tests/python/bindings/zedinfer_ops.cpp")
+    add_files("../python/bindings/zedinfer_ops.cpp")
     add_packages("pybind11")
 
     -- oneDNN: link and copy libdnnl.so next to the output .so

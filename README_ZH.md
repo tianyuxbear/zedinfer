@@ -185,14 +185,14 @@ xmake build zedinfer_ops
 uv pip install -e python/
 
 # 运行算子测试（对比 PyTorch）
-uv run tests/python/test_add.py
-uv run tests/python/test_linear.py
-uv run tests/python/test_self_attention.py
-uv run tests/python/test_rms_norm.py
-uv run tests/python/test_rope.py
-uv run tests/python/test_swiglu.py
-uv run tests/python/test_embedding.py
-uv run tests/python/test_argmax.py
+uv run python/tests/ops/add.py
+uv run python/tests/ops/linear.py
+uv run python/tests/ops/self_attention.py
+uv run python/tests/ops/rms_norm.py
+uv run python/tests/ops/rope.py
+uv run python/tests/ops/swiglu.py
+uv run python/tests/ops/embedding.py
+uv run python/tests/ops/argmax.py
 ```
 
 ---
