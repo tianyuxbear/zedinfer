@@ -8,14 +8,12 @@
 namespace zedinfer::tokenizer {
 
 // Static member definitions.
-const std::vector<std::string>
-    ByteLevel::byte_to_unicode_table_ = ByteLevel::create_byte_to_unicode_map();
+const std::vector<std::string> ByteLevel::byte_to_unicode_table_ = ByteLevel::create_byte_to_unicode_map();
 
 const std::unordered_map<UChar32, unsigned char> ByteLevel::unicode_to_byte_map_
     = ByteLevel::create_unicode_to_byte_map();
 
-std::vector<std::string>
-ByteLevel::create_byte_to_unicode_map() {
+std::vector<std::string> ByteLevel::create_byte_to_unicode_map() {
     std::vector<std::string> table(256);
     std::vector<int> bytes;
     // Printable ASCII: '!' to '~' (33–126)
@@ -37,7 +35,7 @@ ByteLevel::create_byte_to_unicode_map() {
         icu::UnicodeString uStr(static_cast<UChar32>(unicode_chars[i]));
         std::string utf8;
         uStr.toUTF8String(utf8);
-        table[static_cast<unsigned char>(bytes[i])] = utf8; 
+        table[static_cast<unsigned char>(bytes[i])] = utf8;
     }
     return table;
 }
@@ -65,7 +63,7 @@ std::unordered_map<UChar32, unsigned char> ByteLevel::create_unicode_to_byte_map
 }
 
 const std::string& ByteLevel::byte_to_unicode(unsigned char byte) {
-    return byte_to_unicode_table_[byte];    
+    return byte_to_unicode_table_[byte];
 }
 
 unsigned char ByteLevel::unicode_to_byte(UChar32 unicode_char) {
