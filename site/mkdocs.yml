@@ -1,0 +1,70 @@
+site_name: ZedInfer
+site_description: A C++17 LLM inference engine with CPU and NVIDIA GPU backends
+site_url: https://zebra-uestc.github.io/zedinfer-docs/
+repo_url: https://github.com/zebra-uestc/zedinfer-docs
+
+theme:
+  name: material
+  logo: assets/logo.svg
+  favicon: assets/favicon.svg
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - navigation.path
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+  icon:
+    repo: fontawesome/brands/github
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/zebra-uestc/zedinfer-docs
+      name: GitHub
+    - icon: fontawesome/brands/docker
+      link: https://hub.docker.com/r/tianyuxbear/zedinfer
+      name: Docker Hub
+
+markdown_extensions:
+  - tables
+  - admonition
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.details
+  - attr_list
+  - toc:
+      permalink: true
+
+nav:
+  - Home: index.md
+  - User Guide:
+    - Quick Start: guide/quickstart.md
+    - API Reference: guide/api.md
+    - CLI Tools: guide/cli.md
+    - Supported Models: guide/models.md
+  - Architecture:
+    - Overview: architecture/overview.md
+  - Performance:
+    - Overview: performance/overview.md
+    - Operators: performance/operators.md
+  - Roadmap: roadmap.md
+  - Changelog: changelog.md
