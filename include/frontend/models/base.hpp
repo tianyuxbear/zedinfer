@@ -20,6 +20,47 @@ using json = nlohmann::json;
 
 struct ModelForwardConfig;
 
+struct QuantParam {
+    int num_bits = 0;
+    int group_size = -1;
+    bool symmetric = false;
+    bool dynamic = false;
+    bool act_order = false;
+    std::string strategy;
+    std::string observer;
+    std::string value_type;
+    json block_structure;
+    json observer_kwargs;
+    json raw;
+};
+
+struct QuantizationConfig {
+    bool enabled = false;
+    std::string quant_method;
+    std::string format;
+    std::string quantization_status;
+    json global_compression_ratio;
+    json kv_cache_scheme;
+
+    QuantParam weights;
+    QuantParam activations;
+    QuantParam output_activations;
+
+    std::vector<std::string> ignored_layers;
+    std::vector<std::string> target_modules;
+    json config_groups_raw;
+    json raw;
+
+    bool is_layer_ignored(const std::string &layer_name) const {
+        for (const auto &name : ignored_layers) {
+            if (layer_name.find(name) != std::string::npos) {
+                return true;
+            }
+        }
+        return false;
+    }
+};
+
 struct ModelConfig {
     std::vector<std::string> architectures;
     std::string model_type;
@@ -42,6 +83,8 @@ struct ModelConfig {
     float rms_norm_eps;
     float rope_theta;
     bool tie_word_embeddings;
+
+    QuantizationConfig quant_config;
 
     virtual ~ModelConfig() = default;
 };

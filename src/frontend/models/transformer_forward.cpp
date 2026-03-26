@@ -8,6 +8,26 @@
 
 namespace zedinfer::model {
 
+static void dispatch_linear(
+    const ModelForwardConfig &model,
+    tensor_t out,
+    tensor_t in,
+    const std::string &prefix,
+    tensor_t bias) {
+    if (model.has_quantized_linear(prefix)) {
+        auto quant = model.quant_linear(prefix);
+        if (!bias) {
+            bias = quant.bias;
+        }
+        ops::linear_quantized(
+            out, in, quant.weight, bias, quant.scale, quant.g_idx,
+            quant.num_bits, quant.group_size);
+        return;
+    }
+
+    ops::linear(out, in, model.W(prefix + ".weight"), bias);
+}
+
 /**
  * Shared transformer forward loop.
  * When scratch != nullptr and N == 1, uses pre-allocated decode buffers
@@ -56,13 +76,13 @@ tensor_t transformer_forward(const ModelForwardConfig& model, PagedForwardContex
 
         // Q/K/V projections
         auto q = use_scratch ? scratch->q : make({N, hidden_size});
-        ops::linear(q, normed, model.W(p + "self_attn.q_proj.weight"), model.q_bias(p));
+        dispatch_linear(model, q, normed, p + "self_attn.q_proj", model.q_bias(p));
 
         auto k = use_scratch ? scratch->k : make({N, kv_dim});
-        ops::linear(k, normed, model.W(p + "self_attn.k_proj.weight"), model.k_bias(p));
+        dispatch_linear(model, k, normed, p + "self_attn.k_proj", model.k_bias(p));
 
         auto v = use_scratch ? scratch->v : make({N, kv_dim});
-        ops::linear(v, normed, model.W(p + "self_attn.v_proj.weight"), model.v_bias(p));
+        dispatch_linear(model, v, normed, p + "self_attn.v_proj", model.v_bias(p));
 
         // Optional per-head Q/K norm (Qwen3)
         tensor_t q_for_rope, k_for_rope;
@@ -98,7 +118,7 @@ tensor_t transformer_forward(const ModelForwardConfig& model, PagedForwardContex
 
         // O projection + residual
         auto o = use_scratch ? scratch->o : make({N, hidden_size});
-        ops::linear(o, attn->view({N, hidden_size}), model.W(p + "self_attn.o_proj.weight"), nullptr);
+        dispatch_linear(model, o, attn->view({N, hidden_size}), p + "self_attn.o_proj", nullptr);
 
         auto h1 = use_scratch ? scratch->h1 : make({N, hidden_size});
         ops::add(h1, hidden, o);
@@ -109,14 +129,14 @@ tensor_t transformer_forward(const ModelForwardConfig& model, PagedForwardContex
 
         auto gate = use_scratch ? scratch->gate : make({N, inter});
         auto up = use_scratch ? scratch->up : make({N, inter});
-        ops::linear(gate, normed_post, model.W(p + "mlp.gate_proj.weight"), nullptr);
-        ops::linear(up, normed_post, model.W(p + "mlp.up_proj.weight"), nullptr);
+        dispatch_linear(model, gate, normed_post, p + "mlp.gate_proj", nullptr);
+        dispatch_linear(model, up, normed_post, p + "mlp.up_proj", nullptr);
 
         auto act = use_scratch ? scratch->act : make({N, inter});
         ops::swiglu(act, gate, up);
 
         auto down = use_scratch ? scratch->down : make({N, hidden_size});
-        ops::linear(down, act, model.W(p + "mlp.down_proj.weight"), nullptr);
+        dispatch_linear(model, down, act, p + "mlp.down_proj", nullptr);
 
         if (use_scratch) {
             // Ping-pong: write result to hidden_out, then swap for next layer
@@ -134,7 +154,7 @@ tensor_t transformer_forward(const ModelForwardConfig& model, PagedForwardContex
     ops::rms_norm(final_normed, hidden, model.W("norm.weight"), cfg.rms_norm_eps);
 
     auto logits = use_scratch ? scratch->logits : make({N, cfg.vocab_size});
-    ops::linear(logits, final_normed, model.W("lm_head.weight"), nullptr);
+    dispatch_linear(model, logits, final_normed, "lm_head", nullptr);
 
     ctx.finalize();
     return logits;
