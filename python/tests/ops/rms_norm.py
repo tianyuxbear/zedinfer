@@ -1,7 +1,7 @@
 import torch
-from zedinfer.test_utils import benchmark, check_equal, random_tensor
 
 import zedinfer
+from zedinfer.test_utils import benchmark, check_equal, random_tensor
 
 
 def torch_rms_norm(out, x, weight, eps):

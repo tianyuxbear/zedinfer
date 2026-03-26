@@ -1,7 +1,7 @@
 import torch
-from zedinfer.test_utils import benchmark, check_equal, random_tensor, zero_tensor
 
 import zedinfer
+from zedinfer.test_utils import benchmark, check_equal, random_tensor, zero_tensor
 
 
 def torch_argmax(max_idx, max_val, vals):

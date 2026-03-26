@@ -1,12 +1,12 @@
 import torch
-from zedinfer.test_utils import arrange_tensor, benchmark, check_equal, random_tensor
 
 import zedinfer
+from zedinfer.test_utils import arrange_tensor, benchmark, check_equal, random_tensor
 
 
 def torch_rope(y: torch.Tensor, x: torch.Tensor, pos_ids: torch.Tensor, theta: float):
     assert y.dim() == 3
-    seq_len, n_heads, head_dim = y.shape
+    _seq_len, _n_heads, head_dim = y.shape
     assert head_dim % 2 == 0, "Head dimension must be even for RoPE."
 
     # Split into [a, b] pairs
