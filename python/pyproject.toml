@@ -19,3 +19,30 @@ include = ["zedinfer*"]
 
 [tool.setuptools.package-data]
 zedinfer = ["*.so", "*.pyi"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "E",     # pycodestyle errors
+    "F",     # pyflakes (unused imports, undefined names, etc.)
+    "W",     # pycodestyle warnings
+    "I",     # isort (import sorting)
+    "UP",    # pyupgrade (modernize syntax for target Python version)
+    "B",     # flake8-bugbear (common bug patterns and design issues)
+    "SIM",   # flake8-simplify (simplifiable constructs)
+    "RUF",   # ruff-specific rules (ambiguous characters, unused noqa, etc.)
+]
+ignore = [
+    "E501",  # line too long — handled by line-length setting with smarter wrapping
+    "SIM108", # ternary operator — not always more readable than if/else
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["zedinfer"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
