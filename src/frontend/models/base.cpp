@@ -454,7 +454,6 @@ static void repack_4bit_row(const int8_t *unpacked, int32_t *packed, size_t K) {
 std::unique_ptr<ModelWeights> Model::load_weights(const std::string& model_path,
                                                   zedinferDeviceType_t target_device,
                                                   const ModelConfig& config) {
-    (void)config;
     auto load_start = std::chrono::high_resolution_clock::now();
 
     auto loader_unique = zedinfer::loader::SafeTensorsLoader::create(model_path);
