@@ -1,0 +1,31 @@
+name: Deploy Site
+
+on:
+  push:
+    paths:
+      - 'site/**'
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install MkDocs Material
+        run: pip install "mkdocs>=1.6,<2.0" mkdocs-material
+
+      - name: Build site
+        run: mkdocs build -f site/mkdocs.yml -d ../build_site
+
+      - name: Deploy to public repo
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          personal_token: ${{ secrets.DOCS_DEPLOY_TOKEN }}
+          external_repository: zebra-uestc/zedinfer-docs
+          publish_branch: gh-pages
+          publish_dir: ./build_site
