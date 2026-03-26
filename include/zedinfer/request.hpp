@@ -1,7 +1,7 @@
 #pragma once
 
-#include "zedinfer/generation_types.hpp"
 #include "backend/kvcache/block_pool.hpp"
+#include "zedinfer/generation_types.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -27,10 +27,10 @@ struct GenerationResult {
  * Used by the scheduler to track request progress.
  */
 enum class RequestPhase {
-    QUEUED,   // waiting for scheduler admission
-    PREFILL,  // processing prompt tokens
-    DECODE,   // generating tokens one-by-one
-    COMPLETE  // finished (EOS, max_tokens, or error)
+    QUEUED,  // waiting for scheduler admission
+    PREFILL, // processing prompt tokens
+    DECODE,  // generating tokens one-by-one
+    COMPLETE // finished (EOS, max_tokens, or error)
 };
 
 /**
@@ -50,25 +50,25 @@ struct InferenceRequest {
     std::vector<int> output_ids;
 
     // Stream callback forwarded from GenerationConfig at request construction
-    std::function<void(const std::string &)> stream_callback;
+    std::function<void(const std::string&)> stream_callback;
 
     // Timing
     std::chrono::steady_clock::time_point arrival_time;
     GenerationStats stats;
 
     // Continuous batching fields
-    int prefill_progress = 0;                        // tokens already prefilled (chunked prefill)
-    std::promise<GenerationResult> result_promise;    // async result delivery
-    std::shared_ptr<std::atomic<bool>> cancelled;     // set by HTTP handler on client disconnect
+    int prefill_progress = 0;                      // tokens already prefilled (chunked prefill)
+    std::promise<GenerationResult> result_promise; // async result delivery
+    std::shared_ptr<std::atomic<bool>> cancelled;  // set by HTTP handler on client disconnect
 
     // Block table: always accessed via block_table().
     // Session mode: points to session's table (borrowed, not freed by scheduler).
     // Batch mode: points to owned_block_table_ (freed by scheduler on completion).
-    kvcache::SequenceBlockTable &block_table() { return *block_table_ptr_; }
-    const kvcache::SequenceBlockTable &block_table() const { return *block_table_ptr_; }
+    kvcache::SequenceBlockTable& block_table() { return *block_table_ptr_; }
+    const kvcache::SequenceBlockTable& block_table() const { return *block_table_ptr_; }
 
     // Set borrowed block table (session mode — session owns the table)
-    void borrow_block_table(kvcache::SequenceBlockTable &bt) {
+    void borrow_block_table(kvcache::SequenceBlockTable& bt) {
         block_table_ptr_ = &bt;
         owns_block_table_ = false;
     }
@@ -84,7 +84,7 @@ struct InferenceRequest {
     bool owns_block_table() const { return owns_block_table_; }
 
 private:
-    kvcache::SequenceBlockTable *block_table_ptr_ = nullptr;
+    kvcache::SequenceBlockTable* block_table_ptr_ = nullptr;
     kvcache::SequenceBlockTable owned_block_table_;
     bool owns_block_table_ = false;
 };

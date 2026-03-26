@@ -1,19 +1,17 @@
 #include "zedinfer/serving_loop.hpp"
-#include "zedinfer/engine.hpp"
-#include "frontend/models/forward_config.hpp"
 #include "frontend/models/decode_scratch.hpp"
+#include "frontend/models/forward_config.hpp"
 #include "frontend/models/paged_forward_context.hpp"
 #include "utils/logging.hpp"
+#include "zedinfer/engine.hpp"
 
 #include <chrono>
 #include <plog/Log.h>
 
 namespace zedinfer {
 
-ServingLoop::ServingLoop(std::shared_ptr<InferenceEngine> engine,
-                         SchedulerConfig sched_config)
-    : engine_(std::move(engine)),
-      scheduler_(std::move(sched_config)) {
+ServingLoop::ServingLoop(std::shared_ptr<InferenceEngine> engine, SchedulerConfig sched_config)
+    : engine_(std::move(engine)), scheduler_(std::move(sched_config)) {
     if (engine_->block_allocator()) {
         scheduler_.set_block_allocator(engine_->block_allocator());
     }
@@ -26,11 +24,8 @@ ServingLoop::ServingLoop(std::shared_ptr<InferenceEngine> engine,
 // Synchronous Generation
 // ============================================================================
 
-std::string ServingLoop::generate(
-    kvcache::SequenceBlockTable &block_table,
-    const std::string &prompt,
-    const GenerationConfig &config) {
-
+std::string ServingLoop::generate(kvcache::SequenceBlockTable& block_table, const std::string& prompt,
+                                  const GenerationConfig& config) {
     config.validate();
 
     if (config.verbose) {
@@ -68,27 +63,20 @@ std::string ServingLoop::generate(
     return output;
 }
 
-GenerationResult ServingLoop::generate_tokens(
-    kvcache::SequenceBlockTable &block_table,
-    const std::vector<int> &input_ids,
-    const GenerationConfig &config) {
-
+GenerationResult ServingLoop::generate_tokens(kvcache::SequenceBlockTable& block_table,
+                                              const std::vector<int>& input_ids, const GenerationConfig& config) {
     // Build request borrowing the session's block table
     auto request = build_request(input_ids, config);
     request->borrow_block_table(block_table);
     auto future = submit_async(std::move(request));
 
-    while (future.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) {
-        step();
-    }
+    while (future.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) { step(); }
 
     return future.get();
 }
 
-std::unique_ptr<InferenceRequest> ServingLoop::build_request(
-    const std::vector<int> &input_ids,
-    const GenerationConfig &config) {
-
+std::unique_ptr<InferenceRequest> ServingLoop::build_request(const std::vector<int>& input_ids,
+                                                             const GenerationConfig& config) {
     auto req = std::make_unique<InferenceRequest>();
     req->input_ids = input_ids;
     req->config = config;
@@ -101,8 +89,7 @@ std::unique_ptr<InferenceRequest> ServingLoop::build_request(
 // Batch Mode
 // ============================================================================
 
-std::future<GenerationResult> ServingLoop::submit_async(
-    std::unique_ptr<InferenceRequest> request) {
+std::future<GenerationResult> ServingLoop::submit_async(std::unique_ptr<InferenceRequest> request) {
     auto future = request->result_promise.get_future();
     scheduler_.submit(std::move(request));
     // Wake the serving loop if it's waiting
@@ -112,7 +99,9 @@ std::future<GenerationResult> ServingLoop::submit_async(
 
 bool ServingLoop::step() {
     auto batch = scheduler_.schedule();
-    if (batch.empty()) return false;
+    if (batch.empty()) {
+        return false;
+    }
 
     auto batch_ctx = batch.build_context();
 
@@ -121,11 +110,10 @@ bool ServingLoop::step() {
 
         model::PagedForwardContext ctx(batch_ctx, *engine_->block_allocator());
         // Use decode scratch for single-token decode (no prefill in batch)
-        bool is_pure_decode = batch.prefill_requests.empty() &&
-                              batch.decode_requests.size() == 1;
-        auto *scratch = is_pure_decode ? engine_->decode_scratch() : nullptr;
-        tensor_t logits = model::transformer_forward(
-            engine_->model().forward_config(), ctx, engine_->exec_config(), scratch);
+        bool is_pure_decode = batch.prefill_requests.empty() && batch.decode_requests.size() == 1;
+        auto* scratch = is_pure_decode ? engine_->decode_scratch() : nullptr;
+        tensor_t logits
+            = model::transformer_forward(engine_->model().forward_config(), ctx, engine_->exec_config(), scratch);
 
         auto t1 = std::chrono::high_resolution_clock::now();
         double step_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
@@ -135,22 +123,20 @@ bool ServingLoop::step() {
         bool has_decode = !batch.decode_requests.empty();
 
         if (has_prefill) {
-            for (auto *req : batch.prefill_requests) {
+            for (auto* req : batch.prefill_requests) {
                 req->stats.prefill_time_ms += step_ms;
                 req->stats.total_time_ms += step_ms;
             }
         }
         if (has_decode) {
-            for (auto *req : batch.decode_requests) {
+            for (auto* req : batch.decode_requests) {
                 req->stats.decode_time_ms += step_ms / batch.decode_requests.size();
                 req->stats.total_time_ms += step_ms / batch.decode_requests.size();
             }
         }
 
-        scheduler_.process_results(batch, logits,
-            engine_->sampler(), engine_->tokenizer(),
-            engine_->stop_token_ids());
-    } catch (const std::exception &e) {
+        scheduler_.process_results(batch, logits, engine_->sampler(), engine_->tokenizer(), engine_->stop_token_ids());
+    } catch (const std::exception& e) {
         LOGE << "[ServingLoop] Forward pass failed: " << e.what();
         // Fail all requests in this batch gracefully instead of crashing
         fail_batch(batch, std::string("Forward pass error: ") + e.what());
@@ -166,9 +152,7 @@ void ServingLoop::run_loop() {
     while (scheduler_.has_work()) {
         try {
             step();
-        } catch (const std::exception &e) {
-            LOGE << "[ServingLoop] Unexpected error in run_loop: " << e.what();
-        }
+        } catch (const std::exception& e) { LOGE << "[ServingLoop] Unexpected error in run_loop: " << e.what(); }
     }
 }
 
@@ -181,17 +165,13 @@ void ServingLoop::run_serving() {
         while (scheduler_.has_work() && running_) {
             try {
                 step();
-            } catch (const std::exception &e) {
-                LOGE << "[ServingLoop] Unexpected error in run_serving: " << e.what();
-            }
+            } catch (const std::exception& e) { LOGE << "[ServingLoop] Unexpected error in run_serving: " << e.what(); }
         }
 
         // No work — wait for new submissions or stop signal
         if (running_) {
             std::unique_lock<std::mutex> lock(work_mutex_);
-            work_cv_.wait(lock, [this] {
-                return scheduler_.has_work() || !running_;
-            });
+            work_cv_.wait(lock, [this] { return scheduler_.has_work() || !running_; });
         }
     }
 
@@ -210,25 +190,25 @@ void ServingLoop::stop() {
     work_cv_.notify_one();
 }
 
-void ServingLoop::fail_batch(ScheduledBatch &batch, const std::string &error_msg) {
+void ServingLoop::fail_batch(ScheduledBatch& batch, const std::string& error_msg) {
     // Fail all requests in the batch by setting an exception on their promises.
     // This ensures HTTP handlers get an error instead of hanging forever.
-    auto fail_request = [&](InferenceRequest *req) {
-        if (!req) return;
+    auto fail_request = [&](InferenceRequest* req) {
+        if (!req) {
+            return;
+        }
         req->phase = RequestPhase::COMPLETE;
         // Free owned blocks
-        if (engine_->block_allocator() && req->owns_block_table() &&
-            req->block_table().num_layers > 0) {
+        if (engine_->block_allocator() && req->owns_block_table() && req->block_table().num_layers > 0) {
             engine_->block_allocator()->free_sequence(req->block_table());
         }
         try {
-            req->result_promise.set_exception(
-                std::make_exception_ptr(std::runtime_error(error_msg)));
+            req->result_promise.set_exception(std::make_exception_ptr(std::runtime_error(error_msg)));
         } catch (...) {}
     };
 
-    for (auto *req : batch.decode_requests) fail_request(req);
-    for (auto *req : batch.prefill_requests) fail_request(req);
+    for (auto* req : batch.decode_requests) { fail_request(req); }
+    for (auto* req : batch.prefill_requests) { fail_request(req); }
 
     // Remove completed requests from scheduler's active list
     // (scheduler expects process_results to clean up, but we're bypassing it)

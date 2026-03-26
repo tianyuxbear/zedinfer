@@ -8,8 +8,7 @@
 namespace zedinfer::ops::nvidia {
 
 // Returns type-specific negative infinity for max-reduction initialization.
-template <typename T>
-DEVICE_INLINE T get_lowest_value() {
+template <typename T> DEVICE_INLINE T get_lowest_value() {
     if constexpr (std::is_same_v<T, float>) {
         return -CUDART_INF_F;
     } else if constexpr (std::is_same_v<T, half> || std::is_same_v<T, cuda_bfloat16>) {
@@ -51,14 +50,8 @@ HOST_DEVICE uint32_t unpack_idx(unsigned long long packed) {
 // High contention: Each WARP leader attempts to update global memory.
 // ----------------------------------------------------------------------
 template <typename T>
-__global__ void argmax_reduce_warp_scope(
-    unsigned long long *global_packed,
-    const T *input,
-    size_t numel,
-    std::byte *max_idx,
-    std::byte *max_val,
-    zedinferDataType_t type) {
-
+__global__ void argmax_reduce_warp_scope(unsigned long long* global_packed, const T* input, size_t numel,
+                                         std::byte* max_idx, std::byte* max_val, zedinferDataType_t type) {
     const unsigned mask = 0xffffffffu;
     const size_t tid = threadIdx.x;
     const size_t gidx = blockIdx.x * blockDim.x + tid;
@@ -117,20 +110,20 @@ __global__ void argmax_reduce_warp_scope(
 
             if (actual_packed == assumed_packed) {
                 // Winner: Write final output to device memory
-                *reinterpret_cast<int64_t *>(max_idx) = static_cast<int64_t>(warp_max_idx);
+                *reinterpret_cast<int64_t*>(max_idx) = static_cast<int64_t>(warp_max_idx);
 
                 switch (type) {
-                case ZEDINFER_DTYPE_F32:
-                    *reinterpret_cast<float *>(max_val) = warp_max_val;
-                    break;
-                case ZEDINFER_DTYPE_F16:
-                case ZEDINFER_DTYPE_BF16:
-                    *reinterpret_cast<T *>(max_val) = from_float<T>(warp_max_val);
-                    break;
-                default:
-                    break;
+                    case ZEDINFER_DTYPE_F32:
+                        *reinterpret_cast<float*>(max_val) = warp_max_val;
+                        break;
+                    case ZEDINFER_DTYPE_F16:
+                    case ZEDINFER_DTYPE_BF16:
+                        *reinterpret_cast<T*>(max_val) = from_float<T>(warp_max_val);
+                        break;
+                    default:
+                        break;
                 }
-                break; // Done
+                break;                      // Done
             }
             assumed_packed = actual_packed; // Retry with updated state
         }
@@ -142,14 +135,8 @@ __global__ void argmax_reduce_warp_scope(
 // Low contention: Only BLOCK leader attempts to update global memory.
 // ----------------------------------------------------------------------
 template <typename T>
-__global__ void argmax_reduce_block_scope(
-    unsigned long long *global_packed,
-    const T *input,
-    size_t numel,
-    std::byte *max_idx,
-    std::byte *max_val,
-    zedinferDataType_t type) {
-
+__global__ void argmax_reduce_block_scope(unsigned long long* global_packed, const T* input, size_t numel,
+                                          std::byte* max_idx, std::byte* max_val, zedinferDataType_t type) {
     const unsigned mask = 0xffffffffu;
     const size_t tid = threadIdx.x;
     const size_t lane_id = tid & 31;
@@ -244,18 +231,18 @@ __global__ void argmax_reduce_block_scope(
 
                 if (actual_packed == assumed_packed) {
                     // Winner: Write final output
-                    *reinterpret_cast<int64_t *>(max_idx) = static_cast<int64_t>(block_max_idx);
+                    *reinterpret_cast<int64_t*>(max_idx) = static_cast<int64_t>(block_max_idx);
 
                     switch (type) {
-                    case ZEDINFER_DTYPE_F32:
-                        *reinterpret_cast<float *>(max_val) = block_max_val;
-                        break;
-                    case ZEDINFER_DTYPE_F16:
-                    case ZEDINFER_DTYPE_BF16:
-                        *reinterpret_cast<T *>(max_val) = from_float<T>(block_max_val);
-                        break;
-                    default:
-                        break;
+                        case ZEDINFER_DTYPE_F32:
+                            *reinterpret_cast<float*>(max_val) = block_max_val;
+                            break;
+                        case ZEDINFER_DTYPE_F16:
+                        case ZEDINFER_DTYPE_BF16:
+                            *reinterpret_cast<T*>(max_val) = from_float<T>(block_max_val);
+                            break;
+                        default:
+                            break;
                     }
                     break;
                 }
@@ -266,44 +253,38 @@ __global__ void argmax_reduce_block_scope(
 }
 
 // Pre-allocated device buffer for argmax reduction (8 bytes, allocated once)
-static unsigned long long *get_packed_res_buf() {
-    static unsigned long long *buf = []() {
-        unsigned long long *p = nullptr;
+static unsigned long long* get_packed_res_buf() {
+    static unsigned long long* buf = []() {
+        unsigned long long* p = nullptr;
         CUDA_CHECK(cudaMalloc(&p, sizeof(unsigned long long)));
         return p;
     }();
     return buf;
 }
 
-void argmax(std::byte *max_idx, std::byte *max_val, const std::byte *vals, zedinferDataType_t type, size_t numel) {
+void argmax(std::byte* max_idx, std::byte* max_val, const std::byte* vals, zedinferDataType_t type, size_t numel) {
     dim3 block(BLOCK_SIZE);
     dim3 grid(BLOCK_SIZE);
 
     unsigned long long h_packed_res = pack(-std::numeric_limits<float>::infinity(), UINT32_MAX);
-    unsigned long long *d_packed_res = get_packed_res_buf();
+    unsigned long long* d_packed_res = get_packed_res_buf();
     CUDA_CHECK(cudaMemcpy(d_packed_res, &h_packed_res, sizeof(unsigned long long), cudaMemcpyHostToDevice));
 
     switch (type) {
-    case ZEDINFER_DTYPE_F32:
-        argmax_reduce_block_scope<<<grid, block>>>(
-            d_packed_res,
-            reinterpret_cast<const float *>(vals),
-            numel, max_idx, max_val, type);
-        break;
-    case ZEDINFER_DTYPE_F16:
-        argmax_reduce_block_scope<<<grid, block>>>(
-            d_packed_res,
-            reinterpret_cast<const half *>(vals),
-            numel, max_idx, max_val, type);
-        break;
-    case ZEDINFER_DTYPE_BF16:
-        argmax_reduce_block_scope<<<grid, block>>>(
-            d_packed_res,
-            reinterpret_cast<const cuda_bfloat16 *>(vals),
-            numel, max_idx, max_val, type);
-        break;
-    default:
-        EXCEPTION_UNSUPPORTED_DATATYPE(type);
+        case ZEDINFER_DTYPE_F32:
+            argmax_reduce_block_scope<<<grid, block>>>(d_packed_res, reinterpret_cast<const float*>(vals), numel,
+                                                       max_idx, max_val, type);
+            break;
+        case ZEDINFER_DTYPE_F16:
+            argmax_reduce_block_scope<<<grid, block>>>(d_packed_res, reinterpret_cast<const half*>(vals), numel,
+                                                       max_idx, max_val, type);
+            break;
+        case ZEDINFER_DTYPE_BF16:
+            argmax_reduce_block_scope<<<grid, block>>>(d_packed_res, reinterpret_cast<const cuda_bfloat16*>(vals),
+                                                       numel, max_idx, max_val, type);
+            break;
+        default:
+            EXCEPTION_UNSUPPORTED_DATATYPE(type);
     }
 }
 } // namespace zedinfer::ops::nvidia

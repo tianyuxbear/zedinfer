@@ -16,13 +16,13 @@ struct Qwen3Config : public ModelConfig {
 
 class Qwen3Model : public Model {
 public:
-    Qwen3Model(Qwen3Config &config, std::unique_ptr<ModelWeights> weights)
+    Qwen3Model(Qwen3Config& config, std::unique_ptr<ModelWeights> weights)
         : config_(config), weights_(std::move(weights)) {
         num_params_ = calculate_num_parameters();
     }
 
-    const Qwen3Config &config() const override { return config_; }
-    const ModelWeights &weights() const override { return *weights_; }
+    const Qwen3Config& config() const override { return config_; }
+    const ModelWeights& weights() const override { return *weights_; }
     std::string model_type() const override { return "qwen3"; }
     size_t num_parameters() const override { return num_params_; }
 

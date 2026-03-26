@@ -13,21 +13,23 @@ void rearrange(tensor_t out, const tensor_t in) {
 
     // always support cpu calculation
     if (out->deviceType() == ZEDINFER_DEVICE_CPU) {
-        return cpu::rearrange(out->data(), in->data(), out->dtype(), out->numel(), out->shape(), out->strides(), in->shape(), in->strides());
+        return cpu::rearrange(out->data(), in->data(), out->dtype(), out->numel(), out->shape(), out->strides(),
+                              in->shape(), in->strides());
     }
 
     zedinfer::core::context().setDevice(out->deviceType(), in->deviceId());
 
     switch (out->deviceType()) {
-    case ZEDINFER_DEVICE_CPU:
-        return cpu::rearrange(out->data(), in->data(), out->dtype(), out->numel(), out->shape(), out->strides(), in->shape(), in->strides());
+        case ZEDINFER_DEVICE_CPU:
+            return cpu::rearrange(out->data(), in->data(), out->dtype(), out->numel(), out->shape(), out->strides(),
+                                  in->shape(), in->strides());
 #ifdef ENABLE_NVIDIA_API
-    case ZEDINFER_DEVICE_NVIDIA:
-        TO_BE_IMPLEMENTED();
-        return;
+        case ZEDINFER_DEVICE_NVIDIA:
+            TO_BE_IMPLEMENTED();
+            return;
 #endif
-    default:
-        EXCEPTION_UNSUPPORTED_DEVICE;
+        default:
+            EXCEPTION_UNSUPPORTED_DEVICE;
     }
 }
 } // namespace zedinfer::ops

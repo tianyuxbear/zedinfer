@@ -16,10 +16,8 @@ namespace zedinfer {
 Tensor::Tensor(TensorMeta meta, core::storage_t storage, size_t offset)
     : _meta(std::move(meta)), _storage(std::move(storage)), _offset(offset) {}
 
-tensor_t Tensor::create(const std::vector<size_t> &shape,
-                        zedinferDataType_t dtype,
-                        zedinferDeviceType_t device_type,
-                        int device_id, bool is_mmap, std::byte *mmap_ptr) {
+tensor_t Tensor::create(const std::vector<size_t>& shape, zedinferDataType_t dtype, zedinferDeviceType_t device_type,
+                        int device_id, bool is_mmap, std::byte* mmap_ptr) {
     size_t ndim_ = shape.size();
     std::vector<ptrdiff_t> strides(ndim_);
     size_t stride = 1;
@@ -53,11 +51,11 @@ tensor_t Tensor::create(const std::vector<size_t> &shape,
     }
 }
 
-std::byte *Tensor::data() {
+std::byte* Tensor::data() {
     return _storage->memory() + _offset;
 }
 
-const std::byte *Tensor::data() const {
+const std::byte* Tensor::data() const {
     return _storage->memory() + _offset;
 }
 
@@ -65,11 +63,11 @@ size_t Tensor::ndim() const {
     return _meta.shape.size();
 }
 
-const std::vector<size_t> &Tensor::shape() const {
+const std::vector<size_t>& Tensor::shape() const {
     return _meta.shape;
 }
 
-const std::vector<ptrdiff_t> &Tensor::strides() const {
+const std::vector<ptrdiff_t>& Tensor::strides() const {
     return _meta.strides;
 }
 
@@ -104,22 +102,17 @@ size_t Tensor::elementSize() const {
 std::string Tensor::info() const {
     std::stringstream ss;
 
-    ss << "Tensor: "
-       << "shape[ ";
-    for (auto s : this->shape()) {
-        ss << s << " ";
-    }
+    ss << "Tensor: " << "shape[ ";
+    for (auto s : this->shape()) { ss << s << " "; }
     ss << "] strides[ ";
-    for (auto s : this->strides()) {
-        ss << s << " ";
-    }
+    for (auto s : this->strides()) { ss << s << " "; }
     ss << "] dtype=" << this->dtype();
 
     return ss.str();
 }
 
 template <typename T>
-void print_data(const T *data, const std::vector<size_t> &shape, const std::vector<ptrdiff_t> &strides, size_t dim) {
+void print_data(const T* data, const std::vector<size_t>& shape, const std::vector<ptrdiff_t>& strides, size_t dim) {
     if (dim == shape.size() - 1) {
         for (size_t i = 0; i < shape[dim]; i++) {
             if constexpr (std::is_same_v<T, bf16_t> || std::is_same_v<T, fp16_t>) {
@@ -130,44 +123,43 @@ void print_data(const T *data, const std::vector<size_t> &shape, const std::vect
         }
         std::cout << std::endl;
     } else if (dim < shape.size() - 1) {
-        for (size_t i = 0; i < shape[dim]; i++) {
-            print_data(data + i * strides[dim], shape, strides, dim + 1);
-        }
+        for (size_t i = 0; i < shape[dim]; i++) { print_data(data + i * strides[dim], shape, strides, dim + 1); }
     }
 }
 
-void debug_print(const std::byte *data, const std::vector<size_t> &shape, const std::vector<ptrdiff_t> &strides, zedinferDataType_t dtype) {
+void debug_print(const std::byte* data, const std::vector<size_t>& shape, const std::vector<ptrdiff_t>& strides,
+                 zedinferDataType_t dtype) {
     switch (dtype) {
-    case ZEDINFER_DTYPE_BYTE:
-        return print_data(reinterpret_cast<const char *>(data), shape, strides, 0);
-    case ZEDINFER_DTYPE_BOOL:
-        return print_data(reinterpret_cast<const bool *>(data), shape, strides, 0);
-    case ZEDINFER_DTYPE_I8:
-        return print_data(reinterpret_cast<const int8_t *>(data), shape, strides, 0);
-    case ZEDINFER_DTYPE_I16:
-        return print_data(reinterpret_cast<const int16_t *>(data), shape, strides, 0);
-    case ZEDINFER_DTYPE_I32:
-        return print_data(reinterpret_cast<const int32_t *>(data), shape, strides, 0);
-    case ZEDINFER_DTYPE_I64:
-        return print_data(reinterpret_cast<const int64_t *>(data), shape, strides, 0);
-    case ZEDINFER_DTYPE_U8:
-        return print_data(reinterpret_cast<const uint8_t *>(data), shape, strides, 0);
-    case ZEDINFER_DTYPE_U16:
-        return print_data(reinterpret_cast<const uint16_t *>(data), shape, strides, 0);
-    case ZEDINFER_DTYPE_U32:
-        return print_data(reinterpret_cast<const uint32_t *>(data), shape, strides, 0);
-    case ZEDINFER_DTYPE_U64:
-        return print_data(reinterpret_cast<const uint64_t *>(data), shape, strides, 0);
-    case ZEDINFER_DTYPE_F16:
-        return print_data(reinterpret_cast<const fp16_t *>(data), shape, strides, 0);
-    case ZEDINFER_DTYPE_F32:
-        return print_data(reinterpret_cast<const float *>(data), shape, strides, 0);
-    case ZEDINFER_DTYPE_F64:
-        return print_data(reinterpret_cast<const double *>(data), shape, strides, 0);
-    case ZEDINFER_DTYPE_BF16:
-        return print_data(reinterpret_cast<const bf16_t *>(data), shape, strides, 0);
-    default:
-        EXCEPTION_UNSUPPORTED_DATATYPE(dtype);
+        case ZEDINFER_DTYPE_BYTE:
+            return print_data(reinterpret_cast<const char*>(data), shape, strides, 0);
+        case ZEDINFER_DTYPE_BOOL:
+            return print_data(reinterpret_cast<const bool*>(data), shape, strides, 0);
+        case ZEDINFER_DTYPE_I8:
+            return print_data(reinterpret_cast<const int8_t*>(data), shape, strides, 0);
+        case ZEDINFER_DTYPE_I16:
+            return print_data(reinterpret_cast<const int16_t*>(data), shape, strides, 0);
+        case ZEDINFER_DTYPE_I32:
+            return print_data(reinterpret_cast<const int32_t*>(data), shape, strides, 0);
+        case ZEDINFER_DTYPE_I64:
+            return print_data(reinterpret_cast<const int64_t*>(data), shape, strides, 0);
+        case ZEDINFER_DTYPE_U8:
+            return print_data(reinterpret_cast<const uint8_t*>(data), shape, strides, 0);
+        case ZEDINFER_DTYPE_U16:
+            return print_data(reinterpret_cast<const uint16_t*>(data), shape, strides, 0);
+        case ZEDINFER_DTYPE_U32:
+            return print_data(reinterpret_cast<const uint32_t*>(data), shape, strides, 0);
+        case ZEDINFER_DTYPE_U64:
+            return print_data(reinterpret_cast<const uint64_t*>(data), shape, strides, 0);
+        case ZEDINFER_DTYPE_F16:
+            return print_data(reinterpret_cast<const fp16_t*>(data), shape, strides, 0);
+        case ZEDINFER_DTYPE_F32:
+            return print_data(reinterpret_cast<const float*>(data), shape, strides, 0);
+        case ZEDINFER_DTYPE_F64:
+            return print_data(reinterpret_cast<const double*>(data), shape, strides, 0);
+        case ZEDINFER_DTYPE_BF16:
+            return print_data(reinterpret_cast<const bf16_t*>(data), shape, strides, 0);
+        default:
+            EXCEPTION_UNSUPPORTED_DATATYPE(dtype);
     }
 }
 
@@ -179,11 +171,8 @@ void Tensor::debug() const {
         debug_print(this->data(), this->shape(), this->strides(), this->dtype());
     } else {
         auto tmp_tensor = create({this->_storage->size()}, this->dtype());
-        core::context().runtime().api()->memcpy_sync(
-            tmp_tensor->data(),
-            this->data(),
-            this->numel() * this->elementSize(),
-            ZEDINFER_MEMCPY_D2H);
+        core::context().runtime().api()->memcpy_sync(tmp_tensor->data(), this->data(),
+                                                     this->numel() * this->elementSize(), ZEDINFER_MEMCPY_D2H);
         debug_print(tmp_tensor->data(), this->shape(), this->strides(), this->dtype());
     }
 }
@@ -199,8 +188,8 @@ void Tensor::debug() const {
  * @note This function does not modify the tensor. It only inspects metadata.
  */
 bool Tensor::isContiguous() const {
-    const auto &shape = _meta.shape;
-    const auto &strides = _meta.strides;
+    const auto& shape = _meta.shape;
+    const auto& strides = _meta.strides;
 
     size_t ndim = shape.size();
     ptrdiff_t expected_stride = 1;
@@ -243,7 +232,7 @@ bool Tensor::isContiguous() const {
  * @note This is a zero-copy operation. Changes to the returned tensor affect the original.
  *       No contiguity check is performed — permute works on any tensor, contiguous or not.
  */
-tensor_t Tensor::permute(const std::vector<size_t> &order) const {
+tensor_t Tensor::permute(const std::vector<size_t>& order) const {
     auto ndim_ = ndim();
 
     // Validate: order must have same number of dimensions
@@ -257,8 +246,7 @@ tensor_t Tensor::permute(const std::vector<size_t> &order) const {
     for (size_t i = 0; i < ndim_; ++i) {
         // Ensure every input dimension index appears exactly once in order
         auto it = std::find(order.begin(), order.end(), i);
-        CHECK_ARGUMENT(it != order.end(),
-                       "order must contain each dimension index (0 to ndim-1) exactly once");
+        CHECK_ARGUMENT(it != order.end(), "order must contain each dimension index (0 to ndim-1) exactly once");
 
         // Assign new shape and stride by reindexing the original
         new_shape[i] = dim(order[i]);      // Shape of output dim i = input dim order[i]'s shape
@@ -286,7 +274,7 @@ tensor_t Tensor::permute(const std::vector<size_t> &order) const {
  * @note This is a zero-copy operation. Changes to the returned tensor affect
  *       the original tensor's data. Use reshape() if you need automatic contiguity handling.
  */
-tensor_t Tensor::view(const std::vector<size_t> &shape) const {
+tensor_t Tensor::view(const std::vector<size_t>& shape) const {
     // Ensure tensor is contiguous — view requires deterministic memory layout
     ASSERT(this->isContiguous(), "requires contiguous tensor");
 
@@ -364,7 +352,7 @@ tensor_t Tensor::slice(size_t dim, size_t start, size_t end) const {
  * @note This operation is blocking. For high-performance scenarios, consider
  *       using asynchronous memcpy with streams.
  */
-void Tensor::load(const void *src_) {
+void Tensor::load(const void* src_) {
     // Validate input: src_ must not be null
     CHECK_ARGUMENT(src_ != nullptr, "source buffer is nullptr");
 
@@ -385,11 +373,10 @@ void Tensor::load(const void *src_) {
 
     // Perform synchronous host-to-device memory copy
     // Assumes src_ contains exactly _storage->size() bytes of valid data
-    core::context().runtime().api()->memcpy_sync(
-        _storage->memory(), // Destination: device memory
-        src_,               // Source: host memory
-        _storage->size(),   // Size in bytes
-        direction           // Direction: Host -> Host/Device
+    core::context().runtime().api()->memcpy_sync(_storage->memory(), // Destination: device memory
+                                                 src_,               // Source: host memory
+                                                 _storage->size(),   // Size in bytes
+                                                 direction           // Direction: Host -> Host/Device
     );
 }
 
@@ -479,7 +466,7 @@ tensor_t Tensor::contiguous() const {
  *       Use `view()` directly if you require zero-copy semantics and can guarantee contiguity.
  * @see view() for details on shape compatibility checks — this function inherits its validation.
  */
-tensor_t Tensor::reshape(const std::vector<size_t> &shape) const {
+tensor_t Tensor::reshape(const std::vector<size_t>& shape) const {
     // If tensor is already contiguous, directly create a view — no copy needed
     if (this->isContiguous()) {
         return this->view(shape);
@@ -544,46 +531,39 @@ tensor_t Tensor::to(zedinferDeviceType_t device_type, int device_id) const {
     int src_device_id = deviceId();
 
     // Ensure source context is active before reading
-    if (src_device_type != core::context().runtime().deviceType() || src_device_id != core::context().runtime().deviceId()) {
+    if (src_device_type != core::context().runtime().deviceType()
+        || src_device_id != core::context().runtime().deviceId()) {
         core::context().setDevice(src_device_type, src_device_id);
     }
 
     // Copy data synchronously
     if (src_device_type == ZEDINFER_DEVICE_CPU && device_type == ZEDINFER_DEVICE_CPU) {
         // H2H: Both on CPU — use standard memcpy via CPU runtime
-        core::context().runtime().api()->memcpy_sync(
-            new_storage->memory(), // dst: host memory
-            _storage->memory(),    // src: host memory
-            total_bytes,
-            ZEDINFER_MEMCPY_H2H);
+        core::context().runtime().api()->memcpy_sync(new_storage->memory(), // dst: host memory
+                                                     _storage->memory(),    // src: host memory
+                                                     total_bytes, ZEDINFER_MEMCPY_H2H);
 
     } else if (src_device_type == ZEDINFER_DEVICE_CPU && device_type != ZEDINFER_DEVICE_CPU) {
         // H2D: Source is CPU, destination is GPU — must be executed by GPU runtime
         // Switch context to target device (GPU) to perform the copy
         core::context().setDevice(device_type, device_id);
-        core::context().runtime().api()->memcpy_sync(
-            new_storage->memory(), // dst: device memory (GPU)
-            _storage->memory(),    // src: host memory (CPU)
-            total_bytes,
-            ZEDINFER_MEMCPY_H2D);
+        core::context().runtime().api()->memcpy_sync(new_storage->memory(), // dst: device memory (GPU)
+                                                     _storage->memory(),    // src: host memory (CPU)
+                                                     total_bytes, ZEDINFER_MEMCPY_H2D);
 
     } else if (src_device_type != ZEDINFER_DEVICE_CPU && device_type == ZEDINFER_DEVICE_CPU) {
         // D2H: Source is GPU, destination is CPU — must be executed by GPU runtime
         // Already in source (GPU) context — safe to invoke D2H
-        core::context().runtime().api()->memcpy_sync(
-            new_storage->memory(), // dst: host memory (CPU)
-            _storage->memory(),    // src: device memory (GPU)
-            total_bytes,
-            ZEDINFER_MEMCPY_D2H);
+        core::context().runtime().api()->memcpy_sync(new_storage->memory(), // dst: host memory (CPU)
+                                                     _storage->memory(),    // src: device memory (GPU)
+                                                     total_bytes, ZEDINFER_MEMCPY_D2H);
 
     } else {
         // D2D: Source and destination are both non-CPU devices (e.g., GPU->GPU)
         // Execute on source device context (assumes peer-to-peer support if needed)
-        core::context().runtime().api()->memcpy_sync(
-            new_storage->memory(), // dst: target device memory
-            _storage->memory(),    // src: source device memory
-            total_bytes,
-            ZEDINFER_MEMCPY_D2D);
+        core::context().runtime().api()->memcpy_sync(new_storage->memory(), // dst: target device memory
+                                                     _storage->memory(),    // src: source device memory
+                                                     total_bytes, ZEDINFER_MEMCPY_D2D);
     }
 
     return new_tensor;
@@ -617,9 +597,11 @@ tensor_t Tensor::to(zedinferDataType_t data_type) const {
     tensor_t new_tensor = std::shared_ptr<Tensor>(new Tensor(new_meta, new_storage, 0));
 
     if (dtype() == ZEDINFER_DTYPE_BF16) {
-        utils::bf16_to_fp32_batch(reinterpret_cast<float *>(new_tensor->data()), reinterpret_cast<const bf16_t *>(data()), numel());
+        utils::bf16_to_fp32_batch(reinterpret_cast<float*>(new_tensor->data()), reinterpret_cast<const bf16_t*>(data()),
+                                  numel());
     } else if (dtype() == ZEDINFER_DTYPE_F16) {
-        utils::fp16_to_fp32_batch_f16c(reinterpret_cast<float *>(new_tensor->data()), reinterpret_cast<const fp16_t *>(data()), numel());
+        utils::fp16_to_fp32_batch_f16c(reinterpret_cast<float*>(new_tensor->data()),
+                                       reinterpret_cast<const fp16_t*>(data()), numel());
     } else {
         ASSERT(false, "Only support data type transfer from f16/bf16 to f32 on CPU");
     }

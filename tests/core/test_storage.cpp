@@ -11,37 +11,33 @@
 namespace zedinfer::test {
 // Global mock state
 struct MockState {
-    std::unordered_map<void *, size_t> allocated_memory;
+    std::unordered_map<void*, size_t> allocated_memory;
     int current_device = 0;
     size_t alloc_count = 0;
     size_t free_count = 0;
 
     void reset() {
-        for (auto &[ptr, size] : allocated_memory) {
-            ::operator delete(ptr);
-        }
+        for (auto& [ptr, size] : allocated_memory) { ::operator delete(ptr); }
         allocated_memory.clear();
         current_device = 0;
         alloc_count = 0;
         free_count = 0;
     }
 
-    size_t getAllocatedCount() const {
-        return allocated_memory.size();
-    }
+    size_t getAllocatedCount() const { return allocated_memory.size(); }
 };
 
 static MockState g_mock_state;
 
 // Mock function implementations
-static void *mock_malloc_device(size_t size) {
-    void *ptr = ::operator new(size);
+static void* mock_malloc_device(size_t size) {
+    void* ptr = ::operator new(size);
     g_mock_state.allocated_memory[ptr] = size;
     g_mock_state.alloc_count++;
     return ptr;
 }
 
-static void mock_free_device(void *ptr) {
+static void mock_free_device(void* ptr) {
     if (g_mock_state.allocated_memory.find(ptr) != g_mock_state.allocated_memory.end()) {
         g_mock_state.allocated_memory.erase(ptr);
         g_mock_state.free_count++;
@@ -49,14 +45,14 @@ static void mock_free_device(void *ptr) {
     }
 }
 
-static void *mock_malloc_host(size_t size) {
-    void *ptr = ::operator new(size);
+static void* mock_malloc_host(size_t size) {
+    void* ptr = ::operator new(size);
     g_mock_state.allocated_memory[ptr] = size;
     g_mock_state.alloc_count++;
     return ptr;
 }
 
-static void mock_free_host(void *ptr) {
+static void mock_free_host(void* ptr) {
     if (g_mock_state.allocated_memory.find(ptr) != g_mock_state.allocated_memory.end()) {
         g_mock_state.allocated_memory.erase(ptr);
         g_mock_state.free_count++;
@@ -72,16 +68,16 @@ static void mock_set_device(int device_id) {
     g_mock_state.current_device = device_id;
 }
 
-static void *mock_create_stream() {
-    return reinterpret_cast<void *>(0x1234);
+static void* mock_create_stream() {
+    return reinterpret_cast<void*>(0x1234);
 }
 
-static void mock_destroy_stream(void *stream) {
-    ASSERT(stream == (void *)0x1234, "CPU does not support explicit streams");
+static void mock_destroy_stream(void* stream) {
+    ASSERT(stream == (void*)0x1234, "CPU does not support explicit streams");
 }
 
-static void mock_stream_synchronize(void *stream) {
-    ASSERT(stream == (void *)0x1234, "CPU does not support explicit streams");
+static void mock_stream_synchronize(void* stream) {
+    ASSERT(stream == (void*)0x1234, "CPU does not support explicit streams");
 }
 
 // Create mock API
@@ -104,7 +100,7 @@ static ZedinferRuntimeAPI createMockAPI() {
 namespace zedinfer::device {
 static ZedinferRuntimeAPI g_mock_api = zedinfer::test::createMockAPI();
 
-const ZedinferRuntimeAPI *getRuntimeAPI(zedinferDeviceType_t device) {
+const ZedinferRuntimeAPI* getRuntimeAPI(zedinferDeviceType_t device) {
     ASSERT(device == ZEDINFER_DEVICE_CPU, "Only support CPU in test");
     return &g_mock_api;
 }
@@ -118,20 +114,17 @@ using namespace zedinfer::test;
 
 class StorageTest : public ::testing::Test {
 protected:
-    void SetUp() override {
-        g_mock_state.reset();
-    }
+    void SetUp() override { g_mock_state.reset(); }
 
     void TearDown() override {
         // Verify no memory leaks
         EXPECT_EQ(g_mock_state.getAllocatedCount(), 0)
-            << "Memory leak detected: "
-            << g_mock_state.getAllocatedCount() << " blocks not freed";
+            << "Memory leak detected: " << g_mock_state.getAllocatedCount() << " blocks not freed";
     }
 };
 
 TEST_F(StorageTest, DeviceStorageCreation) {
-    Context &ctx = context();
+    Context& ctx = context();
     ctx.setDevice(ZEDINFER_DEVICE_CPU, 0);
 
     size_t size = 1024 * 1024; // 1MB
@@ -149,7 +142,7 @@ TEST_F(StorageTest, DeviceStorageCreation) {
 }
 
 TEST_F(StorageTest, HostStorageCreation) {
-    Context &ctx = context();
+    Context& ctx = context();
     ctx.setDevice(ZEDINFER_DEVICE_CPU, 0);
 
     size_t size = 2 * 1024 * 1024; // 2MB
@@ -167,7 +160,7 @@ TEST_F(StorageTest, HostStorageCreation) {
 }
 
 TEST_F(StorageTest, StorageAutoRelease) {
-    Context &ctx = context();
+    Context& ctx = context();
     ctx.setDevice(ZEDINFER_DEVICE_CPU, 0);
 
     size_t count_before = g_mock_state.getAllocatedCount();
@@ -183,15 +176,12 @@ TEST_F(StorageTest, StorageAutoRelease) {
 }
 
 TEST_F(StorageTest, MultipleStorages) {
-    Context &ctx = context();
+    Context& ctx = context();
     ctx.setDevice(ZEDINFER_DEVICE_CPU, 0);
 
     std::vector<storage_t> storages;
 
-    for (int i = 0; i < 10; ++i) {
-        storages.push_back(
-            ctx.runtime().allocateDeviceStorage((i + 1) * 1024));
-    }
+    for (int i = 0; i < 10; ++i) { storages.push_back(ctx.runtime().allocateDeviceStorage((i + 1) * 1024)); }
 
     EXPECT_EQ(storages.size(), 10);
 
@@ -205,28 +195,24 @@ TEST_F(StorageTest, MultipleStorages) {
 }
 
 TEST_F(StorageTest, StorageMemoryAccess) {
-    Context &ctx = context();
+    Context& ctx = context();
     ctx.setDevice(ZEDINFER_DEVICE_CPU, 0);
 
     auto storage = ctx.runtime().allocateDeviceStorage(1024);
 
     // Write data
-    std::byte *mem = storage->memory();
-    for (size_t i = 0; i < 1024; ++i) {
-        mem[i] = static_cast<std::byte>(i % 256);
-    }
+    std::byte* mem = storage->memory();
+    for (size_t i = 0; i < 1024; ++i) { mem[i] = static_cast<std::byte>(i % 256); }
 
     // Verify data
-    for (size_t i = 0; i < 1024; ++i) {
-        EXPECT_EQ(mem[i], static_cast<std::byte>(i % 256));
-    }
+    for (size_t i = 0; i < 1024; ++i) { EXPECT_EQ(mem[i], static_cast<std::byte>(i % 256)); }
 
     storage.reset();
     ctx.reset();
 }
 
 TEST_F(StorageTest, StorageOnDifferentDevices) {
-    Context &ctx = context();
+    Context& ctx = context();
 
     // Allocate on device 0
     ctx.setDevice(ZEDINFER_DEVICE_CPU, 0);

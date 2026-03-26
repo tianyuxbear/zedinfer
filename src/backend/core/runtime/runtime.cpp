@@ -9,17 +9,15 @@
 namespace zedinfer::core {
 Runtime::Runtime(zedinferDeviceType_t device_type, int device_id)
     : device_type_(device_type), device_id_(device_id), is_active_(false) {
-
     // Retrieve device-specific runtime API.
     api_ = zedinfer::device::getRuntimeAPI(device_type_);
     if (api_ == nullptr) {
-        throw std::runtime_error(
-            "No runtime API available for device type: " + std::to_string(static_cast<int>(device_type_)));
+        throw std::runtime_error("No runtime API available for device type: "
+                                 + std::to_string(static_cast<int>(device_type_)));
     }
 
     if (device_id_ < 0 || device_id_ >= api_->get_device_count()) {
-        throw std::invalid_argument(
-            "Invalid device ID: " + std::to_string(device_id_));
+        throw std::invalid_argument("Invalid device ID: " + std::to_string(device_id_));
     }
 
     stream_ = api_->create_stream();
@@ -30,10 +28,7 @@ Runtime::Runtime(zedinferDeviceType_t device_type, int device_id)
     allocator_ = std::make_unique<memory::PooledAllocator>(api_, device_type, device_id);
 }
 
-std::unique_ptr<Runtime> Runtime::create(
-    zedinferDeviceType_t device_type,
-    int device_id) {
-
+std::unique_ptr<Runtime> Runtime::create(zedinferDeviceType_t device_type, int device_id) {
     std::unique_ptr<Runtime> runtime(new Runtime(device_type, device_id));
 
     return runtime;
@@ -62,14 +57,14 @@ storage_t Runtime::allocateDeviceStorage(size_t size) {
 }
 
 storage_t Runtime::allocateHostStorage(size_t size) {
-    return std::shared_ptr<Storage>(new Storage((std::byte *)api_->malloc_host(size), size, *this, true));
+    return std::shared_ptr<Storage>(new Storage((std::byte*)api_->malloc_host(size), size, *this, true));
 }
 
-storage_t Runtime::allocateMmapStorage(std::byte *data_ptr, size_t size, bool is_host) {
+storage_t Runtime::allocateMmapStorage(std::byte* data_ptr, size_t size, bool is_host) {
     return std::shared_ptr<Storage>(new Storage(data_ptr, size, *this, is_host, true));
 }
 
-void Runtime::freeStorage(Storage *storage) {
+void Runtime::freeStorage(Storage* storage) {
     if (storage->isMmap()) {
         return;
     }

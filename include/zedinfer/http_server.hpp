@@ -57,44 +57,52 @@ private:
     class SessionLock {
     public:
         SessionLock() = default;
-        SessionLock(HttpServer *server, std::string session_id)
-            : server_(server), session_id_(std::move(session_id)) {}
+        SessionLock(HttpServer* server, std::string session_id) : server_(server), session_id_(std::move(session_id)) {}
         ~SessionLock() { unlock(); }
-        SessionLock(SessionLock &&o) noexcept
-            : server_(o.server_), session_id_(std::move(o.session_id_)) { o.server_ = nullptr; }
-        SessionLock &operator=(SessionLock &&o) noexcept {
-            unlock(); server_ = o.server_; session_id_ = std::move(o.session_id_); o.server_ = nullptr;
+        SessionLock(SessionLock&& o) noexcept : server_(o.server_), session_id_(std::move(o.session_id_)) {
+            o.server_ = nullptr;
+        }
+        SessionLock& operator=(SessionLock&& o) noexcept {
+            unlock();
+            server_ = o.server_;
+            session_id_ = std::move(o.session_id_);
+            o.server_ = nullptr;
             return *this;
         }
-        SessionLock(const SessionLock &) = delete;
-        SessionLock &operator=(const SessionLock &) = delete;
-        void unlock() { if (server_ && !session_id_.empty()) { server_->unlock_session(session_id_); server_ = nullptr; } }
-        const std::string &id() const { return session_id_; }
+        SessionLock(const SessionLock&) = delete;
+        SessionLock& operator=(const SessionLock&) = delete;
+        void unlock() {
+            if (server_ && !session_id_.empty()) {
+                server_->unlock_session(session_id_);
+                server_ = nullptr;
+            }
+        }
+        const std::string& id() const { return session_id_; }
+
     private:
-        HttpServer *server_ = nullptr;
+        HttpServer* server_ = nullptr;
         std::string session_id_;
     };
 
-    InferenceSession *get_or_create_session(const std::string &session_id);
-    bool try_lock_session(const std::string &session_id);
-    void unlock_session(const std::string &session_id);
-    void delete_session(const std::string &session_id);
+    InferenceSession* get_or_create_session(const std::string& session_id);
+    bool try_lock_session(const std::string& session_id);
+    void unlock_session(const std::string& session_id);
+    void delete_session(const std::string& session_id);
     void cleanup_idle_sessions();
 
     // Route handlers
-    void handle_chat_completions(const httplib::Request &req, httplib::Response &res);
-    void handle_models(const httplib::Request &req, httplib::Response &res);
-    void handle_health(const httplib::Request &req, httplib::Response &res);
-    void handle_delete_session(const httplib::Request &req, httplib::Response &res);
+    void handle_chat_completions(const httplib::Request& req, httplib::Response& res);
+    void handle_models(const httplib::Request& req, httplib::Response& res);
+    void handle_health(const httplib::Request& req, httplib::Response& res);
+    void handle_delete_session(const httplib::Request& req, httplib::Response& res);
 
     // Helpers
     std::string generate_request_id();
-    void send_error(httplib::Response &res, int status,
-                    const std::string &message, const std::string &type,
-                    const std::string &code = "");
+    void send_error(httplib::Response& res, int status, const std::string& message, const std::string& type,
+                    const std::string& code = "");
     std::string resolve_web_root();
     void cache_static_files();
-    std::string guess_content_type(const std::string &filename);
+    std::string guess_content_type(const std::string& filename);
 };
 
 } // namespace zedinfer

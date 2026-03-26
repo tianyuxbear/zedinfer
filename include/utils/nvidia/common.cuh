@@ -31,14 +31,14 @@
 #define DEVICE_INLINE __forceinline__ __device__
 
 // Error handling wrapper
-#define CUDA_CHECK(call)                                                   \
-    do {                                                                   \
-        cudaError_t error = call;                                          \
-        if (error != cudaSuccess) {                                        \
-            fprintf(stderr, "CUDA Error: %s:%d, code: %d, reason: %s\n",   \
-                    __FILE__, __LINE__, error, cudaGetErrorString(error)); \
-            exit(1);                                                       \
-        }                                                                  \
+#define CUDA_CHECK(call)                                                                                               \
+    do {                                                                                                               \
+        cudaError_t error = call;                                                                                      \
+        if (error != cudaSuccess) {                                                                                    \
+            fprintf(stderr, "CUDA Error: %s:%d, code: %d, reason: %s\n", __FILE__, __LINE__, error,                    \
+                    cudaGetErrorString(error));                                                                        \
+            exit(1);                                                                                                   \
+        }                                                                                                              \
     } while (0)
 
 // Index calculation helper

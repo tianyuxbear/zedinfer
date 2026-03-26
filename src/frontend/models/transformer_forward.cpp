@@ -1,7 +1,7 @@
+#include "backend/ops/ops.hpp"
+#include "frontend/models/decode_scratch.hpp"
 #include "frontend/models/forward_config.hpp"
 #include "frontend/models/paged_forward_context.hpp"
-#include "frontend/models/decode_scratch.hpp"
-#include "backend/ops/ops.hpp"
 
 #include <cmath>
 #include <utility>
@@ -14,13 +14,9 @@ namespace zedinfer::model {
  * (zero Tensor::create per step). For prefill (N > 1), falls back to
  * dynamic allocation via Tensor::create.
  */
-tensor_t transformer_forward(
-    const ModelForwardConfig &model,
-    PagedForwardContext &ctx,
-    const ExecutorConfig &exec_config,
-    DecodeScratch *scratch) {
-
-    const auto &cfg = model.config;
+tensor_t transformer_forward(const ModelForwardConfig& model, PagedForwardContext& ctx,
+                             const ExecutorConfig& exec_config, DecodeScratch* scratch) {
+    const auto& cfg = model.config;
     const size_t N = static_cast<size_t>(ctx.num_tokens());
     const size_t hidden_size = cfg.hidden_size;
     const size_t nhead = cfg.num_attention_heads;
@@ -33,8 +29,7 @@ tensor_t transformer_forward(
     const bool use_scratch = (scratch != nullptr && N == 1);
 
     auto make = [&](std::vector<size_t> shape) {
-        return Tensor::create(shape, exec_config.data_type,
-                              exec_config.device_type, exec_config.device_id);
+        return Tensor::create(shape, exec_config.data_type, exec_config.device_type, exec_config.device_id);
     };
 
     // Prepare inputs
@@ -73,12 +68,12 @@ tensor_t transformer_forward(
         tensor_t q_for_rope, k_for_rope;
         if (model.has_qk_norm) {
             auto q_normed = use_scratch ? scratch->q_normed : make({N * nhead, head_dim});
-            ops::rms_norm(q_normed, q->view({N * nhead, head_dim}),
-                          model.W(p + "self_attn.q_norm.weight"), cfg.rms_norm_eps);
+            ops::rms_norm(q_normed, q->view({N * nhead, head_dim}), model.W(p + "self_attn.q_norm.weight"),
+                          cfg.rms_norm_eps);
 
             auto k_normed = use_scratch ? scratch->k_normed : make({N * nkvhead, head_dim});
-            ops::rms_norm(k_normed, k->view({N * nkvhead, head_dim}),
-                          model.W(p + "self_attn.k_norm.weight"), cfg.rms_norm_eps);
+            ops::rms_norm(k_normed, k->view({N * nkvhead, head_dim}), model.W(p + "self_attn.k_norm.weight"),
+                          cfg.rms_norm_eps);
 
             q_for_rope = q_normed->view({N, nhead, head_dim});
             k_for_rope = k_normed->view({N, nkvhead, head_dim});
@@ -103,8 +98,7 @@ tensor_t transformer_forward(
 
         // O projection + residual
         auto o = use_scratch ? scratch->o : make({N, hidden_size});
-        ops::linear(o, attn->view({N, hidden_size}),
-                    model.W(p + "self_attn.o_proj.weight"), nullptr);
+        ops::linear(o, attn->view({N, hidden_size}), model.W(p + "self_attn.o_proj.weight"), nullptr);
 
         auto h1 = use_scratch ? scratch->h1 : make({N, hidden_size});
         ops::add(h1, hidden, o);

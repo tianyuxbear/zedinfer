@@ -15,11 +15,9 @@ enum class SamplerType {
     GENERAL // General sampling: temperature + top_k + top_p filtering
 };
 
-constexpr const char *SamplerTypeNames[] = {
-    "argmax",
-    "general"};
+constexpr const char* SamplerTypeNames[] = {"argmax", "general"};
 
-constexpr const char *to_string(SamplerType type) {
+constexpr const char* to_string(SamplerType type) {
     return SamplerTypeNames[static_cast<size_t>(type)];
 }
 
@@ -60,7 +58,7 @@ protected:
 // Greedy sampling: always pick argmax
 class ArgmaxSampler : public Sampler {
 public:
-    ArgmaxSampler(ExecutorConfig exec_config) : exec_config_(exec_config) {};
+    ArgmaxSampler(ExecutorConfig exec_config) : exec_config_(exec_config){};
 
     int sample(tensor_t logits) override;
     void setSeed(unsigned int /*seed*/) override {} // No randomness needed
@@ -72,22 +70,22 @@ private:
     // Pre-allocated buffers to avoid per-call cudaMallocHost/cudaFreeHost.
     // cudaMallocHost is expensive (~570us) when the pinned memory subsystem
     // is not warmed up, causing a 20%+ decode throughput regression.
-    tensor_t max_idx_dev_;   // [1] I64 on device
-    tensor_t max_val_dev_;   // [1] dtype on device
-    tensor_t max_idx_host_;  // [1] I64 on host (pinned)
+    tensor_t max_idx_dev_;  // [1] I64 on device
+    tensor_t max_val_dev_;  // [1] dtype on device
+    tensor_t max_idx_host_; // [1] I64 on host (pinned)
 };
 
 // General sampler: supports temperature + top_k + top_p filtering
 class GeneralSampler : public Sampler {
 public:
-    explicit GeneralSampler(const SamplerParams &params = SamplerParams());
+    explicit GeneralSampler(const SamplerParams& params = SamplerParams());
 
     int sample(tensor_t logits) override;
     void setSeed(unsigned int seed) override;
     std::string name() const override { return "General"; }
 
-    void setParams(const SamplerParams &params);
-    const SamplerParams &getParams() const { return params_; }
+    void setParams(const SamplerParams& params);
+    const SamplerParams& getParams() const { return params_; }
 
     void setTemperature(float temperature);
     void setTopK(int top_k);
@@ -97,14 +95,15 @@ private:
     SamplerParams params_;
     std::mt19937 rng_;
 
-    void applyTemperature(float *logits, size_t size);
-    void applySoftmax(float *probs, const float *logits, size_t size);
-    void applyTopK(std::vector<std::pair<float, int>> &indexed_probs);
-    void applyTopP(std::vector<std::pair<float, int>> &indexed_probs);
-    int sampleFromProbs(const float *probs, size_t size);
+    void applyTemperature(float* logits, size_t size);
+    void applySoftmax(float* probs, const float* logits, size_t size);
+    void applyTopK(std::vector<std::pair<float, int>>& indexed_probs);
+    void applyTopP(std::vector<std::pair<float, int>>& indexed_probs);
+    int sampleFromProbs(const float* probs, size_t size);
 };
 
 // Factory function to create sampler instances
-std::shared_ptr<Sampler> createSampler(ExecutorConfig exec_config, SamplerType sampler_type, const SamplerParams &params = SamplerParams());
+std::shared_ptr<Sampler> createSampler(ExecutorConfig exec_config, SamplerType sampler_type,
+                                       const SamplerParams& params = SamplerParams());
 
 } // namespace zedinfer::sampler

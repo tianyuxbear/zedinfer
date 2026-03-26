@@ -14,7 +14,7 @@ namespace zedinfer::ops::nvidia::cublas {
 // Singleton handle + workspace
 // ============================================================================
 
-static cublasLtHandle_t &handle() {
+static cublasLtHandle_t& handle() {
     static cublasLtHandle_t h = []() {
         cublasLtHandle_t h;
         if (cublasLtCreate(&h) != CUBLAS_STATUS_SUCCESS) {
@@ -27,9 +27,9 @@ static cublasLtHandle_t &handle() {
 
 static constexpr size_t WORKSPACE_SIZE = 32 * 1024 * 1024;
 
-static void *&workspace() {
-    static void *ws = []() {
-        void *ptr = nullptr;
+static void*& workspace() {
+    static void* ws = []() {
+        void* ptr = nullptr;
         cudaMalloc(&ptr, WORKSPACE_SIZE);
         return ptr;
     }();
@@ -42,10 +42,14 @@ static void *&workspace() {
 
 static cudaDataType_t to_cuda_dtype(zedinferDataType_t dt) {
     switch (dt) {
-    case ZEDINFER_DTYPE_F32:  return CUDA_R_32F;
-    case ZEDINFER_DTYPE_F16:  return CUDA_R_16F;
-    case ZEDINFER_DTYPE_BF16: return CUDA_R_16BF;
-    default: throw std::runtime_error("Unsupported dtype for cuBLASLt linear");
+        case ZEDINFER_DTYPE_F32:
+            return CUDA_R_32F;
+        case ZEDINFER_DTYPE_F16:
+            return CUDA_R_16F;
+        case ZEDINFER_DTYPE_BF16:
+            return CUDA_R_16BF;
+        default:
+            throw std::runtime_error("Unsupported dtype for cuBLASLt linear");
     }
 }
 
@@ -58,13 +62,13 @@ struct MatmulKey {
     zedinferDataType_t dtype;
     bool has_bias;
 
-    bool operator==(const MatmulKey &o) const {
+    bool operator==(const MatmulKey& o) const {
         return M == o.M && N == o.N && K == o.K && dtype == o.dtype && has_bias == o.has_bias;
     }
 };
 
 struct MatmulKeyHash {
-    size_t operator()(const MatmulKey &k) const {
+    size_t operator()(const MatmulKey& k) const {
         size_t h = k.M * 2654435761u;
         h ^= k.N * 40503u;
         h ^= k.K * 12289u;
@@ -102,10 +106,8 @@ static std::mutex algo_mutex;
 //              -> row-major [M,N] with ld=N, which is col-major [N,M] with ld=N
 // ============================================================================
 
-void linear(std::byte *output, const std::byte *input, const std::byte *weight,
-            const std::byte *bias, zedinferDataType_t type,
-            size_t M, size_t N, size_t K, cudaStream_t stream) {
-
+void linear(std::byte* output, const std::byte* input, const std::byte* weight, const std::byte* bias,
+            zedinferDataType_t type, size_t M, size_t N, size_t K, cudaStream_t stream) {
     auto lt = handle();
     auto cuda_dt = to_cuda_dtype(type);
     bool has_bias = (bias != nullptr);
@@ -131,13 +133,10 @@ void linear(std::byte *output, const std::byte *input, const std::byte *weight,
     // Bias epilogue: bias is [N], broadcast along M dimension
     if (has_bias) {
         cublasLtEpilogue_t epilogue = CUBLASLT_EPILOGUE_BIAS;
-        cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_EPILOGUE,
-                                        &epilogue, sizeof(epilogue));
-        cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_BIAS_POINTER,
-                                        &bias, sizeof(bias));
+        cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_EPILOGUE, &epilogue, sizeof(epilogue));
+        cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_BIAS_POINTER, &bias, sizeof(bias));
         cudaDataType_t biasDt = cuda_dt;
-        cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_BIAS_DATA_TYPE,
-                                        &biasDt, sizeof(biasDt));
+        cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_BIAS_DATA_TYPE, &biasDt, sizeof(biasDt));
     }
 
     // Column-major layouts (row-major data reinterpreted):
@@ -148,15 +147,15 @@ void linear(std::byte *output, const std::byte *input, const std::byte *weight,
     // "C" = output: row-major [M,N] → col-major [N,M], ld=N.
     //               ld >= rows = N. ld=N ✓
     cublasLtMatrixLayout_t layoutA, layoutB, layoutC;
-    cublasLtMatrixLayoutCreate(&layoutA, cuda_dt, K, N, K);   // weight: col-major [K,N], ld=K
-    cublasLtMatrixLayoutCreate(&layoutB, cuda_dt, K, M, K);   // input:  col-major [K,M], ld=K
-    cublasLtMatrixLayoutCreate(&layoutC, cuda_dt, N, M, N);   // output: col-major [N,M], ld=N
+    cublasLtMatrixLayoutCreate(&layoutA, cuda_dt, K, N, K); // weight: col-major [K,N], ld=K
+    cublasLtMatrixLayoutCreate(&layoutB, cuda_dt, K, M, K); // input:  col-major [K,M], ld=K
+    cublasLtMatrixLayoutCreate(&layoutC, cuda_dt, N, M, N); // output: col-major [N,M], ld=N
 
     float alpha = 1.0f, beta = 0.0f;
 
     // Heuristic (cached by shape)
     MatmulKey key{M, N, K, type, has_bias};
-    cublasLtMatmulAlgo_t *algo_ptr = nullptr;
+    cublasLtMatmulAlgo_t* algo_ptr = nullptr;
 
     {
         std::lock_guard<std::mutex> lock(algo_mutex);
@@ -169,18 +168,18 @@ void linear(std::byte *output, const std::byte *input, const std::byte *weight,
     if (!algo_ptr) {
         cublasLtMatmulPreference_t pref;
         cublasLtMatmulPreferenceCreate(&pref);
-        cublasLtMatmulPreferenceSetAttribute(pref, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
-                                              &WORKSPACE_SIZE, sizeof(WORKSPACE_SIZE));
+        cublasLtMatmulPreferenceSetAttribute(pref, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &WORKSPACE_SIZE,
+                                             sizeof(WORKSPACE_SIZE));
 
         cublasLtMatmulHeuristicResult_t result;
         int returnedResults = 0;
-        cublasLtMatmulAlgoGetHeuristic(lt, matmulDesc, layoutA, layoutB, layoutC, layoutC,
-                                        pref, 1, &result, &returnedResults);
+        cublasLtMatmulAlgoGetHeuristic(lt, matmulDesc, layoutA, layoutB, layoutC, layoutC, pref, 1, &result,
+                                       &returnedResults);
         cublasLtMatmulPreferenceDestroy(pref);
 
         if (returnedResults > 0) {
             std::lock_guard<std::mutex> lock(algo_mutex);
-            auto &cached = algo_cache[key];
+            auto& cached = algo_cache[key];
             cached.algo = result.algo;
             cached.valid = true;
             algo_ptr = &cached.algo;
@@ -188,17 +187,10 @@ void linear(std::byte *output, const std::byte *input, const std::byte *weight,
     }
 
     // Execute: "A" = weight, "B" = input (swapped from math notation)
-    cublasStatus_t status = cublasLtMatmul(
-        lt, matmulDesc,
-        &alpha,
-        weight, layoutA,   // "A" = weight [N,K]
-        input,  layoutB,   // "B" = input  [M,K], transposed to [K,M]
-        &beta,
-        output, layoutC,   // "C" = output [N,M] col-major = [M,N] row-major
-        output, layoutC,
-        algo_ptr,
-        workspace(), WORKSPACE_SIZE,
-        stream);
+    cublasStatus_t status = cublasLtMatmul(lt, matmulDesc, &alpha, weight, layoutA, // "A" = weight [N,K]
+                                           input, layoutB,         // "B" = input  [M,K], transposed to [K,M]
+                                           &beta, output, layoutC, // "C" = output [N,M] col-major = [M,N] row-major
+                                           output, layoutC, algo_ptr, workspace(), WORKSPACE_SIZE, stream);
 
     cublasLtMatrixLayoutDestroy(layoutA);
     cublasLtMatrixLayoutDestroy(layoutB);

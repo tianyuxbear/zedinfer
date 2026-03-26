@@ -22,38 +22,30 @@ namespace zedinfer::model {
 class PagedForwardContext {
 public:
     // Single-request mode (session-based, run_one)
-    PagedForwardContext(
-        const std::vector<int> &input_ids,
-        int past_len,
-        kvcache::SequenceBlockTable &block_table,
-        kvcache::BlockPool &pool);
+    PagedForwardContext(const std::vector<int>& input_ids, int past_len, kvcache::SequenceBlockTable& block_table,
+                        kvcache::BlockPool& pool);
 
     // Batch mode (continuous batching, step/run_loop)
-    PagedForwardContext(
-        const BatchContext &batch,
-        kvcache::BlockAllocator &allocator);
+    PagedForwardContext(const BatchContext& batch, kvcache::BlockAllocator& allocator);
 
     int num_tokens() const { return total_tokens_; }
-    void prepare_inputs(tensor_t &ids, tensor_t &pos_ids,
-                        const ExecutorConfig &exec_config);
+    void prepare_inputs(tensor_t& ids, tensor_t& pos_ids, const ExecutorConfig& exec_config);
     void prepare_inputs_into(tensor_t ids, tensor_t pos_ids);
     void write_kv(int layer, tensor_t k, tensor_t v);
-    tensor_t attend(int layer, tensor_t q_rope, float scale,
-                    const ExecutorConfig &exec_config,
-                    size_t nhead, size_t nkvhead, size_t head_dim,
-                    tensor_t pre_alloc_out = nullptr);
+    tensor_t attend(int layer, tensor_t q_rope, float scale, const ExecutorConfig& exec_config, size_t nhead,
+                    size_t nkvhead, size_t head_dim, tensor_t pre_alloc_out = nullptr);
     void finalize();
 
 private:
     struct Slot {
-        kvcache::SequenceBlockTable *block_table;
-        int token_offset;   // start in flattened token_ids
-        int num_tokens;     // tokens in this slot
-        int past_len;       // tokens already in KV cache
-        bool is_decode;     // true if num_tokens == 1 and past_len > 0
+        kvcache::SequenceBlockTable* block_table;
+        int token_offset; // start in flattened token_ids
+        int num_tokens;   // tokens in this slot
+        int past_len;     // tokens already in KV cache
+        bool is_decode;   // true if num_tokens == 1 and past_len > 0
     };
 
-    kvcache::BlockPool &pool_;
+    kvcache::BlockPool& pool_;
     int total_tokens_;
     std::vector<Slot> slots_;
 
@@ -62,17 +54,15 @@ private:
     std::vector<int64_t> position_ids_;
 
     // Attention sub-dispatchers
-    void attend_decode_single(int layer, tensor_t q_rope, tensor_t attn,
-                               const ops::AttentionConfig &cfg, size_t nhead, size_t head_dim);
-    void attend_decode_batched(int layer, tensor_t q_rope, tensor_t attn,
-                                const ops::AttentionConfig &cfg);
-    void attend_prefill(int layer, tensor_t q_rope, tensor_t attn,
-                         const ops::AttentionConfig &cfg);
+    void attend_decode_single(int layer, tensor_t q_rope, tensor_t attn, const ops::AttentionConfig& cfg, size_t nhead,
+                              size_t head_dim);
+    void attend_decode_batched(int layer, tensor_t q_rope, tensor_t attn, const ops::AttentionConfig& cfg);
+    void attend_prefill(int layer, tensor_t q_rope, tensor_t attn, const ops::AttentionConfig& cfg);
 
     // Helpers
-    void scatter_slot_kv(const Slot &slot, int layer, tensor_t k, tensor_t v);
-    void copy_to_block(const void *src, size_t bytes, void *dst);
-    void build_decode_cache(const ExecutorConfig &exec_config);
+    void scatter_slot_kv(const Slot& slot, int layer, tensor_t k, tensor_t v);
+    void copy_to_block(const void* src, size_t bytes, void* dst);
+    void build_decode_cache(const ExecutorConfig& exec_config);
 
     // Cached GPU block tables for batched decode (built once, reused across layers)
     // Block tables are identical across layers since K/V block IDs are per-layer

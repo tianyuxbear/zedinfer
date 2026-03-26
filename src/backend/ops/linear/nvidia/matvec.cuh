@@ -3,20 +3,19 @@
 #include "utils/nvidia/math.cuh"
 #include "utils/nvidia/types.cuh"
 
-__global__ void matvec_kernel_warp(float *c, const float *a, const float *B, const float *bias, const size_t N, const size_t K) {
+__global__ void matvec_kernel_warp(float* c, const float* a, const float* B, const float* bias, const size_t N,
+                                   const size_t K) {
     size_t bid = blockIdx.x;
     __shared__ float smem[BLOCK_SIZE / WARP_SIZE];
     const int warp_num = blockDim.x / WARP_SIZE;
     for (size_t i = bid; i < N; i += gridDim.x) {
-        const float *B_ptr = B + i * K;
+        const float* B_ptr = B + i * K;
         size_t tid = threadIdx.x;
         size_t lane_id = tid % 32;
         float bias_val = bias ? bias[i] : 0.0f;
 
         float sum = 0.0f;
-        for (size_t j = tid; j < K; j += blockDim.x) {
-            sum += a[j] * B_ptr[j];
-        }
+        for (size_t j = tid; j < K; j += blockDim.x) { sum += a[j] * B_ptr[j]; }
         for (size_t stride = WARP_SIZE >> 1; stride > 0; stride >>= 1) {
             sum += __shfl_down_sync(0xffffffffu, sum, stride);
         }
@@ -41,12 +40,11 @@ __global__ void matvec_kernel_warp(float *c, const float *a, const float *B, con
 
 // Warp-based matvec kernel with vectorized loads
 template <typename T>
-__global__ void matvec_kernel_warp_vec(T *c, const T *a, const T *B, const T *bias,
-                                       const size_t N, const size_t K) {
+__global__ void matvec_kernel_warp_vec(T* c, const T* a, const T* B, const T* bias, const size_t N, const size_t K) {
     __shared__ float smem[BLOCK_SIZE / WARP_SIZE];
     const size_t bid = blockIdx.x;
     const int warp_num = blockDim.x / WARP_SIZE;
-    const T *B_ptr = B + bid * K;
+    const T* B_ptr = B + bid * K;
     const size_t tid = threadIdx.x;
     const size_t lane_id = tid % WARP_SIZE;
 
@@ -66,15 +64,11 @@ __global__ void matvec_kernel_warp_vec(T *c, const T *a, const T *B, const T *bi
     // Handle remaining elements
     if (remainder > 0) {
         const size_t base = num_packs * PackedSize;
-        for (size_t j = tid; j < remainder; j += blockDim.x) {
-            sum += float(B_ptr[base + j]) * float(a[base + j]);
-        }
+        for (size_t j = tid; j < remainder; j += blockDim.x) { sum += float(B_ptr[base + j]) * float(a[base + j]); }
     }
 
     // Warp-level reduction
-    for (int stride = WARP_SIZE >> 1; stride > 0; stride >>= 1) {
-        sum += __shfl_down_sync(0xffffffffu, sum, stride);
-    }
+    for (int stride = WARP_SIZE >> 1; stride > 0; stride >>= 1) { sum += __shfl_down_sync(0xffffffffu, sum, stride); }
 
     if (lane_id == 0) {
         smem[tid / WARP_SIZE] = sum;

@@ -10,14 +10,8 @@ namespace zedinfer::ops::nvidia {
 // Logic: Rotates adjacent pairs (x[i], x[i + half_dim]) by calculated angle.
 // ----------------------------------------------------------------------
 template <typename T>
-__global__ void RoPE_kernel(
-    T *__restrict__ output,
-    const T *__restrict__ input,
-    const int64_t *__restrict__ pos_ids,
-    const float theta,
-    const int seq_len,
-    const int num_heads,
-    const int head_dim) {
+__global__ void RoPE_kernel(T* __restrict__ output, const T* __restrict__ input, const int64_t* __restrict__ pos_ids,
+                            const float theta, const int seq_len, const int num_heads, const int head_dim) {
     const int half_dim = head_dim / 2;
     const int total_pairs = seq_len * num_heads * half_dim;
 
@@ -32,8 +26,8 @@ __global__ void RoPE_kernel(
     // Layout assumed: [seq_len, num_heads, head_dim]
     const int rotary_idx = global_idx % half_dim; // Index within the half-dimension
     const int remnant = global_idx / half_dim;
-    const int head_idx = remnant % num_heads;  // Head index
-    const int token_idx = remnant / num_heads; // Token/Sequence index
+    const int head_idx = remnant % num_heads;     // Head index
+    const int token_idx = remnant / num_heads;    // Token/Sequence index
 
     // 3. Compute Rotation Angle
     // inv_freq = 1.0 / (theta ^ (2 * i / dim))
@@ -65,15 +59,8 @@ __global__ void RoPE_kernel(
     output[base_offset + rotary_idx + half_dim] = from_float<T>(rot_i);
 }
 
-void rope(
-    std::byte *output,
-    const std::byte *input,
-    const std::byte *pos_ids,
-    float theta,
-    zedinferDataType_t type,
-    size_t seq_len,
-    size_t num_heads,
-    size_t head_dim) {
+void rope(std::byte* output, const std::byte* input, const std::byte* pos_ids, float theta, zedinferDataType_t type,
+          size_t seq_len, size_t num_heads, size_t head_dim) {
     // Total number of pairs to process (each thread handles 2 elements)
     const size_t total_pairs = seq_len * num_heads * head_dim / 2;
 
@@ -81,32 +68,26 @@ void rope(
     dim3 grid(div_ceil(total_pairs, BLOCK_SIZE));
 
     switch (type) {
-    case ZEDINFER_DTYPE_F32:
-        RoPE_kernel<<<grid, block>>>(
-            reinterpret_cast<float *>(output),
-            reinterpret_cast<const float *>(input),
-            reinterpret_cast<const int64_t *>(pos_ids),
-            theta, seq_len, num_heads, head_dim);
-        break;
+        case ZEDINFER_DTYPE_F32:
+            RoPE_kernel<<<grid, block>>>(reinterpret_cast<float*>(output), reinterpret_cast<const float*>(input),
+                                         reinterpret_cast<const int64_t*>(pos_ids), theta, seq_len, num_heads,
+                                         head_dim);
+            break;
 
-    case ZEDINFER_DTYPE_F16:
-        RoPE_kernel<<<grid, block>>>(
-            reinterpret_cast<half *>(output),
-            reinterpret_cast<const half *>(input),
-            reinterpret_cast<const int64_t *>(pos_ids),
-            theta, seq_len, num_heads, head_dim);
-        break;
+        case ZEDINFER_DTYPE_F16:
+            RoPE_kernel<<<grid, block>>>(reinterpret_cast<half*>(output), reinterpret_cast<const half*>(input),
+                                         reinterpret_cast<const int64_t*>(pos_ids), theta, seq_len, num_heads,
+                                         head_dim);
+            break;
 
-    case ZEDINFER_DTYPE_BF16:
-        RoPE_kernel<<<grid, block>>>(
-            reinterpret_cast<cuda_bfloat16 *>(output),
-            reinterpret_cast<const cuda_bfloat16 *>(input),
-            reinterpret_cast<const int64_t *>(pos_ids),
-            theta, seq_len, num_heads, head_dim);
-        break;
+        case ZEDINFER_DTYPE_BF16:
+            RoPE_kernel<<<grid, block>>>(
+                reinterpret_cast<cuda_bfloat16*>(output), reinterpret_cast<const cuda_bfloat16*>(input),
+                reinterpret_cast<const int64_t*>(pos_ids), theta, seq_len, num_heads, head_dim);
+            break;
 
-    default:
-        EXCEPTION_UNSUPPORTED_DATATYPE(type);
+        default:
+            EXCEPTION_UNSUPPORTED_DATATYPE(type);
     }
 }
 } // namespace zedinfer::ops::nvidia

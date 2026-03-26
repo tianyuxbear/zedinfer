@@ -2,11 +2,8 @@
 
 namespace zedinfer::model {
 
-std::unique_ptr<DecodeScratch> DecodeScratch::create(
-    const ModelConfig &cfg,
-    bool has_qk_norm,
-    const ExecutorConfig &exec_config) {
-
+std::unique_ptr<DecodeScratch> DecodeScratch::create(const ModelConfig& cfg, bool has_qk_norm,
+                                                     const ExecutorConfig& exec_config) {
     auto s = std::make_unique<DecodeScratch>();
     auto dt = exec_config.data_type;
     auto dev = exec_config.device_type;
@@ -20,9 +17,7 @@ std::unique_ptr<DecodeScratch> DecodeScratch::create(
     size_t inter = cfg.intermediate_size;
     size_t V = cfg.vocab_size;
 
-    auto mk = [&](std::vector<size_t> shape, zedinferDataType_t t) {
-        return Tensor::create(shape, t, dev, did);
-    };
+    auto mk = [&](std::vector<size_t> shape, zedinferDataType_t t) { return Tensor::create(shape, t, dev, did); };
     auto mkf = [&](std::vector<size_t> shape) { return mk(shape, dt); };
 
     // Inputs

@@ -18,9 +18,7 @@ protected:
     void TearDown() override {}
 
     // Helper function: compare two float vectors
-    bool compareFloatVectors(const std::vector<float> &a,
-                             const std::vector<float> &b,
-                             float epsilon = 1e-5f) {
+    bool compareFloatVectors(const std::vector<float>& a, const std::vector<float>& b, float epsilon = 1e-5f) {
         if (a.size() != b.size()) {
             return false;
         }
@@ -33,24 +31,19 @@ protected:
     }
 
     // Helper function: fill tensor data
-    template <typename T>
-    void fillTensorData(tensor_t tensor, const std::vector<T> &data) {
+    template <typename T> void fillTensorData(tensor_t tensor, const std::vector<T>& data) {
         tensor->load(data.data());
     }
 
     // Helper function: read tensor data
-    template <typename T>
-    std::vector<T> readTensorData(tensor_t tensor) {
+    template <typename T> std::vector<T> readTensorData(tensor_t tensor) {
         std::vector<T> result(tensor->numel());
         if (tensor->deviceType() == ZEDINFER_DEVICE_CPU) {
-            memcpy(result.data(), tensor->data(),
-                   tensor->numel() * sizeof(T));
+            memcpy(result.data(), tensor->data(), tensor->numel() * sizeof(T));
         } else {
             // GPU -> CPU
-            core::context().runtime().api()->memcpy_sync(
-                result.data(), tensor->data(),
-                tensor->numel() * sizeof(T),
-                ZEDINFER_MEMCPY_D2H);
+            core::context().runtime().api()->memcpy_sync(result.data(), tensor->data(), tensor->numel() * sizeof(T),
+                                                         ZEDINFER_MEMCPY_D2H);
         }
         return result;
     }
@@ -160,9 +153,7 @@ TEST_F(TensorTest, PermuteInvalidOrder) {
 
 TEST_F(TensorTest, PermutePreservesData) {
     auto tensor = Tensor::create({2, 3}, ZEDINFER_DTYPE_F32);
-    std::vector<float> data = {
-        1.0f, 2.0f, 3.0f,
-        4.0f, 5.0f, 6.0f};
+    std::vector<float> data = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
     fillTensorData(tensor, data);
 
     // Transpose: (2,3) -> (3,2)
@@ -174,10 +165,7 @@ TEST_F(TensorTest, PermutePreservesData) {
     auto cont = transposed->contiguous();
     auto result = readTensorData<float>(cont);
 
-    std::vector<float> expected = {
-        1.0f, 4.0f,
-        2.0f, 5.0f,
-        3.0f, 6.0f};
+    std::vector<float> expected = {1.0f, 4.0f, 2.0f, 5.0f, 3.0f, 6.0f};
     EXPECT_TRUE(compareFloatVectors(result, expected));
 }
 
@@ -464,10 +452,7 @@ TEST_F(TensorTest, ComplexOperationChain) {
 
 TEST_F(TensorTest, DataIntegrityAfterMultipleTransforms) {
     auto tensor = Tensor::create({3, 4}, ZEDINFER_DTYPE_F32);
-    std::vector<float> data = {
-        1, 2, 3, 4,
-        5, 6, 7, 8,
-        9, 10, 11, 12};
+    std::vector<float> data = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
     fillTensorData(tensor, data);
 
     // Transpose
@@ -483,9 +468,7 @@ TEST_F(TensorTest, DataIntegrityAfterMultipleTransforms) {
 
     // Expected: rows 2,3 of original matrix (indices 1,2)
     // After transpose, these are columns 2,3
-    std::vector<float> expected = {
-        2, 6, 10,
-        3, 7, 11};
+    std::vector<float> expected = {2, 6, 10, 3, 7, 11};
 
     EXPECT_TRUE(compareFloatVectors(result, expected));
 }

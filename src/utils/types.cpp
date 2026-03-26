@@ -47,7 +47,7 @@ fp16_t _f32_to_f16(float val) {
     int32_t exponent = ((f32 >> 23) & 0xFF) - 127; // Extract and de-bias the exponent
     uint32_t mantissa = f32 & 0x7FFFFF;            // Extract the mantissa (fraction part)
 
-    if (exponent >= 16) { // Special cases for Inf and NaN
+    if (exponent >= 16) {                          // Special cases for Inf and NaN
         // NaN
         if (exponent == 128 && mantissa != 0) {
             return fp16_t{static_cast<uint16_t>(sign | 0x7E00)};
@@ -115,13 +115,13 @@ fp16_t fp32_to_fp16_f16c(float x) {
 
 // Convert a batch of FP16 values to FP32 using F16C instructions
 // Processes elements in groups of 8 for optimal performance
-void fp16_to_fp32_batch_f16c(float *dst, const fp16_t *src, size_t count) {
+void fp16_to_fp32_batch_f16c(float* dst, const fp16_t* src, size_t count) {
     size_t i = 0;
 
     // Process elements in groups of 8 using SIMD instructions
     for (; i + 7 < count; i += 8) {
         // Load 8 FP16 values (16 bytes) into a 128-bit register
-        __m128i vec_f16 = _mm_loadu_si128(reinterpret_cast<const __m128i *>(src + i));
+        __m128i vec_f16 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(src + i));
 
         // Convert 8 FP16 values to 8 FP32 values using F16C instruction
         __m256 vec_f32 = _mm256_cvtph_ps(vec_f16);
@@ -131,14 +131,12 @@ void fp16_to_fp32_batch_f16c(float *dst, const fp16_t *src, size_t count) {
     }
 
     // Process any remaining elements (less than 8) using single-element conversion
-    for (; i < count; ++i) {
-        dst[i] = fp16_to_fp32_f16c(src[i]);
-    }
+    for (; i < count; ++i) { dst[i] = fp16_to_fp32_f16c(src[i]); }
 }
 
 // Convert a batch of FP32 values to FP16 using F16C instructions
 // Processes elements in groups of 8 for optimal performance
-void fp32_to_fp16_batch_f16c(fp16_t *dst, const float *src, size_t count) {
+void fp32_to_fp16_batch_f16c(fp16_t* dst, const float* src, size_t count) {
     size_t i = 0;
 
     // Process elements in groups of 8 using SIMD instructions
@@ -150,13 +148,11 @@ void fp32_to_fp16_batch_f16c(fp16_t *dst, const float *src, size_t count) {
         __m128i vec_f16 = _mm256_cvtps_ph(vec_f32, _MM_FROUND_TO_NEAREST_INT);
 
         // Store the 8 converted FP16 values (16 bytes) to the destination array
-        _mm_storeu_si128(reinterpret_cast<__m128i *>(dst + i), vec_f16);
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(dst + i), vec_f16);
     }
 
     // Process any remaining elements (less than 8) using single-element conversion
-    for (; i < count; ++i) {
-        dst[i] = fp32_to_fp16_f16c(src[i]);
-    }
+    for (; i < count; ++i) { dst[i] = fp32_to_fp16_f16c(src[i]); }
 }
 #endif
 
@@ -164,7 +160,7 @@ void fp32_to_fp16_batch_f16c(fp16_t *dst, const float *src, size_t count) {
 #ifdef __AVX512F__
 // Convert a batch of BF16 values to FP32 using AVX-512 instructions
 // Processes 16 elements at a time for optimal performance
-void bf16_to_fp32_batch_avx512(float *dst, const bf16_t *src, size_t count) {
+void bf16_to_fp32_batch_avx512(float* dst, const bf16_t* src, size_t count) {
     const size_t vec_size = 16;
     const size_t vec_count = count / vec_size;
     // const size_t remainder = count % vec_size;
@@ -175,7 +171,7 @@ void bf16_to_fp32_batch_avx512(float *dst, const bf16_t *src, size_t count) {
         size_t i = block * vec_size;
 
         // Load 16 BF16 values into a 256-bit register
-        __m256i bf16_vec = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(src + i));
+        __m256i bf16_vec = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src + i));
 
         // Convert BF16 to FP32
         __m512i bf16_extended = _mm512_cvtepu16_epi32(bf16_vec);
@@ -188,14 +184,12 @@ void bf16_to_fp32_batch_avx512(float *dst, const bf16_t *src, size_t count) {
 
     // 单线程处理剩余元素（通常很少）
     size_t i = vec_count * vec_size;
-    for (; i < count; ++i) {
-        dst[i] = _bf16_to_f32(src[i]);
-    }
+    for (; i < count; ++i) { dst[i] = _bf16_to_f32(src[i]); }
 }
 
 // Convert a batch of FP32 values to BF16 using AVX-512 instructions
 // Processes 16 elements at a time for optimal performance
-void fp32_to_bf16_batch_avx512(bf16_t *dst, const float *src, size_t count) {
+void fp32_to_bf16_batch_avx512(bf16_t* dst, const float* src, size_t count) {
     size_t i = 0;
 
     // Process elements in groups of 16 using AVX-512
@@ -209,7 +203,7 @@ void fp32_to_bf16_batch_avx512(bf16_t *dst, const float *src, size_t count) {
         __m256i bf16_vec = _mm512_cvtepi32_epi16(bf16_shifted);
 
         // Store 16 BF16 results to destination array
-        _mm256_storeu_si256(reinterpret_cast<__m256i *>(dst + i), bf16_vec);
+        _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst + i), bf16_vec);
     }
 
     // Handle remaining elements
@@ -221,13 +215,13 @@ void fp32_to_bf16_batch_avx512(bf16_t *dst, const float *src, size_t count) {
 #elif defined(__AVX2__)
 // Convert a batch of BF16 values to FP32 using AVX2 instructions
 // Processes 8 elements at a time for optimal performance
-void bf16_to_fp32_batch_avx2(float *dst, const bf16_t *src, size_t count) {
+void bf16_to_fp32_batch_avx2(float* dst, const bf16_t* src, size_t count) {
     size_t i = 0;
 
     // Process elements in groups of 8 using AVX2
     for (; i + 7 < count; i += 8) {
         // Load 8 BF16 values (16 bytes) into a 128-bit register
-        __m128i bf16_vec = _mm_loadu_si128(reinterpret_cast<const __m128i *>(src + i));
+        __m128i bf16_vec = _mm_loadu_si128(reinterpret_cast<const __m128i*>(src + i));
 
         // Convert BF16 to FP32:
         // 1. Zero-extend 16-bit BF16 values to 32-bit integers
@@ -252,7 +246,7 @@ void bf16_to_fp32_batch_avx2(float *dst, const bf16_t *src, size_t count) {
 
 // Convert a batch of FP32 values to BF16 using AVX2 instructions
 // Processes 8 elements at a time for optimal performance
-void fp32_to_bf16_batch_avx2(bf16_t *dst, const float *src, size_t count) {
+void fp32_to_bf16_batch_avx2(bf16_t* dst, const float* src, size_t count) {
     size_t i = 0;
 
     // Process elements in groups of 8 using AVX2
@@ -275,7 +269,7 @@ void fp32_to_bf16_batch_avx2(bf16_t *dst, const float *src, size_t count) {
         __m128i bf16_vec = _mm256_castsi256_si128(packed);
 
         // Store 8 BF16 results to destination array
-        _mm_storeu_si128(reinterpret_cast<__m128i *>(dst + i), bf16_vec);
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(dst + i), bf16_vec);
     }
 
     // Handle remaining elements (less than 8)
@@ -288,30 +282,26 @@ void fp32_to_bf16_batch_avx2(bf16_t *dst, const float *src, size_t count) {
 
 // Wrapper functions that automatically select the best available implementation
 // Convert a batch of BF16 values to FP32 using the best available instruction set
-void bf16_to_fp32_batch(float *dst, const bf16_t *src, size_t count) {
+void bf16_to_fp32_batch(float* dst, const bf16_t* src, size_t count) {
 #if defined(__AVX512F__)
     bf16_to_fp32_batch_avx512(dst, src, count);
 #elif defined(__AVX2__)
     bf16_to_fp32_batch_avx2(dst, src, count);
 #else
     // Fallback to scalar implementation if no SIMD support
-    for (size_t i = 0; i < count; ++i) {
-        dst[i] = _bf16_to_f32(src[i]);
-    }
+    for (size_t i = 0; i < count; ++i) { dst[i] = _bf16_to_f32(src[i]); }
 #endif
 }
 
 // Convert a batch of FP32 values to BF16 using the best available instruction set
-void fp32_to_bf16_batch(bf16_t *dst, const float *src, size_t count) {
+void fp32_to_bf16_batch(bf16_t* dst, const float* src, size_t count) {
 #if defined(__AVX512F__)
     fp32_to_bf16_batch_avx512(dst, src, count);
 #elif defined(__AVX2__)
     fp32_to_bf16_batch_avx2(dst, src, count);
 #else
     // Fallback to scalar implementation if no SIMD support
-    for (size_t i = 0; i < count; ++i) {
-        dst[i] = _f32_to_bf16(src[i]);
-    }
+    for (size_t i = 0; i < count; ++i) { dst[i] = _f32_to_bf16(src[i]); }
 #endif
 }
 

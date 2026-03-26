@@ -4,12 +4,7 @@
 
 namespace zedinfer::ops::nvidia {
 
-template <typename T>
-__global__ void swiglu_scalar_kernel(
-    T *output,
-    const T *gate,
-    const T *up,
-    const size_t numel) {
+template <typename T> __global__ void swiglu_scalar_kernel(T* output, const T* gate, const T* up, const size_t numel) {
     size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < numel) {
         float gate_val = to_float(gate[idx]);
@@ -19,11 +14,8 @@ __global__ void swiglu_scalar_kernel(
 }
 
 template <typename T>
-__global__ void swiglu_packed_kernel(
-    T *__restrict__ output,
-    const T *__restrict__ gate,
-    const T *__restrict__ up,
-    size_t numel) {
+__global__ void swiglu_packed_kernel(T* __restrict__ output, const T* __restrict__ gate, const T* __restrict__ up,
+                                     size_t numel) {
     // 1. Setup: Determine elements per thread based on type
     // (4 for float, 8 for half/bf16)
     constexpr int PackSize = PackedTraits<T>::size;
@@ -50,9 +42,9 @@ __global__ void swiglu_packed_kernel(
             // ---------------------------------------------------
             // Half: Reinterpret as 4x half2
             // ---------------------------------------------------
-            const half2 *gate_h2 = reinterpret_cast<const half2 *>(&gate_vec);
-            const half2 *up_h2 = reinterpret_cast<const half2 *>(&up_vec);
-            half2 *res_h2 = reinterpret_cast<half2 *>(&res_vec);
+            const half2* gate_h2 = reinterpret_cast<const half2*>(&gate_vec);
+            const half2* up_h2 = reinterpret_cast<const half2*>(&up_vec);
+            half2* res_h2 = reinterpret_cast<half2*>(&res_vec);
 
 #pragma unroll
             for (int i = 0; i < 4; ++i) {
@@ -71,9 +63,9 @@ __global__ void swiglu_packed_kernel(
             // ---------------------------------------------------
             // BFloat16: Reinterpret as 4x cuda_bfloat162
             // ---------------------------------------------------
-            const cuda_bfloat162 *gate_bf2 = reinterpret_cast<const cuda_bfloat162 *>(&gate_vec);
-            const cuda_bfloat162 *up_bf2 = reinterpret_cast<const cuda_bfloat162 *>(&up_vec);
-            cuda_bfloat162 *res_bf2 = reinterpret_cast<cuda_bfloat162 *>(&res_vec);
+            const cuda_bfloat162* gate_bf2 = reinterpret_cast<const cuda_bfloat162*>(&gate_vec);
+            const cuda_bfloat162* up_bf2 = reinterpret_cast<const cuda_bfloat162*>(&up_vec);
+            cuda_bfloat162* res_bf2 = reinterpret_cast<cuda_bfloat162*>(&res_vec);
 
 #pragma unroll
             for (int i = 0; i < 4; ++i) {
@@ -106,8 +98,7 @@ __global__ void swiglu_packed_kernel(
 // ----------------------------------------------------------------------
 // Host Dispatcher
 // ----------------------------------------------------------------------
-template <typename T>
-void launch_swiglu(T *output, const T *gate, const T *up, const size_t numel) {
+template <typename T> void launch_swiglu(T* output, const T* gate, const T* up, const size_t numel) {
     constexpr size_t PackSize = PackedTraits<T>::size; // 4 for float, 8 for half/bf16
 
     dim3 block(BLOCK_SIZE);
@@ -117,37 +108,22 @@ void launch_swiglu(T *output, const T *gate, const T *up, const size_t numel) {
 }
 
 // Public API Interface
-void swiglu(
-    std::byte *output,
-    const std::byte *gate,
-    const std::byte *up,
-    zedinferDataType_t type,
-    size_t numel) {
+void swiglu(std::byte* output, const std::byte* gate, const std::byte* up, zedinferDataType_t type, size_t numel) {
     switch (type) {
-
-    case ZEDINFER_DTYPE_F32:
-        launch_swiglu(
-            reinterpret_cast<float *>(output),
-            reinterpret_cast<const float *>(gate),
-            reinterpret_cast<const float *>(up),
-            numel);
-        break;
-    case ZEDINFER_DTYPE_F16:
-        launch_swiglu(
-            reinterpret_cast<half *>(output),
-            reinterpret_cast<const half *>(gate),
-            reinterpret_cast<const half *>(up),
-            numel);
-        break;
-    case ZEDINFER_DTYPE_BF16:
-        launch_swiglu(
-            reinterpret_cast<cuda_bfloat16 *>(output),
-            reinterpret_cast<const cuda_bfloat16 *>(gate),
-            reinterpret_cast<const cuda_bfloat16 *>(up),
-            numel);
-        break;
-    default:
-        EXCEPTION_UNSUPPORTED_DATATYPE(type);
+        case ZEDINFER_DTYPE_F32:
+            launch_swiglu(reinterpret_cast<float*>(output), reinterpret_cast<const float*>(gate),
+                          reinterpret_cast<const float*>(up), numel);
+            break;
+        case ZEDINFER_DTYPE_F16:
+            launch_swiglu(reinterpret_cast<half*>(output), reinterpret_cast<const half*>(gate),
+                          reinterpret_cast<const half*>(up), numel);
+            break;
+        case ZEDINFER_DTYPE_BF16:
+            launch_swiglu(reinterpret_cast<cuda_bfloat16*>(output), reinterpret_cast<const cuda_bfloat16*>(gate),
+                          reinterpret_cast<const cuda_bfloat16*>(up), numel);
+            break;
+        default:
+            EXCEPTION_UNSUPPORTED_DATATYPE(type);
     }
 }
 } // namespace zedinfer::ops::nvidia

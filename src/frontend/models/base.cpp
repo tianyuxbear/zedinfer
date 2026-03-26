@@ -18,7 +18,7 @@ using json = nlohmann::json;
 namespace zedinfer::model {
 
 // Parse model config and weights, then instantiate the corresponding model.
-std::shared_ptr<Model> Model::parse(const std::string &model_path, zedinferDeviceType_t target_device) {
+std::shared_ptr<Model> Model::parse(const std::string& model_path, zedinferDeviceType_t target_device) {
     // Load model configuration
     std::string config_path = (fs::path(model_path) / "config.json").string();
     auto config = load_config(config_path);
@@ -40,13 +40,13 @@ std::shared_ptr<Model> Model::parse(const std::string &model_path, zedinferDevic
 
     // Construct and return the model instance
     if (config->model_type == "qwen2") {
-        auto *qwen2_config = dynamic_cast<Qwen2Config *>(config.get());
+        auto* qwen2_config = dynamic_cast<Qwen2Config*>(config.get());
         if (!qwen2_config) {
             throw std::logic_error("Config is not Qwen2Config");
         }
         return std::make_shared<Qwen2Model>(*qwen2_config, std::move(weights));
     } else if (config->model_type == "qwen3") {
-        auto *qwen3_config = dynamic_cast<Qwen3Config *>(config.get());
+        auto* qwen3_config = dynamic_cast<Qwen3Config*>(config.get());
         if (!qwen3_config) {
             throw std::logic_error("Config is not Qwen3Config");
         }
@@ -57,13 +57,15 @@ std::shared_ptr<Model> Model::parse(const std::string &model_path, zedinferDevic
 }
 
 // Safe string reader: returns default if key missing, null, or non-string type.
-static std::string safe_string(const json &j, const std::string &key, const std::string &def) {
-    if (!j.contains(key) || !j[key].is_string()) return def;
+static std::string safe_string(const json& j, const std::string& key, const std::string& def) {
+    if (!j.contains(key) || !j[key].is_string()) {
+        return def;
+    }
     return j[key].get<std::string>();
 }
 
 // Populate common config fields from JSON.
-void Model::load_base_config(ModelConfig &config, const json &j) {
+void Model::load_base_config(ModelConfig& config, const json& j) {
     config.model_type = safe_string(j, "model_type", "unknown");
     config.hidden_act = safe_string(j, "hidden_act", "silu");
     config.torch_dtype = safe_string(j, "torch_dtype", "bfloat16");
@@ -73,9 +75,7 @@ void Model::load_base_config(ModelConfig &config, const json &j) {
     // eos_token_id can be int or array of ints in config.json
     if (j.contains("eos_token_id")) {
         if (j["eos_token_id"].is_array()) {
-            for (const auto &id : j["eos_token_id"]) {
-                config.eos_token_ids.push_back(id.get<int>());
-            }
+            for (const auto& id : j["eos_token_id"]) { config.eos_token_ids.push_back(id.get<int>()); }
         } else {
             config.eos_token_ids.push_back(j["eos_token_id"].get<int>());
         }
@@ -91,8 +91,7 @@ void Model::load_base_config(ModelConfig &config, const json &j) {
 
     config.num_hidden_layers = j["num_hidden_layers"];
     config.num_attention_heads = j["num_attention_heads"];
-    config.num_key_value_heads = j.value("num_key_value_heads",
-                                         config.num_attention_heads);
+    config.num_key_value_heads = j.value("num_key_value_heads", config.num_attention_heads);
 
     config.rms_norm_eps = j.value("rms_norm_eps", 1e-6f);
     config.rope_theta = j.value("rope_theta", 10000.0f);
@@ -100,7 +99,7 @@ void Model::load_base_config(ModelConfig &config, const json &j) {
 }
 
 // Load and parse config.json into a model-specific config object.
-std::unique_ptr<ModelConfig> Model::load_config(const std::string &config_path) {
+std::unique_ptr<ModelConfig> Model::load_config(const std::string& config_path) {
     std::ifstream f(config_path);
     if (!f.is_open()) {
         throw std::runtime_error("Failed to open config file: " + config_path);
@@ -114,8 +113,8 @@ std::unique_ptr<ModelConfig> Model::load_config(const std::string &config_path) 
 
     if (model_type == "qwen2") {
         auto qwen2_config = std::make_unique<Qwen2Config>(base_config);
-        qwen2_config->sliding_window = (j.contains("sliding_window") && j["sliding_window"].is_number())
-            ? j["sliding_window"].get<int>() : 4096;
+        qwen2_config->sliding_window
+            = (j.contains("sliding_window") && j["sliding_window"].is_number()) ? j["sliding_window"].get<int>() : 4096;
         qwen2_config->max_window_layers = j.value("max_window_layers", 21);
         qwen2_config->use_sliding_window = j.value("use_sliding_window", false);
         return qwen2_config;
@@ -131,7 +130,7 @@ std::unique_ptr<ModelConfig> Model::load_config(const std::string &config_path) 
 }
 
 // Load model weights using memory-mapped SafeTensors.
-std::unique_ptr<ModelWeights> Model::load_weights(const std::string &model_path, zedinferDeviceType_t target_device) {
+std::unique_ptr<ModelWeights> Model::load_weights(const std::string& model_path, zedinferDeviceType_t target_device) {
     auto load_start = std::chrono::high_resolution_clock::now();
 
     auto loader = zedinfer::loader::SafeTensorsLoader::create(model_path);
@@ -145,27 +144,23 @@ std::unique_ptr<ModelWeights> Model::load_weights(const std::string &model_path,
     size_t converted_count = 0;
     auto convert_start = std::chrono::high_resolution_clock::now();
 
-    for (const auto &raw_name : loader->get_all_tensor_names()) {
+    for (const auto& raw_name : loader->get_all_tensor_names()) {
         std::string mapped_name = map_weight_name(raw_name);
 
-        auto *info = loader->get_tensor_info(raw_name);
+        auto* info = loader->get_tensor_info(raw_name);
         if (!info) {
             throw std::runtime_error("Failed to get tensor info: " + raw_name);
         }
 
-        const void *data_ptr = loader->get_tensor_data(raw_name);
+        const void* data_ptr = loader->get_tensor_data(raw_name);
         if (!data_ptr) {
             throw std::runtime_error("Failed to get tensor data: " + raw_name);
         }
 
         // Create CPU-resident, mmap-backed tensor
-        auto tensor = Tensor::create(
-            info->shape,
-            info->dtype,
-            ZEDINFER_DEVICE_CPU,
-            0,
-            true, // is_mmap
-            const_cast<std::byte *>(static_cast<const std::byte *>(data_ptr)));
+        auto tensor = Tensor::create(info->shape, info->dtype, ZEDINFER_DEVICE_CPU, 0,
+                                     true, // is_mmap
+                                     const_cast<std::byte*>(static_cast<const std::byte*>(data_ptr)));
 
         if (target_device == ZEDINFER_DEVICE_CPU) {
             tensor = tensor->to(ZEDINFER_DTYPE_F32);
@@ -188,7 +183,7 @@ std::unique_ptr<ModelWeights> Model::load_weights(const std::string &model_path,
 }
 
 // Normalize weight names by stripping common prefixes (e.g., "model.").
-std::string Model::map_weight_name(const std::string &raw_name) {
+std::string Model::map_weight_name(const std::string& raw_name) {
     if (raw_name.substr(0, 6) == "model.") {
         return raw_name.substr(6);
     }

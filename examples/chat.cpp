@@ -6,13 +6,13 @@
 #include "zedinfer/scheduler.hpp"
 #include "zedinfer/session.hpp"
 
-#include <argparse.hpp>
 #include "zedinfer/version.hpp"
 #include <algorithm>
+#include <argparse.hpp>
 #include <cstdlib>
 #include <iostream>
-#include <memory>
 #include <linenoise.h>
+#include <memory>
 #include <string>
 
 using namespace zedinfer;
@@ -30,31 +30,24 @@ static void print_welcome() {
     printf("\n");
 }
 
-int main(int argc, char *argv[]) {
-    argparse::ArgumentParser program("ZedInfer Chat",
-        std::string("zedinfer ") + ZEDINFER_VERSION + " (build " + ZEDINFER_GIT_HASH + ", " + ZEDINFER_BUILD_DATE + ")");
+int main(int argc, char* argv[]) {
+    argparse::ArgumentParser program("ZedInfer Chat", std::string("zedinfer ") + ZEDINFER_VERSION + " (build "
+                                                          + ZEDINFER_GIT_HASH + ", " + ZEDINFER_BUILD_DATE + ")");
 
-    program.add_argument("model_path")
-        .help("Path to the model directory");
+    program.add_argument("model_path").help("Path to the model directory");
 
-    program.add_argument("--nvidia")
-        .help("Use NVIDIA GPU backend")
-        .default_value(false)
-        .implicit_value(true);
+    program.add_argument("--nvidia").help("Use NVIDIA GPU backend").default_value(false).implicit_value(true);
 
     program.add_argument("--gpu-memory-utilization")
         .help("Fraction of GPU memory for KV cache (0.0-1.0)")
         .default_value(0.9f)
         .scan<'g', float>();
 
-    program.add_argument("--max-tokens")
-        .help("Maximum tokens per response")
-        .default_value(16384)
-        .scan<'i', int>();
+    program.add_argument("--max-tokens").help("Maximum tokens per response").default_value(16384).scan<'i', int>();
 
     try {
         program.parse_args(argc, argv);
-    } catch (const std::exception &err) {
+    } catch (const std::exception& err) {
         std::cerr << err.what() << std::endl;
         std::cerr << program;
         return 1;
@@ -67,8 +60,7 @@ int main(int argc, char *argv[]) {
     bool use_nvidia = program.get<bool>("--nvidia");
     int max_tokens = program.get<int>("--max-tokens");
 
-    zedinferDeviceType_t device_type =
-        use_nvidia ? ZEDINFER_DEVICE_NVIDIA : ZEDINFER_DEVICE_CPU;
+    zedinferDeviceType_t device_type = use_nvidia ? ZEDINFER_DEVICE_NVIDIA : ZEDINFER_DEVICE_CPU;
     device::Device device(device_type, 0);
 
     SchedulerConfig sched_config;
@@ -82,9 +74,7 @@ int main(int argc, char *argv[]) {
     gen_config.verbose = true;
     gen_config.print_stats = true;
     gen_config.stream = true;
-    gen_config.stream_callback = [](const std::string &token_text) {
-        std::cout << token_text << std::flush;
-    };
+    gen_config.stream_callback = [](const std::string& token_text) { std::cout << token_text << std::flush; };
 
     auto session = engine->create_session(gen_config);
 
@@ -93,8 +83,10 @@ int main(int argc, char *argv[]) {
 
     while (true) {
         printf("\n");
-        char *input = linenoise("\033[1;32mUser:\033[0m ");
-        if (!input) break; // EOF (Ctrl+D)
+        char* input = linenoise("\033[1;32mUser:\033[0m ");
+        if (!input) {
+            break; // EOF (Ctrl+D)
+        }
 
         std::string user_input(input);
         linenoiseFree(input);
@@ -102,28 +94,33 @@ int main(int argc, char *argv[]) {
         // Trim
         user_input.erase(0, user_input.find_first_not_of(" \t\n\r"));
         user_input.erase(user_input.find_last_not_of(" \t\n\r") + 1);
-        if (user_input.empty()) continue;
+        if (user_input.empty()) {
+            continue;
+        }
 
         // Commands
         std::string cmd = user_input;
         std::transform(cmd.begin(), cmd.end(), cmd.begin(), ::tolower);
 
-        if (cmd == "exit" || cmd == "quit" || cmd == "q") break;
+        if (cmd == "exit" || cmd == "quit" || cmd == "q") {
+            break;
+        }
         if (cmd == "reset" || cmd == "clear" || cmd == "cls") {
             session->reset();
             printf("Conversation cleared.\n");
             continue;
         }
-        if (cmd == "help") { print_welcome(); continue; }
+        if (cmd == "help") {
+            print_welcome();
+            continue;
+        }
 
         // Generate
         try {
             std::cout << "\033[1;34mAssistant:\033[0m ";
             session->chat(user_input);
             std::cout << "\n";
-        } catch (const std::exception &e) {
-            std::cerr << "Error: " << e.what() << std::endl;
-        }
+        } catch (const std::exception& e) { std::cerr << "Error: " << e.what() << std::endl; }
     }
 
     printf("\nGoodbye!\n");

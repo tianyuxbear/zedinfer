@@ -12,7 +12,7 @@ private:
     zedinferDeviceType_t device_type_;
     int device_id_;
     bool is_active_;
-    const ZedinferRuntimeAPI *api_;
+    const ZedinferRuntimeAPI* api_;
     allocator_t allocator_;
     zedinferStream_t stream_;
 
@@ -28,10 +28,10 @@ public:
     ~Runtime();
 
     // Non-copyable and non-movable.
-    Runtime(const Runtime &) = delete;
-    Runtime &operator=(const Runtime &) = delete;
-    Runtime(Runtime &&) = delete;
-    Runtime &operator=(Runtime &&) = delete;
+    Runtime(const Runtime&) = delete;
+    Runtime& operator=(const Runtime&) = delete;
+    Runtime(Runtime&&) = delete;
+    Runtime& operator=(Runtime&&) = delete;
 
     // Device properties.
     zedinferDeviceType_t deviceType() const { return device_type_; }
@@ -39,13 +39,13 @@ public:
     bool isActive() const { return is_active_; }
 
     // Returns the associated runtime API.
-    const ZedinferRuntimeAPI *api() const { return api_; }
+    const ZedinferRuntimeAPI* api() const { return api_; }
 
     // Device and host memory allocation.
     storage_t allocateDeviceStorage(size_t size);
     storage_t allocateHostStorage(size_t size);
-    storage_t allocateMmapStorage(std::byte *data_ptr, size_t size, bool is_host = true);
-    void freeStorage(Storage *storage);
+    storage_t allocateMmapStorage(std::byte* data_ptr, size_t size, bool is_host = true);
+    void freeStorage(Storage* storage);
 
     // Stream management.
     zedinferStream_t stream() const { return stream_; }

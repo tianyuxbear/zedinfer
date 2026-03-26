@@ -68,18 +68,13 @@ int ArgmaxSampler::sample(tensor_t logits) {
 
     // Lazy-init pre-allocated buffers on first call
     if (!max_idx_dev_) {
-        max_idx_dev_ = Tensor::create({1}, ZEDINFER_DTYPE_I64,
-                                       last_logits->deviceType(),
-                                       last_logits->deviceId());
-        max_val_dev_ = Tensor::create({1}, exec_config_.data_type,
-                                       last_logits->deviceType(),
-                                       last_logits->deviceId());
+        max_idx_dev_ = Tensor::create({1}, ZEDINFER_DTYPE_I64, last_logits->deviceType(), last_logits->deviceId());
+        max_val_dev_ = Tensor::create({1}, exec_config_.data_type, last_logits->deviceType(), last_logits->deviceId());
         // Pre-allocate pinned host buffer once — avoids per-call
         // cudaMallocHost/cudaFreeHost which costs ~570us each when the
         // CUDA pinned memory subsystem is cold.
         if (last_logits->deviceType() != ZEDINFER_DEVICE_CPU) {
-            max_idx_host_ = Tensor::create({1}, ZEDINFER_DTYPE_I64,
-                                            ZEDINFER_DEVICE_CPU, 0);
+            max_idx_host_ = Tensor::create({1}, ZEDINFER_DTYPE_I64, ZEDINFER_DEVICE_CPU, 0);
         }
     }
 
@@ -88,20 +83,18 @@ int ArgmaxSampler::sample(tensor_t logits) {
 
     // Copy result to CPU: reuse pinned host buffer, only memcpy
     if (max_idx_host_) {
-        core::context().runtime().api()->memcpy_sync(
-            max_idx_host_->data(), max_idx_dev_->data(),
-            sizeof(int64_t), ZEDINFER_MEMCPY_D2H);
-        return static_cast<int>(*reinterpret_cast<const int64_t *>(max_idx_host_->data()));
+        core::context().runtime().api()->memcpy_sync(max_idx_host_->data(), max_idx_dev_->data(), sizeof(int64_t),
+                                                     ZEDINFER_MEMCPY_D2H);
+        return static_cast<int>(*reinterpret_cast<const int64_t*>(max_idx_host_->data()));
     }
     // CPU path: read directly
-    return static_cast<int>(*reinterpret_cast<const int64_t *>(max_idx_dev_->data()));
+    return static_cast<int>(*reinterpret_cast<const int64_t*>(max_idx_dev_->data()));
 }
 
 // ============================================================================
 // GeneralSampler
 // ============================================================================
-GeneralSampler::GeneralSampler(const SamplerParams &params)
-    : params_(params) {
+GeneralSampler::GeneralSampler(const SamplerParams& params) : params_(params) {
     if (!params_.validate()) {
         throw std::invalid_argument("Invalid sampler parameters: " + params_.info());
     }
@@ -123,7 +116,7 @@ void GeneralSampler::setSeed(unsigned int seed) {
     }
 }
 
-void GeneralSampler::setParams(const SamplerParams &params) {
+void GeneralSampler::setParams(const SamplerParams& params) {
     if (!params.validate()) {
         throw std::invalid_argument("Invalid sampler parameters: " + params.info());
     }
@@ -157,7 +150,7 @@ int GeneralSampler::sample(tensor_t logits) {
     last_logits = ensureCPU(last_logits);
 
     size_t vocab_size = last_logits->numel();
-    const float *logits_ptr = reinterpret_cast<const float *>(last_logits->data());
+    const float* logits_ptr = reinterpret_cast<const float*>(last_logits->data());
 
     // Apply temperature scaling
     std::vector<float> scaled_logits(logits_ptr, logits_ptr + vocab_size);
@@ -169,11 +162,9 @@ int GeneralSampler::sample(tensor_t logits) {
 
     // Create (probability, index) pairs and sort descending
     std::vector<std::pair<float, int>> indexed_probs(vocab_size);
-    for (size_t i = 0; i < vocab_size; ++i) {
-        indexed_probs[i] = {probs[i], static_cast<int>(i)};
-    }
+    for (size_t i = 0; i < vocab_size; ++i) { indexed_probs[i] = {probs[i], static_cast<int>(i)}; }
     std::sort(indexed_probs.begin(), indexed_probs.end(),
-              [](const auto &a, const auto &b) { return a.first > b.first; });
+              [](const auto& a, const auto& b) { return a.first > b.first; });
 
     // Apply top-k filtering
     if (params_.top_k > 0 && params_.top_k < static_cast<int>(vocab_size)) {
@@ -187,34 +178,26 @@ int GeneralSampler::sample(tensor_t logits) {
 
     // Renormalize filtered probabilities
     float prob_sum = 0.0f;
-    for (const auto &pair : indexed_probs) {
-        prob_sum += pair.first;
-    }
+    for (const auto& pair : indexed_probs) { prob_sum += pair.first; }
 
     std::vector<float> final_probs(indexed_probs.size());
-    for (size_t i = 0; i < indexed_probs.size(); ++i) {
-        final_probs[i] = indexed_probs[i].first / prob_sum;
-    }
+    for (size_t i = 0; i < indexed_probs.size(); ++i) { final_probs[i] = indexed_probs[i].first / prob_sum; }
 
     // Sample from renormalized distribution
     int sampled_idx = sampleFromProbs(final_probs.data(), final_probs.size());
     return indexed_probs[sampled_idx].second;
 }
 
-void GeneralSampler::applyTemperature(float *logits, size_t size) {
+void GeneralSampler::applyTemperature(float* logits, size_t size) {
     if (params_.temperature != 1.0f) {
-        for (size_t i = 0; i < size; ++i) {
-            logits[i] /= params_.temperature;
-        }
+        for (size_t i = 0; i < size; ++i) { logits[i] /= params_.temperature; }
     }
 }
 
-void GeneralSampler::applySoftmax(float *probs, const float *logits, size_t size) {
+void GeneralSampler::applySoftmax(float* probs, const float* logits, size_t size) {
     // Numerical stability: subtract max before exp
     float max_logit = logits[0];
-    for (size_t i = 1; i < size; ++i) {
-        max_logit = std::max(max_logit, logits[i]);
-    }
+    for (size_t i = 1; i < size; ++i) { max_logit = std::max(max_logit, logits[i]); }
 
     // Compute exp and accumulate sum
     float sum = 0.0f;
@@ -224,19 +207,17 @@ void GeneralSampler::applySoftmax(float *probs, const float *logits, size_t size
     }
 
     // Normalize to get probabilities
-    for (size_t i = 0; i < size; ++i) {
-        probs[i] /= sum;
-    }
+    for (size_t i = 0; i < size; ++i) { probs[i] /= sum; }
 }
 
-void GeneralSampler::applyTopK(std::vector<std::pair<float, int>> &indexed_probs) {
+void GeneralSampler::applyTopK(std::vector<std::pair<float, int>>& indexed_probs) {
     // Keep only top-k highest probability tokens
     if (params_.top_k < static_cast<int>(indexed_probs.size())) {
         indexed_probs.resize(params_.top_k);
     }
 }
 
-void GeneralSampler::applyTopP(std::vector<std::pair<float, int>> &indexed_probs) {
+void GeneralSampler::applyTopP(std::vector<std::pair<float, int>>& indexed_probs) {
     // Find nucleus: smallest set with cumulative probability >= top_p
     float cumsum = 0.0f;
     size_t cutoff = indexed_probs.size();
@@ -252,7 +233,7 @@ void GeneralSampler::applyTopP(std::vector<std::pair<float, int>> &indexed_probs
     indexed_probs.resize(cutoff);
 }
 
-int GeneralSampler::sampleFromProbs(const float *probs, size_t size) {
+int GeneralSampler::sampleFromProbs(const float* probs, size_t size) {
     // Generate random value in [0, 1)
     std::uniform_real_distribution<float> dist(0.0f, 1.0f);
     float rand_val = dist(rng_);
@@ -273,14 +254,14 @@ int GeneralSampler::sampleFromProbs(const float *probs, size_t size) {
 // ============================================================================
 // Factory function
 // ============================================================================
-std::shared_ptr<Sampler> createSampler(ExecutorConfig exec_config, SamplerType type, const SamplerParams &params) {
+std::shared_ptr<Sampler> createSampler(ExecutorConfig exec_config, SamplerType type, const SamplerParams& params) {
     switch (type) {
-    case SamplerType::ARGMAX:
-        return std::make_shared<ArgmaxSampler>(exec_config);
-    case SamplerType::GENERAL:
-        return std::make_shared<GeneralSampler>(params);
-    default:
-        throw std::invalid_argument("Unknown sampler type");
+        case SamplerType::ARGMAX:
+            return std::make_shared<ArgmaxSampler>(exec_config);
+        case SamplerType::GENERAL:
+            return std::make_shared<GeneralSampler>(params);
+        default:
+            throw std::invalid_argument("Unknown sampler type");
     }
 }
 

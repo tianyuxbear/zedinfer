@@ -6,8 +6,8 @@
 #include "zedinfer/scheduler.hpp"
 #include "zedinfer/session.hpp"
 
-#include <argparse.hpp>
 #include "zedinfer/version.hpp"
+#include <argparse.hpp>
 #include <chrono>
 #include <iostream>
 #include <memory>
@@ -15,17 +15,13 @@
 
 using namespace zedinfer;
 
-int main(int argc, char *argv[]) {
-    argparse::ArgumentParser program("ZedInfer Ping",
-        std::string("zedinfer ") + ZEDINFER_VERSION + " (build " + ZEDINFER_GIT_HASH + ", " + ZEDINFER_BUILD_DATE + ")");
+int main(int argc, char* argv[]) {
+    argparse::ArgumentParser program("ZedInfer Ping", std::string("zedinfer ") + ZEDINFER_VERSION + " (build "
+                                                          + ZEDINFER_GIT_HASH + ", " + ZEDINFER_BUILD_DATE + ")");
 
-    program.add_argument("model_path")
-        .help("Path to the model directory");
+    program.add_argument("model_path").help("Path to the model directory");
 
-    program.add_argument("--nvidia")
-        .help("Use NVIDIA GPU backend")
-        .default_value(false)
-        .implicit_value(true);
+    program.add_argument("--nvidia").help("Use NVIDIA GPU backend").default_value(false).implicit_value(true);
 
     program.add_argument("--gpu-memory-utilization")
         .help("Fraction of GPU memory for KV cache (0.0-1.0)")
@@ -38,7 +34,7 @@ int main(int argc, char *argv[]) {
 
     try {
         program.parse_args(argc, argv);
-    } catch (const std::exception &err) {
+    } catch (const std::exception& err) {
         std::cerr << err.what() << std::endl;
         std::cerr << program;
         return 1;
@@ -50,8 +46,7 @@ int main(int argc, char *argv[]) {
     auto model_path = program.get<std::string>("model_path");
     bool use_nvidia = program.get<bool>("--nvidia");
 
-    zedinferDeviceType_t device_type =
-        use_nvidia ? ZEDINFER_DEVICE_NVIDIA : ZEDINFER_DEVICE_CPU;
+    zedinferDeviceType_t device_type = use_nvidia ? ZEDINFER_DEVICE_NVIDIA : ZEDINFER_DEVICE_CPU;
     device::Device device(device_type, 0);
 
     SchedulerConfig sched_config;

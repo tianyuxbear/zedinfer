@@ -8,7 +8,7 @@ namespace zedinfer::utils {
  * @brief Access the global random engine instance (Meyers' Singleton).
  * Initializes with a non-deterministic seed by default.
  */
-inline std::mt19937 &get_generator() {
+inline std::mt19937& get_generator() {
     static std::random_device rd;
     static std::mt19937 gen(rd());
     return gen;

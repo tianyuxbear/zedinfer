@@ -7,8 +7,8 @@
 #include "zedinfer/request.hpp"
 #include "zedinfer/scheduler.hpp"
 
-#include <argparse.hpp>
 #include "zedinfer/version.hpp"
+#include <argparse.hpp>
 #include <chrono>
 #include <cstdio>
 #include <future>
@@ -19,17 +19,14 @@
 
 using namespace zedinfer;
 
-int main(int argc, char *argv[]) {
-    argparse::ArgumentParser program("ZedInfer Batch Benchmark",
-        std::string("zedinfer ") + ZEDINFER_VERSION + " (build " + ZEDINFER_GIT_HASH + ", " + ZEDINFER_BUILD_DATE + ")");
+int main(int argc, char* argv[]) {
+    argparse::ArgumentParser program("ZedInfer Batch Benchmark", std::string("zedinfer ") + ZEDINFER_VERSION
+                                                                     + " (build " + ZEDINFER_GIT_HASH + ", "
+                                                                     + ZEDINFER_BUILD_DATE + ")");
 
-    program.add_argument("model_path")
-        .help("Path to the model directory");
+    program.add_argument("model_path").help("Path to the model directory");
 
-    program.add_argument("-b", "--batch-size")
-        .help("Number of concurrent requests")
-        .default_value(4)
-        .scan<'i', int>();
+    program.add_argument("-b", "--batch-size").help("Number of concurrent requests").default_value(4).scan<'i', int>();
 
     program.add_argument("-p", "--prefill-len")
         .help("Prompt length per request (tokens)")
@@ -41,15 +38,9 @@ int main(int argc, char *argv[]) {
         .default_value(128)
         .scan<'i', int>();
 
-    program.add_argument("-r", "--rounds")
-        .help("Number of benchmark rounds")
-        .default_value(1)
-        .scan<'i', int>();
+    program.add_argument("-r", "--rounds").help("Number of benchmark rounds").default_value(1).scan<'i', int>();
 
-    program.add_argument("--nvidia")
-        .help("Use NVIDIA GPU backend")
-        .default_value(false)
-        .implicit_value(true);
+    program.add_argument("--nvidia").help("Use NVIDIA GPU backend").default_value(false).implicit_value(true);
 
     program.add_argument("--gpu-memory-utilization")
         .help("Fraction of GPU memory for KV cache (0.0-1.0)")
@@ -58,7 +49,7 @@ int main(int argc, char *argv[]) {
 
     try {
         program.parse_args(argc, argv);
-    } catch (const std::exception &err) {
+    } catch (const std::exception& err) {
         std::cerr << err.what() << std::endl;
         std::cerr << program;
         return 1;
@@ -94,8 +85,7 @@ int main(int argc, char *argv[]) {
 
     // Batch benchmark
     printf("\n============ Batch Benchmark ============\n");
-    printf("Config: batch_size=%d, prefill=%d, decode=%d, rounds=%d\n",
-           batch_size, prefill_len, decode_len, rounds);
+    printf("Config: batch_size=%d, prefill=%d, decode=%d, rounds=%d\n", batch_size, prefill_len, decode_len, rounds);
 
     // Random token range for input
     int min_id = 100, max_id = 30000;
@@ -114,7 +104,7 @@ int main(int argc, char *argv[]) {
 
             // Generate random prompt tokens
             req->input_ids.resize(prefill_len);
-            for (auto &t : req->input_ids) t = utils::randint(min_id, max_id);
+            for (auto& t : req->input_ids) { t = utils::randint(min_id, max_id); }
 
             req->config.max_new_tokens = decode_len;
             req->config.verbose = false;
@@ -131,7 +121,7 @@ int main(int argc, char *argv[]) {
 
         // Collect results
         int round_tokens = 0;
-        for (auto &f : futures) {
+        for (auto& f : futures) {
             auto result = f.get();
             round_tokens += static_cast<int>(result.output_ids.size());
         }
@@ -139,8 +129,7 @@ int main(int argc, char *argv[]) {
         total_time_ms += round_ms;
         total_generated_tokens += round_tokens;
 
-        printf("Round %d: %d requests, %d tokens generated, %.2f ms\n",
-               r + 1, batch_size, round_tokens, round_ms);
+        printf("Round %d: %d requests, %d tokens generated, %.2f ms\n", r + 1, batch_size, round_tokens, round_ms);
     }
 
     // Summary

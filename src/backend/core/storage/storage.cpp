@@ -2,14 +2,14 @@
 #include "backend/core/runtime/runtime.hpp"
 
 namespace zedinfer::core {
-Storage::Storage(std::byte *memory, size_t size, Runtime &runtime, bool is_host, bool is_mmap)
+Storage::Storage(std::byte* memory, size_t size, Runtime& runtime, bool is_host, bool is_mmap)
     : memory_(memory), size_(size), runtime_(runtime), is_host_(is_host), is_mmap_(is_mmap) {}
 
 Storage::~Storage() {
     runtime_.freeStorage(this);
 }
 
-std::byte *Storage::memory() const {
+std::byte* Storage::memory() const {
     return memory_;
 }
 

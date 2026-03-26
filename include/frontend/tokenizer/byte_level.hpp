@@ -19,10 +19,10 @@ public:
     static unsigned char unicode_to_byte(UChar32 unicode_char);
 
     // Encode byte sequence to Unicode string.
-    static std::string bytes_to_unicode(const std::string &text);
+    static std::string bytes_to_unicode(const std::string& text);
 
     // Decode Unicode string back to original bytes.
-    static std::string unicode_to_bytes(const std::string &text);
+    static std::string unicode_to_bytes(const std::string& text);
 
 private:
     // Build static lookup tables.

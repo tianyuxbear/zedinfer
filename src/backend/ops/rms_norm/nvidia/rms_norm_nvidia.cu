@@ -9,12 +9,8 @@ namespace zedinfer::ops::nvidia {
 // Strategy: Standard tree reduction using shared memory.
 // ----------------------------------------------------------------------
 template <typename T>
-__global__ void rmsnorm_kernel_block_reduce(
-    T *output,
-    const T *input,
-    const T *weight,
-    const float eps,
-    size_t hidden_size) {
+__global__ void rmsnorm_kernel_block_reduce(T* output, const T* input, const T* weight, const float eps,
+                                            size_t hidden_size) {
     // Dynamic shared memory required: blockDim.x * sizeof(float)
     __shared__ float s_sq_sums[BLOCK_SIZE];
 
@@ -22,8 +18,8 @@ __global__ void rmsnorm_kernel_block_reduce(
     const size_t row_offset = blockIdx.x * hidden_size;
 
     // Resolve row pointers
-    const T *row_input = input + row_offset;
-    T *row_output = output + row_offset;
+    const T* row_input = input + row_offset;
+    T* row_output = output + row_offset;
 
     // -------------------------------------------------------
     // Phase 1: Variance Calculation (Reduction)
@@ -67,12 +63,8 @@ __global__ void rmsnorm_kernel_block_reduce(
 // Strategy: Reduce within warps via shuffles first, then reduce warps.
 // ----------------------------------------------------------------------
 template <typename T>
-__global__ void rmsnorm_kernel_warp_reduce(
-    T *output,
-    const T *input,
-    const T *weight,
-    const float eps,
-    size_t hidden_size) {
+__global__ void rmsnorm_kernel_warp_reduce(T* output, const T* input, const T* weight, const float eps,
+                                           size_t hidden_size) {
     // Shared memory required: NUM_WARPS * sizeof(float)
     __shared__ float s_warp_sums[MAX_NUM_WARPS];
 
@@ -81,8 +73,8 @@ __global__ void rmsnorm_kernel_warp_reduce(
     const int warp_id = tid >> 5;   // tid / 32
     const size_t row_offset = blockIdx.x * hidden_size;
 
-    const T *row_input = input + row_offset;
-    T *row_output = output + row_offset;
+    const T* row_input = input + row_offset;
+    T* row_output = output + row_offset;
 
     // -------------------------------------------------------
     // Phase 1: Variance Calculation
@@ -145,12 +137,8 @@ __global__ void rmsnorm_kernel_warp_reduce(
 // Strategy: Maximize memory bandwidth using float4/half8 load/stores.
 // ----------------------------------------------------------------------
 template <typename T>
-__global__ void rmsnorm_kernel_warp_reduce_packed(
-    T *output,
-    const T *input,
-    const T *weight,
-    const float eps,
-    size_t hidden_size) {
+__global__ void rmsnorm_kernel_warp_reduce_packed(T* output, const T* input, const T* weight, const float eps,
+                                                  size_t hidden_size) {
     __shared__ float s_warp_sums[MAX_NUM_WARPS];
 
     const int tid = threadIdx.x;
@@ -158,8 +146,8 @@ __global__ void rmsnorm_kernel_warp_reduce_packed(
     const int warp_id = tid >> 5;
 
     const size_t row_offset = blockIdx.x * hidden_size;
-    const T *row_input = input + row_offset;
-    T *row_output = output + row_offset;
+    const T* row_input = input + row_offset;
+    T* row_output = output + row_offset;
 
     constexpr int PackSize = PackedTraits<T>::size;
     const size_t num_packs = hidden_size / PackSize;
@@ -224,9 +212,9 @@ __global__ void rmsnorm_kernel_warp_reduce_packed(
         } else {
             // Half / BFloat16 handling via type punning
             // Simplified for clarity: reinterpret as array of T to iterate
-            const T *vals_arr = reinterpret_cast<const T *>(&vec_vals);
-            const T *w_arr = reinterpret_cast<const T *>(&vec_weights);
-            T *res_arr = reinterpret_cast<T *>(&vec_res);
+            const T* vals_arr = reinterpret_cast<const T*>(&vec_vals);
+            const T* w_arr = reinterpret_cast<const T*>(&vec_weights);
+            T* res_arr = reinterpret_cast<T*>(&vec_res);
 
 #pragma unroll
             for (int k = 0; k < PackSize; ++k) {
@@ -246,31 +234,26 @@ __global__ void rmsnorm_kernel_warp_reduce_packed(
     }
 }
 
-void rms_norm(std::byte *output, const std::byte *input, const std::byte *weight, float eps, zedinferDataType_t type, size_t seq_len, size_t hidden_size) {
+void rms_norm(std::byte* output, const std::byte* input, const std::byte* weight, float eps, zedinferDataType_t type,
+              size_t seq_len, size_t hidden_size) {
     dim3 block(BLOCK_SIZE);
     dim3 grid(seq_len);
 
     switch (type) {
-    case ZEDINFER_DTYPE_F32:
-        return rmsnorm_kernel_warp_reduce_packed<<<grid, block>>>(
-            reinterpret_cast<float *>(output),
-            reinterpret_cast<const float *>(input),
-            reinterpret_cast<const float *>(weight),
-            eps, hidden_size);
-    case ZEDINFER_DTYPE_F16:
-        return rmsnorm_kernel_warp_reduce_packed<<<grid, block>>>(
-            reinterpret_cast<half *>(output),
-            reinterpret_cast<const half *>(input),
-            reinterpret_cast<const half *>(weight),
-            eps, hidden_size);
-    case ZEDINFER_DTYPE_BF16:
-        return rmsnorm_kernel_warp_reduce_packed<<<grid, block>>>(
-            reinterpret_cast<cuda_bfloat16 *>(output),
-            reinterpret_cast<const cuda_bfloat16 *>(input),
-            reinterpret_cast<const cuda_bfloat16 *>(weight),
-            eps, hidden_size);
-    default:
-        EXCEPTION_UNSUPPORTED_DATATYPE(type);
+        case ZEDINFER_DTYPE_F32:
+            return rmsnorm_kernel_warp_reduce_packed<<<grid, block>>>(
+                reinterpret_cast<float*>(output), reinterpret_cast<const float*>(input),
+                reinterpret_cast<const float*>(weight), eps, hidden_size);
+        case ZEDINFER_DTYPE_F16:
+            return rmsnorm_kernel_warp_reduce_packed<<<grid, block>>>(
+                reinterpret_cast<half*>(output), reinterpret_cast<const half*>(input),
+                reinterpret_cast<const half*>(weight), eps, hidden_size);
+        case ZEDINFER_DTYPE_BF16:
+            return rmsnorm_kernel_warp_reduce_packed<<<grid, block>>>(
+                reinterpret_cast<cuda_bfloat16*>(output), reinterpret_cast<const cuda_bfloat16*>(input),
+                reinterpret_cast<const cuda_bfloat16*>(weight), eps, hidden_size);
+        default:
+            EXCEPTION_UNSUPPORTED_DATATYPE(type);
     }
 }
 } // namespace zedinfer::ops::nvidia

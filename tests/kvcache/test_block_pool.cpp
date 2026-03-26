@@ -38,9 +38,7 @@ TEST_F(BlockPoolTest, AllocateAndFree) {
 }
 
 TEST_F(BlockPoolTest, AllocateAll) {
-    for (int i = 0; i < 16; ++i) {
-        EXPECT_GE(pool_->allocate(), 0);
-    }
+    for (int i = 0; i < 16; ++i) { EXPECT_GE(pool_->allocate(), 0); }
     EXPECT_EQ(pool_->free_blocks(), 0);
     EXPECT_EQ(pool_->used_blocks(), 16);
     EXPECT_EQ(pool_->allocate(), -1); // pool full
@@ -80,7 +78,7 @@ TEST_F(BlockPoolTest, EvictableState) {
     pool_->set_immutable(b, true);
 
     EXPECT_EQ(pool_->free_blocks(), 15);
-    EXPECT_EQ(pool_->evictable_count(), 0);  // ref_count > 0, not evictable yet
+    EXPECT_EQ(pool_->evictable_count(), 0); // ref_count > 0, not evictable yet
 
     pool_->release(b);
     // Now ref_count==0 and hash!=0 → evictable
@@ -123,7 +121,7 @@ TEST_F(BlockPoolTest, EvictLRU) {
 TEST_F(BlockPoolTest, AllocateTriggersEviction) {
     // Fill the pool
     std::vector<int> blocks;
-    for (int i = 0; i < 16; ++i) blocks.push_back(pool_->allocate());
+    for (int i = 0; i < 16; ++i) { blocks.push_back(pool_->allocate()); }
 
     // Make one evictable
     pool_->set_content_hash(blocks[5], 0xFFF);
@@ -163,22 +161,29 @@ TEST_F(BlockPoolTest, ShareFromEvictable) {
 TEST_F(BlockPoolTest, CounterConsistency) {
     // Throughout various operations, free + evictable + used == total
     auto check = [&]() {
-        EXPECT_EQ(pool_->free_blocks() + pool_->evictable_count() + pool_->used_blocks(),
-                  pool_->total_blocks());
+        EXPECT_EQ(pool_->free_blocks() + pool_->evictable_count() + pool_->used_blocks(), pool_->total_blocks());
     };
 
     check();
 
-    int b0 = pool_->allocate(); check();
-    int b1 = pool_->allocate(); check();
+    int b0 = pool_->allocate();
+    check();
+    int b1 = pool_->allocate();
+    check();
 
-    pool_->share(b0); check();
-    pool_->set_content_hash(b1, 0x123); check();
+    pool_->share(b0);
+    check();
+    pool_->set_content_hash(b1, 0x123);
+    check();
 
-    pool_->release(b0); check();
-    pool_->release(b0); check(); // ref_count 0, no hash → free
+    pool_->release(b0);
+    check();
+    pool_->release(b0);
+    check(); // ref_count 0, no hash → free
 
-    pool_->release(b1); check(); // ref_count 0, has hash → evictable
+    pool_->release(b1);
+    check(); // ref_count 0, has hash → evictable
 
-    pool_->evict_one(); check();
+    pool_->evict_one();
+    check();
 }

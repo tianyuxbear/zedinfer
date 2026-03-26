@@ -25,17 +25,14 @@ class InferenceEngine;
  */
 class ServingLoop {
 public:
-    explicit ServingLoop(std::shared_ptr<InferenceEngine> engine,
-                         SchedulerConfig sched_config = {});
+    explicit ServingLoop(std::shared_ptr<InferenceEngine> engine, SchedulerConfig sched_config = {});
 
     // Synchronous generation (session-based, used by chat/ping)
-    std::string generate(kvcache::SequenceBlockTable &block_table,
-                         const std::string &prompt,
-                         const GenerationConfig &config);
+    std::string generate(kvcache::SequenceBlockTable& block_table, const std::string& prompt,
+                         const GenerationConfig& config);
 
-    GenerationResult generate_tokens(kvcache::SequenceBlockTable &block_table,
-                                     const std::vector<int> &input_ids,
-                                     const GenerationConfig &config);
+    GenerationResult generate_tokens(kvcache::SequenceBlockTable& block_table, const std::vector<int>& input_ids,
+                                     const GenerationConfig& config);
 
     // Async batch mode
     std::future<GenerationResult> submit_async(std::unique_ptr<InferenceRequest> request);
@@ -66,12 +63,10 @@ private:
     std::condition_variable work_cv_;
     std::atomic<bool> running_{false};
 
-    std::unique_ptr<InferenceRequest> build_request(
-        const std::vector<int> &input_ids,
-        const GenerationConfig &config);
+    std::unique_ptr<InferenceRequest> build_request(const std::vector<int>& input_ids, const GenerationConfig& config);
 
     // Fail all requests in a batch with an error (used when forward pass throws)
-    void fail_batch(ScheduledBatch &batch, const std::string &error_msg);
+    void fail_batch(ScheduledBatch& batch, const std::string& error_msg);
 };
 
 } // namespace zedinfer

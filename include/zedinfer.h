@@ -18,7 +18,7 @@
 /**
  * @brief Stream handle for device-specific asynchronous execution.
  */
-typedef void *zedinferStream_t;
+typedef void* zedinferStream_t;
 
 /**
  * @brief Device types.

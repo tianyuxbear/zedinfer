@@ -24,11 +24,11 @@ namespace zedinfer::loader {
 // SafeTensorFile Implementation
 // ============================================
 
-std::unique_ptr<IModelLoader> SafeTensorsLoader::create(const std::string &model_path) {
+std::unique_ptr<IModelLoader> SafeTensorsLoader::create(const std::string& model_path) {
     return std::make_unique<SafeTensorsLoader>(model_path);
 }
 
-SafeTensorFile::SafeTensorFile(const std::string &path)
+SafeTensorFile::SafeTensorFile(const std::string& path)
     : filepath(path), mmap_data(nullptr), file_size(0), data_offset(0) {
 #ifdef _WIN32
     file_handle = INVALID_HANDLE_VALUE;
@@ -44,7 +44,7 @@ SafeTensorFile::~SafeTensorFile() {
     close_mmap();
 }
 
-SafeTensorFile::SafeTensorFile(SafeTensorFile &&other) noexcept
+SafeTensorFile::SafeTensorFile(SafeTensorFile&& other) noexcept
     : filepath(std::move(other.filepath)),
       mmap_data(other.mmap_data),
       file_size(other.file_size),
@@ -62,7 +62,7 @@ SafeTensorFile::SafeTensorFile(SafeTensorFile &&other) noexcept
     other.mmap_data = nullptr;
 }
 
-SafeTensorFile &SafeTensorFile::operator=(SafeTensorFile &&other) noexcept {
+SafeTensorFile& SafeTensorFile::operator=(SafeTensorFile&& other) noexcept {
     if (this != &other) {
         close_mmap();
 
@@ -86,22 +86,13 @@ SafeTensorFile &SafeTensorFile::operator=(SafeTensorFile &&other) noexcept {
     return *this;
 }
 
-zedinferDataType_t SafeTensorFile::parse_dtype(const std::string &dtype_str) {
-    static const std::unordered_map<std::string, zedinferDataType_t> dtype_map = {
-        {"BYTE", ZEDINFER_DTYPE_BYTE},
-        {"BOOL", ZEDINFER_DTYPE_BOOL},
-        {"I8", ZEDINFER_DTYPE_I8},
-        {"I16", ZEDINFER_DTYPE_I16},
-        {"I32", ZEDINFER_DTYPE_I32},
-        {"I64", ZEDINFER_DTYPE_I64},
-        {"U8", ZEDINFER_DTYPE_U8},
-        {"U16", ZEDINFER_DTYPE_U16},
-        {"U32", ZEDINFER_DTYPE_U32},
-        {"U64", ZEDINFER_DTYPE_U64},
-        {"F16", ZEDINFER_DTYPE_F16},
-        {"F32", ZEDINFER_DTYPE_F32},
-        {"F64", ZEDINFER_DTYPE_F64},
-        {"BF16", ZEDINFER_DTYPE_BF16}};
+zedinferDataType_t SafeTensorFile::parse_dtype(const std::string& dtype_str) {
+    static const std::unordered_map<std::string, zedinferDataType_t> dtype_map
+        = {{"BYTE", ZEDINFER_DTYPE_BYTE}, {"BOOL", ZEDINFER_DTYPE_BOOL}, {"I8", ZEDINFER_DTYPE_I8},
+           {"I16", ZEDINFER_DTYPE_I16},   {"I32", ZEDINFER_DTYPE_I32},   {"I64", ZEDINFER_DTYPE_I64},
+           {"U8", ZEDINFER_DTYPE_U8},     {"U16", ZEDINFER_DTYPE_U16},   {"U32", ZEDINFER_DTYPE_U32},
+           {"U64", ZEDINFER_DTYPE_U64},   {"F16", ZEDINFER_DTYPE_F16},   {"F32", ZEDINFER_DTYPE_F32},
+           {"F64", ZEDINFER_DTYPE_F64},   {"BF16", ZEDINFER_DTYPE_BF16}};
 
     auto it = dtype_map.find(dtype_str);
     if (it != dtype_map.end()) {
@@ -118,7 +109,7 @@ void SafeTensorFile::load_metadata() {
 
     // Read 8-byte little-endian header size
     uint64_t header_size;
-    file.read(reinterpret_cast<char *>(&header_size), sizeof(header_size));
+    file.read(reinterpret_cast<char*>(&header_size), sizeof(header_size));
     if (!file) {
         throw std::runtime_error("Failed to read header size from: " + filepath);
     }
@@ -136,7 +127,7 @@ void SafeTensorFile::load_metadata() {
     data_offset = 8 + header_size; // Header + size prefix
 
     // Parse tensor metadata
-    for (auto &[key, value] : header.items()) {
+    for (auto& [key, value] : header.items()) {
         if (key == "__metadata__") {
             continue;
         }
@@ -156,14 +147,8 @@ void SafeTensorFile::load_metadata() {
 
 void SafeTensorFile::open_mmap() {
 #ifdef _WIN32
-    file_handle = CreateFileA(
-        filepath.c_str(),
-        GENERIC_READ,
-        FILE_SHARE_READ,
-        NULL,
-        OPEN_EXISTING,
-        FILE_ATTRIBUTE_NORMAL,
-        NULL);
+    file_handle = CreateFileA(filepath.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
+                              FILE_ATTRIBUTE_NORMAL, NULL);
 
     if (file_handle == INVALID_HANDLE_VALUE) {
         throw std::runtime_error("Failed to open file for mmap: " + filepath);
@@ -232,18 +217,18 @@ void SafeTensorFile::close_mmap() {
     mmap_data = nullptr;
 }
 
-const void *SafeTensorFile::get_tensor_data(const std::string &name) const {
+const void* SafeTensorFile::get_tensor_data(const std::string& name) const {
     auto it = tensors.find(name);
     if (it == tensors.end()) {
         return nullptr;
     }
 
-    const TensorInfo &info = it->second;
+    const TensorInfo& info = it->second;
     // data_offset is the start of tensor data section; info.data_offset is relative to that
-    return static_cast<const char *>(mmap_data) + data_offset + info.data_offset;
+    return static_cast<const char*>(mmap_data) + data_offset + info.data_offset;
 }
 
-const TensorInfo *SafeTensorFile::get_tensor_info(const std::string &name) const {
+const TensorInfo* SafeTensorFile::get_tensor_info(const std::string& name) const {
     auto it = tensors.find(name);
     return (it != tensors.end()) ? &it->second : nullptr;
 }
@@ -251,13 +236,11 @@ const TensorInfo *SafeTensorFile::get_tensor_info(const std::string &name) const
 std::vector<std::string> SafeTensorFile::get_tensor_names() const {
     std::vector<std::string> names;
     names.reserve(tensors.size());
-    for (const auto &[name, _] : tensors) {
-        names.push_back(name);
-    }
+    for (const auto& [name, _] : tensors) { names.push_back(name); }
     return names;
 }
 
-bool SafeTensorFile::has_tensor(const std::string &name) const {
+bool SafeTensorFile::has_tensor(const std::string& name) const {
     return tensors.count(name) > 0;
 }
 
@@ -265,18 +248,18 @@ bool SafeTensorFile::has_tensor(const std::string &name) const {
 // SafeTensorsLoader Implementation
 // ============================================
 
-SafeTensorsLoader::SafeTensorsLoader(const std::string &model_path) {
+SafeTensorsLoader::SafeTensorsLoader(const std::string& model_path) {
     load(model_path);
 }
 
-void SafeTensorsLoader::load(const std::string &model_path) {
+void SafeTensorsLoader::load(const std::string& model_path) {
     if (!fs::exists(model_path) || !fs::is_directory(model_path)) {
         throw std::runtime_error("Model path does not exist or is not a directory: " + model_path);
     }
 
     // Collect all .safetensors files
     std::vector<std::string> safetensor_files;
-    for (const auto &entry : fs::directory_iterator(model_path)) {
+    for (const auto& entry : fs::directory_iterator(model_path)) {
         if (entry.is_regular_file()) {
             auto path = entry.path();
             if (path.extension() == ".safetensors") {
@@ -293,16 +276,14 @@ void SafeTensorsLoader::load(const std::string &model_path) {
     std::sort(safetensor_files.begin(), safetensor_files.end());
 
     files.reserve(safetensor_files.size());
-    for (const auto &filepath : safetensor_files) {
+    for (const auto& filepath : safetensor_files) {
         auto file = std::make_unique<SafeTensorFile>(filepath);
-        for (const auto &name : file->get_tensor_names()) {
-            tensor_to_file[name] = files.size();
-        }
+        for (const auto& name : file->get_tensor_names()) { tensor_to_file[name] = files.size(); }
         files.push_back(std::move(file));
     }
 }
 
-const void *SafeTensorsLoader::get_tensor_data(const std::string &name) const {
+const void* SafeTensorsLoader::get_tensor_data(const std::string& name) const {
     auto it = tensor_to_file.find(name);
     if (it == tensor_to_file.end()) {
         return nullptr;
@@ -310,7 +291,7 @@ const void *SafeTensorsLoader::get_tensor_data(const std::string &name) const {
     return files[it->second]->get_tensor_data(name);
 }
 
-const TensorInfo *SafeTensorsLoader::get_tensor_info(const std::string &name) const {
+const TensorInfo* SafeTensorsLoader::get_tensor_info(const std::string& name) const {
     auto it = tensor_to_file.find(name);
     if (it == tensor_to_file.end()) {
         return nullptr;
@@ -321,9 +302,7 @@ const TensorInfo *SafeTensorsLoader::get_tensor_info(const std::string &name) co
 std::vector<std::string> SafeTensorsLoader::get_all_tensor_names() const {
     std::vector<std::string> names;
     names.reserve(tensor_to_file.size());
-    for (const auto &[name, _] : tensor_to_file) {
-        names.push_back(name);
-    }
+    for (const auto& [name, _] : tensor_to_file) { names.push_back(name); }
     return names;
 }
 

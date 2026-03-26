@@ -13,20 +13,13 @@ namespace zedinfer::core::memory {
 // A memory allocator that uses a memory pool for efficient device allocations.
 class PooledAllocator : public MemoryAllocator {
 public:
-    PooledAllocator(const ZedinferRuntimeAPI *api,
-                    zedinferDeviceType_t device_type,
-                    int device_id,
-                    const MemoryPoolConfig &config = MemoryPoolConfig())
+    PooledAllocator(const ZedinferRuntimeAPI* api, zedinferDeviceType_t device_type, int device_id,
+                    const MemoryPoolConfig& config = MemoryPoolConfig())
         : MemoryAllocator(api, device_type, device_id) {
-
         // Initialize the memory pool with device-specific allocation/deallocation functions.
-        auto alloc_func = [this](size_t size) -> void * {
-            return api_->malloc_device(size);
-        };
+        auto alloc_func = [this](size_t size) -> void* { return api_->malloc_device(size); };
 
-        auto free_func = [this](void *ptr) {
-            api_->free_device(ptr);
-        };
+        auto free_func = [this](void* ptr) { api_->free_device(ptr); };
 
         memory_pool_ = std::make_unique<BestFitMemoryPool>(alloc_func, free_func, config);
     }
@@ -48,7 +41,7 @@ public:
     }
 
     // Allocates memory from the pool, switching to the correct device context.
-    std::byte *allocate(size_t size) override {
+    std::byte* allocate(size_t size) override {
         if (size == 0) {
             return nullptr;
         }
@@ -59,7 +52,7 @@ public:
     }
 
     // Returns memory to the pool, switching to the correct device context.
-    void release(std::byte *memory) override {
+    void release(std::byte* memory) override {
         if (!memory) {
             return;
         }

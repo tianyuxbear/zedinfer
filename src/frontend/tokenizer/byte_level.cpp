@@ -8,26 +8,19 @@
 namespace zedinfer::tokenizer {
 
 // Static member definitions.
-const std::unordered_map<unsigned char, std::string>
-    ByteLevel::byte_to_unicode_map_ = ByteLevel::create_byte_to_unicode_map();
+const std::unordered_map<unsigned char, std::string> ByteLevel::byte_to_unicode_map_
+    = ByteLevel::create_byte_to_unicode_map();
 
-const std::unordered_map<UChar32, unsigned char>
-    ByteLevel::unicode_to_byte_map_ = ByteLevel::create_unicode_to_byte_map();
+const std::unordered_map<UChar32, unsigned char> ByteLevel::unicode_to_byte_map_
+    = ByteLevel::create_unicode_to_byte_map();
 
-std::unordered_map<unsigned char, std::string>
-ByteLevel::create_byte_to_unicode_map() {
+std::unordered_map<unsigned char, std::string> ByteLevel::create_byte_to_unicode_map() {
     std::vector<int> bytes;
     // Printable ASCII: '!' to '~' (33–126)
-    for (int b = 33; b <= 126; ++b) {
-        bytes.push_back(b);
-    }
+    for (int b = 33; b <= 126; ++b) { bytes.push_back(b); }
     // Extended ASCII: ¡–¬ (161–172) and ®–ÿ (174–255)
-    for (int b = 161; b <= 172; ++b) {
-        bytes.push_back(b);
-    }
-    for (int b = 174; b <= 255; ++b) {
-        bytes.push_back(b);
-    }
+    for (int b = 161; b <= 172; ++b) { bytes.push_back(b); }
+    for (int b = 174; b <= 255; ++b) { bytes.push_back(b); }
 
     std::vector<int> unicode_chars = bytes;
     int n = 0;
@@ -49,18 +42,11 @@ ByteLevel::create_byte_to_unicode_map() {
     return map;
 }
 
-std::unordered_map<UChar32, unsigned char>
-ByteLevel::create_unicode_to_byte_map() {
+std::unordered_map<UChar32, unsigned char> ByteLevel::create_unicode_to_byte_map() {
     std::vector<int> bytes;
-    for (int b = 33; b <= 126; ++b) {
-        bytes.push_back(b);
-    }
-    for (int b = 161; b <= 172; ++b) {
-        bytes.push_back(b);
-    }
-    for (int b = 174; b <= 255; ++b) {
-        bytes.push_back(b);
-    }
+    for (int b = 33; b <= 126; ++b) { bytes.push_back(b); }
+    for (int b = 161; b <= 172; ++b) { bytes.push_back(b); }
+    for (int b = 174; b <= 255; ++b) { bytes.push_back(b); }
 
     std::vector<int> unicode_chars = bytes;
     int n = 0;
@@ -101,16 +87,14 @@ unsigned char ByteLevel::unicode_to_byte(UChar32 unicode_char) {
     return 0;
 }
 
-std::string ByteLevel::bytes_to_unicode(const std::string &text) {
+std::string ByteLevel::bytes_to_unicode(const std::string& text) {
     std::string result;
     result.reserve(text.size() * 3); // UTF-8 chars may be multi-byte.
-    for (unsigned char byte : text) {
-        result += byte_to_unicode(byte);
-    }
+    for (unsigned char byte : text) { result += byte_to_unicode(byte); }
     return result;
 }
 
-std::string ByteLevel::unicode_to_bytes(const std::string &text) {
+std::string ByteLevel::unicode_to_bytes(const std::string& text) {
     std::string result;
     icu::UnicodeString uText = icu::UnicodeString::fromUTF8(text);
     for (int32_t i = 0; i < uText.length(); ++i) {

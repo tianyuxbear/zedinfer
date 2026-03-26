@@ -6,17 +6,11 @@
 
 namespace zedinfer::core::memory {
 
-MemoryBlock::MemoryBlock(std::byte *ptr, size_t size, std::byte *base_ptr)
+MemoryBlock::MemoryBlock(std::byte* ptr, size_t size, std::byte* base_ptr)
     : ptr(ptr), size(size), in_use(false), base_ptr(base_ptr ? base_ptr : ptr) {}
 
-BestFitMemoryPool::BestFitMemoryPool(
-    AllocFunc alloc_func,
-    FreeFunc free_func,
-    const MemoryPoolConfig &config)
-    : alloc_func_(std::move(alloc_func)),
-      free_func_(std::move(free_func)),
-      config_(config) {
-
+BestFitMemoryPool::BestFitMemoryPool(AllocFunc alloc_func, FreeFunc free_func, const MemoryPoolConfig& config)
+    : alloc_func_(std::move(alloc_func)), free_func_(std::move(free_func)), config_(config) {
     ASSERT(config_.alignment > 0 && (config_.alignment & (config_.alignment - 1)) == 0,
            "alignment must be a positive power of two");
 
@@ -24,28 +18,24 @@ BestFitMemoryPool::BestFitMemoryPool(
 
     // Preallocate large blocks upfront to reduce runtime allocation pressure
     // for common workloads (e.g., transformer layer buffers).
-    for (size_t size : config_.preallocate_sizes) {
-        allocateNewBlock(size);
-    }
+    for (size_t size : config_.preallocate_sizes) { allocateNewBlock(size); }
 }
 
 BestFitMemoryPool::~BestFitMemoryPool() {
     // All base pointers are owned exclusively; safe to free unconditionally.
-    for (const auto &[base, _] : base_ref_count_) {
-        free_func_(base);
-    }
+    for (const auto& [base, _] : base_ref_count_) { free_func_(base); }
 }
 
 size_t BestFitMemoryPool::alignSize(size_t size) const {
     return (size + config_.alignment - 1) & ~(config_.alignment - 1);
 }
 
-std::byte *BestFitMemoryPool::alignPointer(std::byte *ptr) const {
+std::byte* BestFitMemoryPool::alignPointer(std::byte* ptr) const {
     uintptr_t addr = reinterpret_cast<uintptr_t>(ptr);
-    return reinterpret_cast<std::byte *>((addr + config_.alignment - 1) & ~(config_.alignment - 1));
+    return reinterpret_cast<std::byte*>((addr + config_.alignment - 1) & ~(config_.alignment - 1));
 }
 
-bool BestFitMemoryPool::isAligned(std::byte *ptr) const {
+bool BestFitMemoryPool::isAligned(std::byte* ptr) const {
     return (reinterpret_cast<uintptr_t>(ptr) & (config_.alignment - 1)) == 0;
 }
 
@@ -59,7 +49,7 @@ size_t BestFitMemoryPool::getSizeClass(size_t size) const {
     return config_.size_classes.size() - 1;
 }
 
-void BestFitMemoryPool::addToFreeList(MemoryBlock *block) {
+void BestFitMemoryPool::addToFreeList(MemoryBlock* block) {
     size_t class_idx = getSizeClass(block->size);
     free_lists_[class_idx].insert({block->size, block});
     ++free_block_count_;
@@ -70,9 +60,9 @@ void BestFitMemoryPool::addToFreeList(MemoryBlock *block) {
     }
 }
 
-void BestFitMemoryPool::removeFromFreeList(MemoryBlock *block) {
+void BestFitMemoryPool::removeFromFreeList(MemoryBlock* block) {
     size_t class_idx = getSizeClass(block->size);
-    auto &free_list = free_lists_[class_idx];
+    auto& free_list = free_lists_[class_idx];
 
     // Multimap may contain multiple blocks of same size; scan to find exact pointer.
     auto range = free_list.equal_range(block->size);
@@ -85,7 +75,7 @@ void BestFitMemoryPool::removeFromFreeList(MemoryBlock *block) {
             // This is rare, so full scan is acceptable here.
             if (block->size == largest_free_block_) {
                 largest_free_block_ = 0;
-                for (const auto &fl : free_lists_) {
+                for (const auto& fl : free_lists_) {
                     if (!fl.empty()) {
                         largest_free_block_ = std::max(largest_free_block_, fl.rbegin()->first);
                     }
@@ -96,11 +86,11 @@ void BestFitMemoryPool::removeFromFreeList(MemoryBlock *block) {
     }
 }
 
-MemoryBlock *BestFitMemoryPool::findBestFitBlock(size_t size) {
+MemoryBlock* BestFitMemoryPool::findBestFitBlock(size_t size) {
     // Search size classes in increasing order to find the smallest suitable block.
     size_t start_class = getSizeClass(size);
     for (size_t class_idx = start_class; class_idx < free_lists_.size(); ++class_idx) {
-        auto &free_list = free_lists_[class_idx];
+        auto& free_list = free_lists_[class_idx];
         if (free_list.empty()) {
             continue;
         }
@@ -108,7 +98,7 @@ MemoryBlock *BestFitMemoryPool::findBestFitBlock(size_t size) {
         // lower_bound gives first block with size >= requested size → best-fit.
         auto it = free_list.lower_bound(size);
         if (it != free_list.end()) {
-            MemoryBlock *block = it->second;
+            MemoryBlock* block = it->second;
             removeFromFreeList(block);
             return block;
         }
@@ -117,7 +107,7 @@ MemoryBlock *BestFitMemoryPool::findBestFitBlock(size_t size) {
     return nullptr;
 }
 
-MemoryBlock *BestFitMemoryPool::splitBlock(MemoryBlock *block, size_t size) {
+MemoryBlock* BestFitMemoryPool::splitBlock(MemoryBlock* block, size_t size) {
     // Avoid internal fragmentation: only split if remainder is usable.
     if (block->size <= size || (block->size - size) < config_.min_split_size) {
         return nullptr;
@@ -135,7 +125,7 @@ MemoryBlock *BestFitMemoryPool::splitBlock(MemoryBlock *block, size_t size) {
     return new_block_ptr;
 }
 
-std::byte *BestFitMemoryPool::allocateNewBlock(size_t size) {
+std::byte* BestFitMemoryPool::allocateNewBlock(size_t size) {
     size_t block_size = std::max(size, config_.initial_block_size);
     if (total_allocated_ + block_size > config_.max_pool_size) {
         if (!config_.allow_growth) {
@@ -149,17 +139,17 @@ std::byte *BestFitMemoryPool::allocateNewBlock(size_t size) {
 
     // Allocate extra space to guarantee alignment without losing usability.
     size_t alloc_size = block_size + config_.alignment;
-    void *raw_ptr = alloc_func_(alloc_size);
+    void* raw_ptr = alloc_func_(alloc_size);
     if (!raw_ptr) {
         return nullptr;
     }
 
-    std::byte *aligned_ptr = alignPointer(static_cast<std::byte *>(raw_ptr));
-    size_t offset = aligned_ptr - static_cast<std::byte *>(raw_ptr);
+    std::byte* aligned_ptr = alignPointer(static_cast<std::byte*>(raw_ptr));
+    size_t offset = aligned_ptr - static_cast<std::byte*>(raw_ptr);
     size_t usable_size = alloc_size - offset;
 
     auto block = std::make_unique<MemoryBlock>(aligned_ptr, usable_size);
-    block->base_ptr = static_cast<std::byte *>(raw_ptr); // Keep raw pointer for deallocation.
+    block->base_ptr = static_cast<std::byte*>(raw_ptr); // Keep raw pointer for deallocation.
     auto block_ptr = block.get();
     blocks_.push_back(std::move(block));
     total_allocated_ += usable_size;
@@ -171,7 +161,7 @@ std::byte *BestFitMemoryPool::allocateNewBlock(size_t size) {
     return block_ptr->ptr;
 }
 
-void BestFitMemoryPool::tryCoalesceNeighbors(MemoryBlock *block) {
+void BestFitMemoryPool::tryCoalesceNeighbors(MemoryBlock* block) {
     if (block->in_use) {
         return;
     }
@@ -179,18 +169,16 @@ void BestFitMemoryPool::tryCoalesceNeighbors(MemoryBlock *block) {
     // Find immediate successor in address space using sorted addr_to_block_.
     auto next_it = addr_to_block_.upper_bound(block->ptr);
     if (next_it != addr_to_block_.end()) {
-        MemoryBlock *next = next_it->second;
+        MemoryBlock* next = next_it->second;
         // Only coalesce if both are free, share the same base, and are contiguous.
         if (!next->in_use && block->base_ptr == next->base_ptr && block->ptr + block->size == next->ptr) {
-
             removeFromFreeList(block);
             removeFromFreeList(next);
 
             block->size += next->size;
             addr_to_block_.erase(next->ptr);
             blocks_.erase(
-                std::remove_if(blocks_.begin(), blocks_.end(),
-                               [next](const auto &b) { return b.get() == next; }),
+                std::remove_if(blocks_.begin(), blocks_.end(), [next](const auto& b) { return b.get() == next; }),
                 blocks_.end());
 
             addToFreeList(block);
@@ -206,8 +194,8 @@ void BestFitMemoryPool::coalesceBlocks() {
 
     // Full coalescing: collect all free blocks in address order and merge contiguous ones.
     // This is O(n log n) due to map traversal but only triggered under high fragmentation.
-    std::vector<MemoryBlock *> free_blocks;
-    for (const auto &[_, block] : addr_to_block_) {
+    std::vector<MemoryBlock*> free_blocks;
+    for (const auto& [_, block] : addr_to_block_) {
         if (!block->in_use) {
             free_blocks.push_back(block);
         }
@@ -223,8 +211,7 @@ void BestFitMemoryPool::coalesceBlocks() {
             curr->size += next->size;
             addr_to_block_.erase(next->ptr);
             blocks_.erase(
-                std::remove_if(blocks_.begin(), blocks_.end(),
-                               [next](const auto &b) { return b.get() == next; }),
+                std::remove_if(blocks_.begin(), blocks_.end(), [next](const auto& b) { return b.get() == next; }),
                 blocks_.end());
 
             addToFreeList(curr);
@@ -235,15 +222,15 @@ void BestFitMemoryPool::coalesceBlocks() {
     }
 }
 
-std::byte *BestFitMemoryPool::allocate(size_t size) {
+std::byte* BestFitMemoryPool::allocate(size_t size) {
     if (size == 0) {
         return nullptr;
     }
     size = alignSize(size);
 
-    MemoryBlock *block = findBestFitBlock(size);
+    MemoryBlock* block = findBestFitBlock(size);
     if (!block) {
-        std::byte *ptr = allocateNewBlock(size);
+        std::byte* ptr = allocateNewBlock(size);
         if (!ptr) {
             return nullptr;
         }
@@ -264,7 +251,7 @@ std::byte *BestFitMemoryPool::allocate(size_t size) {
     return block->ptr;
 }
 
-void BestFitMemoryPool::deallocate(std::byte *ptr) {
+void BestFitMemoryPool::deallocate(std::byte* ptr) {
     if (!ptr) {
         return;
     }
@@ -274,7 +261,7 @@ void BestFitMemoryPool::deallocate(std::byte *ptr) {
         return;
     }
 
-    MemoryBlock *block = it->second;
+    MemoryBlock* block = it->second;
     block->in_use = false;
     total_used_ -= block->size;
     allocated_blocks_.erase(it);
@@ -320,8 +307,7 @@ float BestFitMemoryPool::getFragmentation() const {
     return 1.0f - static_cast<float>(largest_free_block_) / static_cast<float>(total_free);
 }
 
-BestFitMemoryPool::FragmentationStats
-BestFitMemoryPool::getDetailedFragmentation() const {
+BestFitMemoryPool::FragmentationStats BestFitMemoryPool::getDetailedFragmentation() const {
     FragmentationStats stats{};
     stats.total_free_bytes = total_allocated_ - total_used_;
     stats.free_block_count = free_block_count_;
@@ -348,8 +334,8 @@ void BestFitMemoryPool::tryReclaimMemory() {
     coalesceBlocks(); // Merge free blocks first to maximize reclaimable regions.
 
     // Identify base blocks with zero active allocations.
-    std::vector<std::byte *> reclaimable_bases;
-    for (const auto &[base, count] : base_ref_count_) {
+    std::vector<std::byte*> reclaimable_bases;
+    for (const auto& [base, count] : base_ref_count_) {
         if (count == 0) {
             reclaimable_bases.push_back(base);
         }
@@ -362,7 +348,7 @@ void BestFitMemoryPool::tryReclaimMemory() {
     size_t freed_size = 0;
     for (auto base : reclaimable_bases) {
         // Purge all metadata referencing this base.
-        for (auto &free_list : free_lists_) {
+        for (auto& free_list : free_lists_) {
             for (auto it = free_list.begin(); it != free_list.end();) {
                 if (it->second->base_ptr == base) {
                     --free_block_count_;
@@ -382,19 +368,18 @@ void BestFitMemoryPool::tryReclaimMemory() {
         }
 
         // Free the raw memory only once (when ptr == base).
-        blocks_.erase(
-            std::remove_if(blocks_.begin(), blocks_.end(),
-                           [this, base, &freed_size](const auto &block) {
-                               if (block->base_ptr == base) {
-                                   if (block->ptr == base) {
-                                       free_func_(block->ptr);
-                                       freed_size += block->size;
-                                   }
-                                   return true;
-                               }
-                               return false;
-                           }),
-            blocks_.end());
+        blocks_.erase(std::remove_if(blocks_.begin(), blocks_.end(),
+                                     [this, base, &freed_size](const auto& block) {
+                                         if (block->base_ptr == base) {
+                                             if (block->ptr == base) {
+                                                 free_func_(block->ptr);
+                                                 freed_size += block->size;
+                                             }
+                                             return true;
+                                         }
+                                         return false;
+                                     }),
+                      blocks_.end());
 
         base_ref_count_.erase(base);
     }
@@ -403,7 +388,7 @@ void BestFitMemoryPool::tryReclaimMemory() {
 
     // Recompute largest free block after reclamation.
     largest_free_block_ = 0;
-    for (const auto &free_list : free_lists_) {
+    for (const auto& free_list : free_lists_) {
         if (!free_list.empty()) {
             largest_free_block_ = std::max(largest_free_block_, free_list.rbegin()->first);
         }

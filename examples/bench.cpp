@@ -7,8 +7,8 @@
 #include "zedinfer/scheduler.hpp"
 #include "zedinfer/session.hpp"
 
-#include <argparse.hpp>
 #include "zedinfer/version.hpp"
+#include <argparse.hpp>
 #include <chrono>
 #include <iostream>
 #include <memory>
@@ -16,33 +16,23 @@
 
 using namespace zedinfer;
 
-int main(int argc, char *argv[]) {
+int main(int argc, char* argv[]) {
     // 1. Argument Parsing Setup
-    argparse::ArgumentParser program("ZedInfer Benchmarks",
-        std::string("zedinfer ") + ZEDINFER_VERSION + " (build " + ZEDINFER_GIT_HASH + ", " + ZEDINFER_BUILD_DATE + ")");
+    argparse::ArgumentParser program("ZedInfer Benchmarks", std::string("zedinfer ") + ZEDINFER_VERSION + " (build "
+                                                                + ZEDINFER_GIT_HASH + ", " + ZEDINFER_BUILD_DATE + ")");
 
-    program.add_argument("model_path")
-        .help("Path to the model directory");
+    program.add_argument("model_path").help("Path to the model directory");
 
     program.add_argument("-p", "--prefill-len")
         .help("Sequence length for prefill phase")
         .default_value(128)
         .scan<'i', int>(); // Use scan to enforce integer parsing
 
-    program.add_argument("-d", "--decode-len")
-        .help("Number of tokens to decode")
-        .default_value(128)
-        .scan<'i', int>();
+    program.add_argument("-d", "--decode-len").help("Number of tokens to decode").default_value(128).scan<'i', int>();
 
-    program.add_argument("-r", "--rounds")
-        .help("Number of benchmark rounds")
-        .default_value(3)
-        .scan<'i', int>();
+    program.add_argument("-r", "--rounds").help("Number of benchmark rounds").default_value(3).scan<'i', int>();
 
-    program.add_argument("--nvidia")
-        .help("Use NVIDIA GPU backend")
-        .default_value(false)
-        .implicit_value(true);
+    program.add_argument("--nvidia").help("Use NVIDIA GPU backend").default_value(false).implicit_value(true);
 
     program.add_argument("--gpu-memory-utilization")
         .help("Fraction of GPU memory for KV cache (0.0-1.0)")
@@ -51,7 +41,7 @@ int main(int argc, char *argv[]) {
 
     try {
         program.parse_args(argc, argv);
-    } catch (const std::exception &err) {
+    } catch (const std::exception& err) {
         std::cerr << err.what() << std::endl;
         std::cerr << program;
         return 1;

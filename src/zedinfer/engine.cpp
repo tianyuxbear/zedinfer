@@ -13,13 +13,9 @@
 
 namespace zedinfer {
 
-InferenceEngine::InferenceEngine(
-    std::shared_ptr<model::Model> model,
-    std::shared_ptr<tokenizer::Tokenizer> tokenizer,
-    std::shared_ptr<sampler::Sampler> sampler,
-    device::Device device,
-    ExecutorConfig exec_config,
-    ChatTemplate chat_template)
+InferenceEngine::InferenceEngine(std::shared_ptr<model::Model> model, std::shared_ptr<tokenizer::Tokenizer> tokenizer,
+                                 std::shared_ptr<sampler::Sampler> sampler, device::Device device,
+                                 ExecutorConfig exec_config, ChatTemplate chat_template)
     : model_(std::move(model)),
       tokenizer_(std::move(tokenizer)),
       sampler_(std::move(sampler)),
@@ -27,11 +23,8 @@ InferenceEngine::InferenceEngine(
       exec_config_(exec_config),
       chat_template_(std::move(chat_template)) {}
 
-std::shared_ptr<InferenceEngine> InferenceEngine::create(
-    const std::string &model_path,
-    device::Device device,
-    SchedulerConfig sched_config) {
-
+std::shared_ptr<InferenceEngine> InferenceEngine::create(const std::string& model_path, device::Device device,
+                                                         SchedulerConfig sched_config) {
     if (model_path.empty()) {
         throw std::invalid_argument("Model path cannot be empty");
     }
@@ -65,10 +58,8 @@ std::shared_ptr<InferenceEngine> InferenceEngine::create(
     auto sampler = sampler::createSampler(exec_config, sampler::SamplerType::ARGMAX);
     auto chat_template = ChatTemplate::load(model_path, model->model_type());
 
-    auto engine = std::shared_ptr<InferenceEngine>(
-        new InferenceEngine(
-            std::move(model), std::move(tokenizer), std::move(sampler),
-            device, exec_config, std::move(chat_template)));
+    auto engine = std::shared_ptr<InferenceEngine>(new InferenceEngine(
+        std::move(model), std::move(tokenizer), std::move(sampler), device, exec_config, std::move(chat_template)));
 
     engine->build_stop_token_ids();
 
@@ -82,15 +73,15 @@ std::shared_ptr<InferenceEngine> InferenceEngine::create(
 
     // Create prefix cache (after block pool, before serving loop)
     if (engine->block_pool_ && engine->block_allocator_) {
-        engine->prefix_cache_ = std::make_unique<kvcache::PrefixCache>(
-            *engine->block_pool_, engine->block_allocator_->num_layers());
+        engine->prefix_cache_
+            = std::make_unique<kvcache::PrefixCache>(*engine->block_pool_, engine->block_allocator_->num_layers());
     }
 
     // Create decode scratch buffers (pre-allocated for N=1 decode)
     {
         auto fwd_cfg = engine->model_->forward_config();
-        engine->decode_scratch_ = model::DecodeScratch::create(
-            engine->model_->config(), fwd_cfg.has_qk_norm, engine->exec_config_);
+        engine->decode_scratch_
+            = model::DecodeScratch::create(engine->model_->config(), fwd_cfg.has_qk_norm, engine->exec_config_);
     }
 
     // Create profiler and run warmup (exercises paged attention kernels)
@@ -109,9 +100,7 @@ std::shared_ptr<InferenceEngine> InferenceEngine::create(
 // Session Management
 // ============================================================================
 
-std::unique_ptr<InferenceSession> InferenceEngine::create_session(
-    const GenerationConfig &config) {
-
+std::unique_ptr<InferenceSession> InferenceEngine::create_session(const GenerationConfig& config) {
     if (!block_allocator_) {
         throw std::runtime_error("[Engine] Block allocator not initialized");
     }
@@ -119,12 +108,10 @@ std::unique_ptr<InferenceSession> InferenceEngine::create_session(
     auto block_table = block_allocator_->allocate_sequence(256);
 
     LOGI << "[Session] Created with " << block_table.k_blocks[0].size()
-         << " blocks/layer, pool_free=" << block_pool_->free_blocks()
-         << "/" << block_pool_->total_blocks();
+         << " blocks/layer, pool_free=" << block_pool_->free_blocks() << "/" << block_pool_->total_blocks();
 
-    return std::unique_ptr<InferenceSession>(
-        new InferenceSession(shared_from_this(), std::move(block_table),
-                             block_allocator_.get(), config, chat_template_));
+    return std::unique_ptr<InferenceSession>(new InferenceSession(shared_from_this(), std::move(block_table),
+                                                                  block_allocator_.get(), config, chat_template_));
 }
 
 // ============================================================================
@@ -137,7 +124,7 @@ void InferenceEngine::init_block_pool() {
         return;
     }
 
-    const auto &mc = model_->config();
+    const auto& mc = model_->config();
     auto dtype = utils::str_to_dtype(mc.torch_dtype);
 
     core::context().setDevice(device_.type(), device_.id());
@@ -149,8 +136,7 @@ void InferenceEngine::init_block_pool() {
          << " MB, total=" << total_bytes / (1024 * 1024) << " MB";
 
     size_t used_bytes = total_bytes - free_bytes;
-    size_t allowed_bytes = static_cast<size_t>(
-        total_bytes * scheduler_config_.gpu_memory_utilization);
+    size_t allowed_bytes = static_cast<size_t>(total_bytes * scheduler_config_.gpu_memory_utilization);
     size_t kv_budget = (allowed_bytes > used_bytes) ? (allowed_bytes - used_bytes) : 0;
 
     kvcache::BlockConfig block_config;
@@ -168,14 +154,11 @@ void InferenceEngine::init_block_pool() {
         return;
     }
 
-    LOGI << "[Engine] Creating block pool: " << num_blocks << " blocks x "
-         << block_config.block_size << " tokens, "
+    LOGI << "[Engine] Creating block pool: " << num_blocks << " blocks x " << block_config.block_size << " tokens, "
          << (num_blocks * block_bytes) / (1024 * 1024) << " MB";
 
-    block_pool_ = std::make_unique<kvcache::BlockPool>(
-        block_config, num_blocks, device_.type(), device_.id());
-    block_allocator_ = std::make_unique<kvcache::BlockAllocator>(
-        *block_pool_, mc.num_hidden_layers);
+    block_pool_ = std::make_unique<kvcache::BlockPool>(block_config, num_blocks, device_.type(), device_.id());
+    block_allocator_ = std::make_unique<kvcache::BlockAllocator>(*block_pool_, mc.num_hidden_layers);
 }
 
 // ============================================================================
@@ -185,23 +168,26 @@ void InferenceEngine::init_block_pool() {
 void InferenceEngine::build_stop_token_ids() {
     auto add_unique = [this](int id) {
         if (id >= 0) {
-            for (int existing : stop_token_ids_)
-                if (existing == id) return;
+            for (int existing : stop_token_ids_) {
+                if (existing == id) {
+                    return;
+                }
+            }
             stop_token_ids_.push_back(id);
         }
     };
 
     add_unique(tokenizer_->get_eos_token_id());
-    for (int eos_id : model_->config().eos_token_ids) {
-        add_unique(eos_id);
-    }
+    for (int eos_id : model_->config().eos_token_ids) { add_unique(eos_id); }
     if (!chat_template_.eos_token.empty()) {
         add_unique(tokenizer_->get_special_token_id(chat_template_.eos_token));
     }
 
     std::string ids_str;
     for (int id : stop_token_ids_) {
-        if (!ids_str.empty()) ids_str += ", ";
+        if (!ids_str.empty()) {
+            ids_str += ", ";
+        }
         ids_str += std::to_string(id);
     }
     LOGI << "[Engine] Stop token IDs: [" << ids_str << "]";

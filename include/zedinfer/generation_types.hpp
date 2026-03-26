@@ -23,7 +23,7 @@ struct GenerationConfig {
 
     // Streaming output
     bool stream = false;
-    std::function<void(const std::string &)> stream_callback = nullptr;
+    std::function<void(const std::string&)> stream_callback = nullptr;
 
     // Diagnostics
     bool verbose = false;
