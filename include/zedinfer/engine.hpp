@@ -15,6 +15,7 @@
 #include "zedinfer/serving_loop.hpp"
 
 #include <cstddef>
+#include <cstdint>
 #include <future>
 #include <memory>
 #include <string>
@@ -23,6 +24,43 @@
 namespace zedinfer {
 
 class InferenceSession;
+
+struct PerplexityEvalConfig {
+    size_t context_window = 0;
+    size_t max_length = 0;
+    bool verbose = false;
+};
+
+struct PerplexitySampleStats {
+    size_t input_tokens = 0;
+    size_t eval_tokens = 0;
+    double nll_sum = 0.0;
+    double avg_nll = 0.0;
+    double ppl = 0.0;
+
+    bool skipped = false;
+    std::string skip_reason;
+};
+
+struct PerplexityStats {
+    uint64_t run_id = 0;
+    size_t context_window = 0;
+    size_t total_samples = 0;
+    size_t evaluated_samples = 0;
+    size_t skipped_samples = 0;
+    size_t total_input_tokens = 0;
+    size_t total_eval_tokens = 0;
+    size_t total_chunks = 0;
+
+    double nll_sum = 0.0;
+    double avg_nll = 0.0;
+    double avg_nll_se = 0.0;
+    double ppl = 0.0;
+    double ppl_se = 0.0;
+    double elapsed_ms = 0.0;
+
+    std::vector<PerplexitySampleStats> samples;
+};
 
 /**
  * Inference engine: resource container and factory.
@@ -35,6 +73,10 @@ public:
                                                    SchedulerConfig sched_config = {});
 
     std::unique_ptr<InferenceSession> create_session(const GenerationConfig& gen_config);
+
+    PerplexityStats evaluate_perplexity(
+        const std::vector<std::string> &samples,
+        const PerplexityEvalConfig &config = PerplexityEvalConfig());
 
     // Resource accessors (used by ServingLoop, Profiler, Session)
     model::Model& model() { return *model_; }
