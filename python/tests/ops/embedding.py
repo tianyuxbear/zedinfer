@@ -1,6 +1,5 @@
-from zedinfer.test_utils import benchmark, check_equal, random_int_tensor, random_tensor
-
 import zedinfer
+from zedinfer.test_utils import benchmark, check_equal, random_int_tensor, random_tensor
 
 
 def torch_embedding(out, idx, embd):

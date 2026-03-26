@@ -1,7 +1,7 @@
 import torch
-from zedinfer.test_utils import benchmark, check_equal, random_tensor
 
 import zedinfer
+from zedinfer.test_utils import benchmark, check_equal, random_tensor
 
 
 def test_op_linear(

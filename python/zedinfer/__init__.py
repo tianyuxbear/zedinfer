@@ -19,15 +19,15 @@ Usage:
 """
 
 from .zedinfer_ops import (
-    Tensor,
     Ops,
-    has_cuda,
+    Tensor,
     device_synchronize,
+    has_cuda,
 )
 
 __all__ = [
-    "Tensor",
     "Ops",
-    "has_cuda",
+    "Tensor",
     "device_synchronize",
+    "has_cuda",
 ]
