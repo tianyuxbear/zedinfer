@@ -2,9 +2,19 @@
 
 #include "frontend/models/base.hpp"
 
+#include <stdexcept>
 #include <string>
 
 namespace zedinfer::model {
+
+struct QuantizedLinearRef {
+    tensor_t weight = nullptr;
+    tensor_t bias = nullptr;
+    tensor_t scale = nullptr;
+    tensor_t g_idx = nullptr;
+    int num_bits = 0;
+    int group_size = -1;
+};
 
 /**
  * Static configuration for a model's forward pass.
@@ -21,6 +31,37 @@ struct ModelForwardConfig {
 
     // Weight accessor
     tensor_t W(const std::string& name) const { return weights.get_tensor(name); }
+
+    bool has_quantized_linear(const std::string &prefix) const {
+        return weights.has_tensor(prefix + ".weight_packed") &&
+               weights.has_tensor(prefix + ".weight_scale");
+    }
+
+    QuantizedLinearRef quant_linear(const std::string &prefix) const {
+        if (!has_quantized_linear(prefix)) {
+            throw std::runtime_error("Quantized linear not found: " + prefix);
+        }
+
+        QuantizedLinearRef ref;
+        ref.weight = weights.get_tensor(prefix + ".weight_packed");
+        ref.scale = weights.get_tensor(prefix + ".weight_scale");
+        if (weights.has_tensor(prefix + ".bias")) {
+            ref.bias = weights.get_tensor(prefix + ".bias");
+        }
+        if (weights.has_tensor(prefix + ".weight_g_idx")) {
+            ref.g_idx = weights.get_tensor(prefix + ".weight_g_idx");
+        }
+
+        ref.num_bits = config.quant_config.weights.num_bits;
+        ref.group_size = config.quant_config.weights.group_size;
+
+        if (ref.num_bits <= 0) {
+            throw std::runtime_error(
+                "Quantized linear metadata missing num_bits for: " + prefix);
+        }
+
+        return ref;
+    }
 
     // Layer weight prefix
     std::string prefix(int layer) const { return "layers." + std::to_string(layer) + "."; }
