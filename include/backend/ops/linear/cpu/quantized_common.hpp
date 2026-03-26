@@ -40,13 +40,13 @@ inline constexpr std::size_t kCacheAlignment = 64;
 alignas(kCacheAlignment) inline float g_block_a_packed[kGemmMc * kGemmKc];
 alignas(kCacheAlignment) inline float g_block_b_packed[kGemmNc * kGemmKc];
 
-inline int unpack_int4_unsigned(const int32_t *packed_row, int k) {
+inline int unpack_int4_unsigned(const int32_t* packed_row, int k) {
     const int packed_idx = k / kInt4PackSize;
     const int shift = (k % kInt4PackSize) * 4;
     return (packed_row[packed_idx] >> shift) & 0xF;
 }
 
-inline float dequantize_int4_weight(const int32_t *packed_row, int k) {
+inline float dequantize_int4_weight(const int32_t* packed_row, int k) {
     return static_cast<float>(unpack_int4_unsigned(packed_row, k)) - kInt4ZeroPoint;
 }
 

@@ -1,7 +1,7 @@
 #include "backend/ops/ops.hpp"
 #include "backend/tensor/tensor.hpp"
-#include "frontend/models/forward_config.hpp"
 #include "frontend/models/base.hpp"
+#include "frontend/models/forward_config.hpp"
 
 #include <chrono>
 #include <cstddef>
@@ -29,8 +29,7 @@ struct TestTensorFile {
     std::vector<std::byte> data;
 };
 
-template <typename T>
-std::vector<std::byte> to_bytes(const std::vector<T> &values) {
+template <typename T> std::vector<std::byte> to_bytes(const std::vector<T>& values) {
     std::vector<std::byte> bytes(values.size() * sizeof(T));
     std::memcpy(bytes.data(), values.data(), bytes.size());
     return bytes;
@@ -43,22 +42,17 @@ static fs::path make_temp_model_dir() {
     return dir;
 }
 
-static void write_config(const fs::path &dir, const std::string &config_json) {
+static void write_config(const fs::path& dir, const std::string& config_json) {
     std::ofstream out(dir / "config.json");
     out << config_json;
 }
 
-static void write_safetensors(
-    const fs::path &dir,
-    const std::vector<TestTensorFile> &tensors) {
+static void write_safetensors(const fs::path& dir, const std::vector<TestTensorFile>& tensors) {
     json header = json::object();
     size_t offset = 0;
-    for (const auto &tensor : tensors) {
+    for (const auto& tensor : tensors) {
         header[tensor.name] = {
-            {"dtype", tensor.dtype},
-            {"shape", tensor.shape},
-            {"data_offsets", {offset, offset + tensor.data.size()}}
-        };
+            {"dtype", tensor.dtype}, {"shape", tensor.shape}, {"data_offsets", {offset, offset + tensor.data.size()}}};
         offset += tensor.data.size();
     }
 
@@ -66,11 +60,10 @@ static void write_safetensors(
     const uint64_t header_size = header_str.size();
 
     std::ofstream out(dir / "model.safetensors", std::ios::binary);
-    out.write(reinterpret_cast<const char *>(&header_size), sizeof(header_size));
+    out.write(reinterpret_cast<const char*>(&header_size), sizeof(header_size));
     out.write(header_str.data(), static_cast<std::streamsize>(header_str.size()));
-    for (const auto &tensor : tensors) {
-        out.write(reinterpret_cast<const char *>(tensor.data.data()),
-                  static_cast<std::streamsize>(tensor.data.size()));
+    for (const auto& tensor : tensors) {
+        out.write(reinterpret_cast<const char*>(tensor.data.data()), static_cast<std::streamsize>(tensor.data.size()));
     }
 }
 
@@ -157,15 +150,14 @@ static std::string int4_quant_config_json() {
 })JSON";
 }
 
-static std::vector<int8_t> unpack_4bit_tensor_row(const tensor_t &packed) {
-    const auto *src = reinterpret_cast<const int32_t *>(packed->data());
+static std::vector<int8_t> unpack_4bit_tensor_row(const tensor_t& packed) {
+    const auto* src = reinterpret_cast<const int32_t*>(packed->data());
     const size_t k = packed->shape()[1] * 8;
     std::vector<int8_t> unpacked(k);
     for (size_t block = 0; block < k / 8; ++block) {
         int32_t value = src[block];
         for (int i = 0; i < 8; ++i) {
-            unpacked[block * 8 + static_cast<size_t>(i)] =
-                static_cast<int8_t>((value >> (i * 4)) & 0xF);
+            unpacked[block * 8 + static_cast<size_t>(i)] = static_cast<int8_t>((value >> (i * 4)) & 0xF);
         }
     }
     return unpacked;
@@ -177,22 +169,15 @@ TEST(QuantizedWeightsTest, LoadWeightsPacksInt8WeightsAndExposesForwardMetadata)
     const auto dir = make_temp_model_dir();
     write_config(dir, int8_quant_config_json());
 
-    std::vector<int8_t> q_weight = {
-        1, 2, 3, 4, 5, 6, 7, 8,
-        -1, -2, -3, -4, -5, -6, -7, -8
-    };
+    std::vector<int8_t> q_weight = {1, 2, 3, 4, 5, 6, 7, 8, -1, -2, -3, -4, -5, -6, -7, -8};
     std::vector<float> q_scale = {0.25f, 0.5f};
     std::vector<float> q_bias = {1.0f, -1.0f};
-    std::vector<float> embed = {
-        0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 0.7f, 0.8f
-    };
+    std::vector<float> embed = {0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 0.7f, 0.8f};
 
-    write_safetensors(dir, {
-        {"model.layers.0.self_attn.q_proj.weight", "I8", {2, 8}, to_bytes(q_weight)},
-        {"model.layers.0.self_attn.q_proj.weight_scale", "F32", {2}, to_bytes(q_scale)},
-        {"model.layers.0.self_attn.q_proj.bias", "F32", {2}, to_bytes(q_bias)},
-        {"model.embed_tokens.weight", "F32", {1, 8}, to_bytes(embed)}
-    });
+    write_safetensors(dir, {{"model.layers.0.self_attn.q_proj.weight", "I8", {2, 8}, to_bytes(q_weight)},
+                            {"model.layers.0.self_attn.q_proj.weight_scale", "F32", {2}, to_bytes(q_scale)},
+                            {"model.layers.0.self_attn.q_proj.bias", "F32", {2}, to_bytes(q_bias)},
+                            {"model.embed_tokens.weight", "F32", {1, 8}, to_bytes(embed)}});
 
     auto config = Model::load_config((dir / "config.json").string());
     ASSERT_NE(config, nullptr);
@@ -232,22 +217,18 @@ TEST(QuantizedWeightsTest, LoadWeightsReordersActOrderPackedWeights) {
     std::vector<int32_t> g_idx = {2, 0, 1, 0, 2, 1, 0, 2};
     std::vector<float> scales = {1.0f};
 
-    write_safetensors(dir, {
-        {"model.layers.0.self_attn.q_proj.weight_packed", "I32", {1, 1}, to_bytes(packed)},
-        {"model.layers.0.self_attn.q_proj.weight_g_idx", "I32", {8}, to_bytes(g_idx)},
-        {"model.layers.0.self_attn.q_proj.weight_scale", "F32", {1, 1}, to_bytes(scales)}
-    });
+    write_safetensors(dir, {{"model.layers.0.self_attn.q_proj.weight_packed", "I32", {1, 1}, to_bytes(packed)},
+                            {"model.layers.0.self_attn.q_proj.weight_g_idx", "I32", {8}, to_bytes(g_idx)},
+                            {"model.layers.0.self_attn.q_proj.weight_scale", "F32", {1, 1}, to_bytes(scales)}});
 
     auto config = Model::load_config((dir / "config.json").string());
     auto weights = Model::load_weights(dir.string(), ZEDINFER_DEVICE_CPU, *config);
 
     auto reordered_g_idx = weights->get_tensor("layers.0.self_attn.q_proj.weight_g_idx");
     ASSERT_NE(reordered_g_idx, nullptr);
-    const auto *perm = reinterpret_cast<const int32_t *>(reordered_g_idx->data());
+    const auto* perm = reinterpret_cast<const int32_t*>(reordered_g_idx->data());
     const std::vector<int32_t> expected_perm = {1, 3, 6, 2, 5, 0, 4, 7};
-    for (size_t i = 0; i < expected_perm.size(); ++i) {
-        EXPECT_EQ(perm[i], expected_perm[i]);
-    }
+    for (size_t i = 0; i < expected_perm.size(); ++i) { EXPECT_EQ(perm[i], expected_perm[i]); }
 
     auto reordered_weight = weights->get_tensor("layers.0.self_attn.q_proj.weight_packed");
     const auto unpacked = unpack_4bit_tensor_row(reordered_weight);
@@ -262,19 +243,10 @@ TEST(QuantizedWeightsTest, LinearQuantizedRunsCpuInt8Fallback) {
     auto bias = Tensor::create({2}, ZEDINFER_DTYPE_F32, ZEDINFER_DEVICE_CPU);
     auto scale = Tensor::create({2, 2}, ZEDINFER_DTYPE_F32, ZEDINFER_DEVICE_CPU);
 
-    const std::vector<float> input_values = {
-        1.0f, 2.0f, 3.0f, 4.0f,
-        2.0f, 0.0f, -1.0f, 1.0f
-    };
-    const std::vector<int8_t> weight_values = {
-        1, 2, 3, 4,
-        -1, 0, 1, 2
-    };
+    const std::vector<float> input_values = {1.0f, 2.0f, 3.0f, 4.0f, 2.0f, 0.0f, -1.0f, 1.0f};
+    const std::vector<int8_t> weight_values = {1, 2, 3, 4, -1, 0, 1, 2};
     const std::vector<float> bias_values = {1.0f, -1.0f};
-    const std::vector<float> scale_values = {
-        0.5f, 1.0f,
-        1.0f, 0.25f
-    };
+    const std::vector<float> scale_values = {0.5f, 1.0f, 1.0f, 0.25f};
 
     std::memcpy(in->data(), input_values.data(), input_values.size() * sizeof(float));
     std::memcpy(weight->data(), weight_values.data(), weight_values.size() * sizeof(int8_t));
@@ -283,7 +255,7 @@ TEST(QuantizedWeightsTest, LinearQuantizedRunsCpuInt8Fallback) {
 
     ops::linear_quantized(out, in, weight, bias, scale, nullptr, 8, 2);
 
-    const auto *out_values = reinterpret_cast<const float *>(out->data());
+    const auto* out_values = reinterpret_cast<const float*>(out->data());
     EXPECT_FLOAT_EQ(out_values[0], 28.5f);
     EXPECT_FLOAT_EQ(out_values[1], 0.75f);
     EXPECT_FLOAT_EQ(out_values[2], 3.0f);
@@ -297,10 +269,7 @@ TEST(QuantizedWeightsTest, LinearQuantizedRunsCpuInt4Fallback) {
     auto bias = Tensor::create({1}, ZEDINFER_DTYPE_F32, ZEDINFER_DEVICE_CPU);
     auto scale = Tensor::create({1}, ZEDINFER_DTYPE_F32, ZEDINFER_DEVICE_CPU);
 
-    const std::vector<float> input_values = {
-        1.0f, 2.0f, 3.0f, 4.0f,
-        1.0f, 1.0f, 1.0f, 1.0f
-    };
+    const std::vector<float> input_values = {1.0f, 2.0f, 3.0f, 4.0f, 1.0f, 1.0f, 1.0f, 1.0f};
     const int32_t packed_weight = 0x99999999;
     const float bias_value = 1.0f;
     const float scale_value = 2.0f;
@@ -312,7 +281,7 @@ TEST(QuantizedWeightsTest, LinearQuantizedRunsCpuInt4Fallback) {
 
     ops::linear_quantized(out, in, weight, bias, scale, nullptr, 4, 8);
 
-    const auto *out_values = reinterpret_cast<const float *>(out->data());
+    const auto* out_values = reinterpret_cast<const float*>(out->data());
     EXPECT_FLOAT_EQ(out_values[0], 29.0f);
 }
 
@@ -325,11 +294,9 @@ TEST(QuantizedWeightsTest, LinearQuantizedPermutesActOrderInputAtRuntime) {
     std::vector<int32_t> g_idx = {2, 0, 1, 0, 2, 1, 0, 2};
     std::vector<float> scales = {1.0f};
 
-    write_safetensors(dir, {
-        {"model.layers.0.self_attn.q_proj.weight_packed", "I32", {1, 1}, to_bytes(packed)},
-        {"model.layers.0.self_attn.q_proj.weight_g_idx", "I32", {8}, to_bytes(g_idx)},
-        {"model.layers.0.self_attn.q_proj.weight_scale", "F32", {1}, to_bytes(scales)}
-    });
+    write_safetensors(dir, {{"model.layers.0.self_attn.q_proj.weight_packed", "I32", {1, 1}, to_bytes(packed)},
+                            {"model.layers.0.self_attn.q_proj.weight_g_idx", "I32", {8}, to_bytes(g_idx)},
+                            {"model.layers.0.self_attn.q_proj.weight_scale", "F32", {1}, to_bytes(scales)}});
 
     auto config = Model::load_config((dir / "config.json").string());
     auto weights = Model::load_weights(dir.string(), ZEDINFER_DEVICE_CPU, *config);
@@ -339,13 +306,10 @@ TEST(QuantizedWeightsTest, LinearQuantizedPermutesActOrderInputAtRuntime) {
     auto output = Tensor::create({1, 1}, ZEDINFER_DTYPE_F32, ZEDINFER_DEVICE_CPU);
     auto expected = Tensor::create({1, 1}, ZEDINFER_DTYPE_F32, ZEDINFER_DEVICE_CPU);
 
-    const std::vector<float> input_values = {
-        1.0f, 2.0f, 3.0f, 4.0f,
-        5.0f, 6.0f, 7.0f, 8.0f
-    };
-    const auto *perm = reinterpret_cast<const int32_t *>(
-        weights->get_tensor("layers.0.self_attn.q_proj.weight_g_idx")->data());
-    auto *permuted_values = reinterpret_cast<float *>(permuted_input->data());
+    const std::vector<float> input_values = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f};
+    const auto* perm
+        = reinterpret_cast<const int32_t*>(weights->get_tensor("layers.0.self_attn.q_proj.weight_g_idx")->data());
+    auto* permuted_values = reinterpret_cast<float*>(permuted_input->data());
 
     std::memcpy(input->data(), input_values.data(), input_values.size() * sizeof(float));
     for (size_t i = 0; i < input_values.size(); ++i) {
@@ -359,7 +323,7 @@ TEST(QuantizedWeightsTest, LinearQuantizedPermutesActOrderInputAtRuntime) {
     ops::linear_quantized(output, input, weight, nullptr, scale, reordered_g_idx, 4, 8);
     ops::linear_quantized(expected, permuted_input, weight, nullptr, scale, nullptr, 4, 8);
 
-    const auto *output_value = reinterpret_cast<const float *>(output->data());
-    const auto *expected_value = reinterpret_cast<const float *>(expected->data());
+    const auto* output_value = reinterpret_cast<const float*>(output->data());
+    const auto* expected_value = reinterpret_cast<const float*>(expected->data());
     EXPECT_FLOAT_EQ(output_value[0], expected_value[0]);
 }
