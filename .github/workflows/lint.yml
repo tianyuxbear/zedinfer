@@ -1,0 +1,37 @@
+name: Lint
+
+on:
+  push:
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  clang-format:
+    name: C++ (clang-format)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install clang-format
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format-18
+
+      - name: Check formatting
+        run: |
+          find include/ src/ examples/ tests/ \
+            -name '*.cpp' -o -name '*.hpp' -o -name '*.c' -o -name '*.h' -o -name '*.cu' -o -name '*.cuh' \
+            | xargs clang-format-18 --dry-run --Werror
+
+  ruff:
+    name: Python (ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/ruff-action@v3
+        with:
+          src: "./python"
+          args: "check"
+          config: "python/pyproject.toml"
