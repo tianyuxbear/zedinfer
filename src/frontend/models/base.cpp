@@ -8,6 +8,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <nlohmann/json.hpp>
 #include <plog/Log.h>
 #include <string>
@@ -24,7 +25,7 @@ std::shared_ptr<Model> Model::parse(const std::string& model_path, zedinferDevic
     auto config = load_config(config_path);
 
     // Load model weights from SafeTensors files
-    auto weights = load_weights(model_path, target_device);
+    auto weights = load_weights(model_path, target_device, *config);
 
     if (target_device == ZEDINFER_DEVICE_CPU) {
         config->torch_dtype = "float32";
@@ -130,16 +131,21 @@ std::unique_ptr<ModelConfig> Model::load_config(const std::string& config_path) 
 }
 
 // Load model weights using memory-mapped SafeTensors.
-std::unique_ptr<ModelWeights> Model::load_weights(const std::string& model_path, zedinferDeviceType_t target_device) {
+std::unique_ptr<ModelWeights> Model::load_weights(const std::string& model_path,
+                                                  zedinferDeviceType_t target_device,
+                                                  const ModelConfig& config) {
+    (void)config;
     auto load_start = std::chrono::high_resolution_clock::now();
 
-    auto loader = zedinfer::loader::SafeTensorsLoader::create(model_path);
+    auto loader_unique = zedinfer::loader::SafeTensorsLoader::create(model_path);
+    std::shared_ptr<zedinfer::loader::IModelLoader> loader(std::move(loader_unique));
 
     auto mmap_end = std::chrono::high_resolution_clock::now();
     auto mmap_time = std::chrono::duration<double>(mmap_end - load_start).count();
     LOGI.printf("⏱️  Mmap time: %.4fs", mmap_time);
 
     auto weights = std::make_unique<ModelWeights>();
+    weights->retain_resource(loader);
 
     size_t converted_count = 0;
     auto convert_start = std::chrono::high_resolution_clock::now();
