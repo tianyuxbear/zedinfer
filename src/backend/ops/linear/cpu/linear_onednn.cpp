@@ -12,12 +12,12 @@
 
 namespace zedinfer::ops::cpu::onednn {
 
-static dnnl::engine &engine() {
+static dnnl::engine& engine() {
     static dnnl::engine eng(dnnl::engine::kind::cpu, 0);
     return eng;
 }
 
-static dnnl::stream &stream() {
+static dnnl::stream& stream() {
     static dnnl::stream strm(engine());
     return strm;
 }
@@ -28,13 +28,13 @@ struct PrimKey {
     dnnl::memory::data_type dt;
     bool has_bias;
 
-    bool operator==(const PrimKey &o) const {
+    bool operator==(const PrimKey& o) const {
         return M == o.M && N == o.N && K == o.K && dt == o.dt && has_bias == o.has_bias;
     }
 };
 
 struct PrimKeyHash {
-    size_t operator()(const PrimKey &k) const {
+    size_t operator()(const PrimKey& k) const {
         size_t h = std::hash<size_t>()(k.M);
         h ^= std::hash<size_t>()(k.N) << 1;
         h ^= std::hash<size_t>()(k.K) << 2;
@@ -53,22 +53,18 @@ static std::unordered_map<PrimKey, CachedMatmul, PrimKeyHash> cache;
 static std::mutex cache_mutex;
 
 // Try to create a matmul primitive. Returns false if the dtype combo is unsupported.
-static bool try_create(CachedMatmul &out, size_t M, size_t N, size_t K,
-                       dnnl::memory::data_type dt, bool has_bias) {
-    auto &eng = engine();
+static bool try_create(CachedMatmul& out, size_t M, size_t N, size_t K, dnnl::memory::data_type dt, bool has_bias) {
+    auto& eng = engine();
 
-    auto a_md = dnnl::memory::desc(
-        {static_cast<dnnl::memory::dim>(M), static_cast<dnnl::memory::dim>(K)},
-        dt, dnnl::memory::format_tag::ab);
+    auto a_md = dnnl::memory::desc({static_cast<dnnl::memory::dim>(M), static_cast<dnnl::memory::dim>(K)}, dt,
+                                   dnnl::memory::format_tag::ab);
 
     // B stored as [N,K] row-major -> describe as [K,N] transposed
-    auto b_md = dnnl::memory::desc(
-        {static_cast<dnnl::memory::dim>(K), static_cast<dnnl::memory::dim>(N)},
-        dt, {static_cast<dnnl::memory::dim>(1), static_cast<dnnl::memory::dim>(K)});
+    auto b_md = dnnl::memory::desc({static_cast<dnnl::memory::dim>(K), static_cast<dnnl::memory::dim>(N)}, dt,
+                                   {static_cast<dnnl::memory::dim>(1), static_cast<dnnl::memory::dim>(K)});
 
-    auto c_md = dnnl::memory::desc(
-        {static_cast<dnnl::memory::dim>(M), static_cast<dnnl::memory::dim>(N)},
-        dt, dnnl::memory::format_tag::ab);
+    auto c_md = dnnl::memory::desc({static_cast<dnnl::memory::dim>(M), static_cast<dnnl::memory::dim>(N)}, dt,
+                                   dnnl::memory::format_tag::ab);
 
     out.a_md = a_md;
     out.b_md = b_md;
@@ -76,9 +72,7 @@ static bool try_create(CachedMatmul &out, size_t M, size_t N, size_t K,
 
     try {
         if (has_bias) {
-            out.bias_md = dnnl::memory::desc(
-                {1, static_cast<dnnl::memory::dim>(N)},
-                dt, dnnl::memory::format_tag::ab);
+            out.bias_md = dnnl::memory::desc({1, static_cast<dnnl::memory::dim>(N)}, dt, dnnl::memory::format_tag::ab);
             auto pd = dnnl::matmul::primitive_desc(eng, a_md, b_md, out.bias_md, c_md);
             out.prim = dnnl::matmul(pd);
         } else {
@@ -86,13 +80,10 @@ static bool try_create(CachedMatmul &out, size_t M, size_t N, size_t K,
             out.prim = dnnl::matmul(pd);
         }
         return true;
-    } catch (const dnnl::error &) {
-        return false;
-    }
+    } catch (const dnnl::error&) { return false; }
 }
 
-static CachedMatmul &get_or_create(size_t M, size_t N, size_t K,
-                                    dnnl::memory::data_type dt, bool has_bias) {
+static CachedMatmul& get_or_create(size_t M, size_t N, size_t K, dnnl::memory::data_type dt, bool has_bias) {
     PrimKey key{M, N, K, dt, has_bias};
 
     std::lock_guard<std::mutex> lock(cache_mutex);
@@ -110,48 +101,42 @@ static CachedMatmul &get_or_create(size_t M, size_t N, size_t K,
     return inserted->second;
 }
 
-static void exec_matmul(CachedMatmul &cached, std::byte *output,
-                        const std::byte *input, const std::byte *weight,
-                        const std::byte *bias) {
-    auto &eng = engine();
-    auto &strm = stream();
+static void exec_matmul(CachedMatmul& cached, std::byte* output, const std::byte* input, const std::byte* weight,
+                        const std::byte* bias) {
+    auto& eng = engine();
+    auto& strm = stream();
 
-    auto a_mem = dnnl::memory(cached.a_md, eng, const_cast<std::byte *>(input));
-    auto b_mem = dnnl::memory(cached.b_md, eng, const_cast<std::byte *>(weight));
+    auto a_mem = dnnl::memory(cached.a_md, eng, const_cast<std::byte*>(input));
+    auto b_mem = dnnl::memory(cached.b_md, eng, const_cast<std::byte*>(weight));
     auto c_mem = dnnl::memory(cached.c_md, eng, output);
 
     if (bias) {
-        auto bias_mem = dnnl::memory(cached.bias_md, eng, const_cast<std::byte *>(bias));
-        cached.prim.execute(strm, {
-            {DNNL_ARG_SRC, a_mem}, {DNNL_ARG_WEIGHTS, b_mem},
-            {DNNL_ARG_BIAS, bias_mem}, {DNNL_ARG_DST, c_mem}
-        });
+        auto bias_mem = dnnl::memory(cached.bias_md, eng, const_cast<std::byte*>(bias));
+        cached.prim.execute(
+            strm, {{DNNL_ARG_SRC, a_mem}, {DNNL_ARG_WEIGHTS, b_mem}, {DNNL_ARG_BIAS, bias_mem}, {DNNL_ARG_DST, c_mem}});
     } else {
-        cached.prim.execute(strm, {
-            {DNNL_ARG_SRC, a_mem}, {DNNL_ARG_WEIGHTS, b_mem}, {DNNL_ARG_DST, c_mem}
-        });
+        cached.prim.execute(strm, {{DNNL_ARG_SRC, a_mem}, {DNNL_ARG_WEIGHTS, b_mem}, {DNNL_ARG_DST, c_mem}});
     }
     strm.wait();
 }
 
 // Fallback for unsupported dtypes (FP16/BF16 on AVX2):
 // convert to FP32, run FP32 matmul via oneDNN, convert back.
-static void linear_via_fp32(std::byte *output, const std::byte *input,
-                             const std::byte *weight, const std::byte *bias,
-                             zedinferDataType_t type, size_t M, size_t N, size_t K) {
+static void linear_via_fp32(std::byte* output, const std::byte* input, const std::byte* weight, const std::byte* bias,
+                            zedinferDataType_t type, size_t M, size_t N, size_t K) {
     // Helpers for type-dispatched conversion
-    auto to_f32 = [&](float *dst, const std::byte *src, size_t count) {
+    auto to_f32 = [&](float* dst, const std::byte* src, size_t count) {
         if (type == ZEDINFER_DTYPE_F16) {
-            zedinfer::utils::fp16_to_fp32_batch_f16c(dst, reinterpret_cast<const zedinfer::fp16_t *>(src), count);
+            zedinfer::utils::fp16_to_fp32_batch_f16c(dst, reinterpret_cast<const zedinfer::fp16_t*>(src), count);
         } else { // BF16
-            zedinfer::utils::bf16_to_fp32_batch(dst, reinterpret_cast<const zedinfer::bf16_t *>(src), count);
+            zedinfer::utils::bf16_to_fp32_batch(dst, reinterpret_cast<const zedinfer::bf16_t*>(src), count);
         }
     };
-    auto from_f32 = [&](std::byte *dst, const float *src, size_t count) {
+    auto from_f32 = [&](std::byte* dst, const float* src, size_t count) {
         if (type == ZEDINFER_DTYPE_F16) {
-            zedinfer::utils::fp32_to_fp16_batch_f16c(reinterpret_cast<zedinfer::fp16_t *>(dst), src, count);
+            zedinfer::utils::fp32_to_fp16_batch_f16c(reinterpret_cast<zedinfer::fp16_t*>(dst), src, count);
         } else { // BF16
-            zedinfer::utils::fp32_to_bf16_batch(reinterpret_cast<zedinfer::bf16_t *>(dst), src, count);
+            zedinfer::utils::fp32_to_bf16_batch(reinterpret_cast<zedinfer::bf16_t*>(dst), src, count);
         }
     };
 
@@ -161,31 +146,36 @@ static void linear_via_fp32(std::byte *output, const std::byte *input,
     to_f32(w_f32.data(), weight, N * K);
 
     std::vector<float> bias_f32;
-    const std::byte *bias_ptr = nullptr;
+    const std::byte* bias_ptr = nullptr;
     if (bias) {
         bias_f32.resize(N);
         to_f32(bias_f32.data(), bias, N);
-        bias_ptr = reinterpret_cast<const std::byte *>(bias_f32.data());
+        bias_ptr = reinterpret_cast<const std::byte*>(bias_f32.data());
     }
 
     std::vector<float> out_f32(M * N);
-    auto &cached = get_or_create(M, N, K, dnnl::memory::data_type::f32, bias != nullptr);
-    exec_matmul(cached, reinterpret_cast<std::byte *>(out_f32.data()),
-                reinterpret_cast<const std::byte *>(in_f32.data()),
-                reinterpret_cast<const std::byte *>(w_f32.data()), bias_ptr);
+    auto& cached = get_or_create(M, N, K, dnnl::memory::data_type::f32, bias != nullptr);
+    exec_matmul(cached, reinterpret_cast<std::byte*>(out_f32.data()), reinterpret_cast<const std::byte*>(in_f32.data()),
+                reinterpret_cast<const std::byte*>(w_f32.data()), bias_ptr);
 
     from_f32(output, out_f32.data(), M * N);
 }
 
-void linear(std::byte *output, const std::byte *input, const std::byte *weight,
-            const std::byte *bias, zedinferDataType_t type, size_t M, size_t N, size_t K) {
-
+void linear(std::byte* output, const std::byte* input, const std::byte* weight, const std::byte* bias,
+            zedinferDataType_t type, size_t M, size_t N, size_t K) {
     dnnl::memory::data_type dt;
     switch (type) {
-    case ZEDINFER_DTYPE_F32: dt = dnnl::memory::data_type::f32; break;
-    case ZEDINFER_DTYPE_BF16: dt = dnnl::memory::data_type::bf16; break;
-    case ZEDINFER_DTYPE_F16: dt = dnnl::memory::data_type::f16; break;
-    default: throw std::runtime_error("Unsupported dtype for oneDNN linear");
+        case ZEDINFER_DTYPE_F32:
+            dt = dnnl::memory::data_type::f32;
+            break;
+        case ZEDINFER_DTYPE_BF16:
+            dt = dnnl::memory::data_type::bf16;
+            break;
+        case ZEDINFER_DTYPE_F16:
+            dt = dnnl::memory::data_type::f16;
+            break;
+        default:
+            throw std::runtime_error("Unsupported dtype for oneDNN linear");
     }
 
     bool has_bias = (bias != nullptr);

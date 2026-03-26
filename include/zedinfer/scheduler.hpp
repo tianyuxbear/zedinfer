@@ -20,7 +20,7 @@ namespace kvcache {
 class KVCache;
 class BlockAllocator;
 class PrefixCache;
-}
+} // namespace kvcache
 namespace sampler {
 class Sampler;
 }
@@ -55,10 +55,10 @@ public:
     explicit Scheduler(SchedulerConfig config = {});
 
     // Set block allocator for batched mode (called after engine creates block pool)
-    void set_block_allocator(kvcache::BlockAllocator *allocator);
+    void set_block_allocator(kvcache::BlockAllocator* allocator);
 
     // Set prefix cache (optional, enables prefix sharing across requests)
-    void set_prefix_cache(kvcache::PrefixCache *cache);
+    void set_prefix_cache(kvcache::PrefixCache* cache);
 
     /**
      * Submit a new request. Thread-safe (can be called from HTTP threads).
@@ -83,17 +83,13 @@ public:
      * Process results after model forward.
      * Samples tokens, advances state, completes finished requests.
      */
-    void process_results(
-        ScheduledBatch &batch,
-        tensor_t logits,
-        sampler::Sampler &sampler,
-        tokenizer::Tokenizer &tokenizer,
-        const std::vector<int> &stop_token_ids);
+    void process_results(ScheduledBatch& batch, tensor_t logits, sampler::Sampler& sampler,
+                         tokenizer::Tokenizer& tokenizer, const std::vector<int>& stop_token_ids);
 
 private:
     SchedulerConfig config_;
-    kvcache::BlockAllocator *block_allocator_ = nullptr;
-    kvcache::PrefixCache *prefix_cache_ = nullptr;
+    kvcache::BlockAllocator* block_allocator_ = nullptr;
+    kvcache::PrefixCache* prefix_cache_ = nullptr;
     std::mutex submit_mutex_;
 
     std::deque<std::unique_ptr<InferenceRequest>> waiting_queue_;
@@ -101,9 +97,9 @@ private:
 
     uint64_t next_request_id_ = 1;
 
-    bool can_admit(const InferenceRequest &req) const;
-    void allocate_blocks_for_request(InferenceRequest *req);
-    void complete_request(InferenceRequest &req);
+    bool can_admit(const InferenceRequest& req) const;
+    void allocate_blocks_for_request(InferenceRequest* req);
+    void complete_request(InferenceRequest& req);
 };
 
 } // namespace zedinfer

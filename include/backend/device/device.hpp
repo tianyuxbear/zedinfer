@@ -15,42 +15,35 @@ public:
 
     Device() : type_(ZEDINFER_DEVICE_CPU), id_(0) {}
 
-    Device(zedinferDeviceType_t type, int id)
-        : type_(type), id_(id) {
-        validate();
-    }
+    Device(zedinferDeviceType_t type, int id) : type_(type), id_(id) { validate(); }
 
-    Device(const Device &) = default;
+    Device(const Device&) = default;
 
     zedinferDeviceType_t type() const { return type_; }
     int id() const { return id_; }
 
-    bool operator==(const Device &other) const {
-        return type_ == other.type_ && id_ == other.id_;
-    }
+    bool operator==(const Device& other) const { return type_ == other.type_ && id_ == other.id_; }
 
-    bool operator!=(const Device &other) const {
-        return !(*this == other);
-    }
+    bool operator!=(const Device& other) const { return !(*this == other); }
 
     struct Hash {
-        size_t operator()(const Device &dev) const {
+        size_t operator()(const Device& dev) const {
             return std::hash<int>()(static_cast<int>(dev.type_)) ^ (std::hash<int>()(dev.id_) << 1);
         }
     };
 
     std::string toString() const {
-        const char *type_str = nullptr;
+        const char* type_str = nullptr;
         switch (type_) {
-        case ZEDINFER_DEVICE_CPU:
-            type_str = "cpu";
-            break;
-        case ZEDINFER_DEVICE_NVIDIA:
-            type_str = "nvidia";
-            break;
-        default:
-            type_str = "unknown";
-            break;
+            case ZEDINFER_DEVICE_CPU:
+                type_str = "cpu";
+                break;
+            case ZEDINFER_DEVICE_NVIDIA:
+                type_str = "nvidia";
+                break;
+            default:
+                type_str = "unknown";
+                break;
         }
         return std::string(type_str) + ":" + std::to_string(id_);
     }

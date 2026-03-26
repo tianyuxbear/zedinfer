@@ -24,9 +24,8 @@ void Context::setDevice(zedinferDeviceType_t device_type, int device_id) {
             auto runtime = Runtime::create(device_type, device_id);
             current_runtime_ = runtime.get();
             runtime_map_[device] = std::move(runtime);
-        } catch (const std::exception &e) {
-            throw std::runtime_error(
-                "Failed to create runtime for " + device.toString() + ": " + e.what());
+        } catch (const std::exception& e) {
+            throw std::runtime_error("Failed to create runtime for " + device.toString() + ": " + e.what());
         }
     } else {
         current_runtime_ = it->second.get();
@@ -37,9 +36,8 @@ void Context::setDevice(zedinferDeviceType_t device_type, int device_id) {
     }
 }
 
-Runtime &Context::runtime() {
-    ASSERT(current_runtime_ != nullptr,
-           "No runtime is activated; call setDevice() first.");
+Runtime& Context::runtime() {
+    ASSERT(current_runtime_ != nullptr, "No runtime is activated; call setDevice() first.");
     return *current_runtime_;
 }
 
@@ -49,7 +47,7 @@ void Context::reset() {
 }
 
 // Returns the thread-local Context instance.
-Context &context() {
+Context& context() {
     thread_local Context thread_context;
     return thread_context;
 }

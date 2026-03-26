@@ -16,6 +16,6 @@ void swiglu(tensor_t out, tensor_t gate, tensor_t up);
 
 // Unified attention dispatch.
 // Mode determined by AttentionParams fields — see attention_params.hpp.
-void attention(const AttentionParams &params);
+void attention(const AttentionParams& params);
 
 } // namespace zedinfer::ops

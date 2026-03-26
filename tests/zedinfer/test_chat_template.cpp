@@ -20,7 +20,7 @@ TEST(ChatTemplateTest, DeepSeekR1Defaults) {
 
 TEST(ChatTemplateTest, QwenChatMLDefaults) {
     auto t = ChatTemplate::default_qwen_chatml();
-    EXPECT_TRUE(t.bos_token.empty()); // ChatML format has no BOS token
+    EXPECT_TRUE(t.bos_token.empty());      // ChatML format has no BOS token
     EXPECT_FALSE(t.user_prefix.empty());
     EXPECT_FALSE(t.system_prefix.empty()); // ChatML has system support
 }
@@ -31,9 +31,7 @@ TEST(ChatTemplateTest, QwenChatMLDefaults) {
 
 TEST(ChatTemplateTest, SingleUserMessage) {
     auto t = ChatTemplate::default_deepseek_r1();
-    std::vector<std::pair<std::string, std::string>> messages = {
-        {"user", "Hello"}
-    };
+    std::vector<std::pair<std::string, std::string>> messages = {{"user", "Hello"}};
     std::string result = t.apply(messages, true);
 
     EXPECT_NE(result.find(t.bos_token), std::string::npos) << "Should contain BOS";
@@ -43,11 +41,8 @@ TEST(ChatTemplateTest, SingleUserMessage) {
 
 TEST(ChatTemplateTest, MultiTurnConversation) {
     auto t = ChatTemplate::default_deepseek_r1();
-    std::vector<std::pair<std::string, std::string>> messages = {
-        {"user", "Hi"},
-        {"assistant", "Hello! How can I help?"},
-        {"user", "What is 2+2?"}
-    };
+    std::vector<std::pair<std::string, std::string>> messages
+        = {{"user", "Hi"}, {"assistant", "Hello! How can I help?"}, {"user", "What is 2+2?"}};
     std::string result = t.apply(messages, true);
 
     EXPECT_NE(result.find("Hi"), std::string::npos);
@@ -57,10 +52,8 @@ TEST(ChatTemplateTest, MultiTurnConversation) {
 
 TEST(ChatTemplateTest, SystemMessage) {
     auto t = ChatTemplate::default_deepseek_r1();
-    std::vector<std::pair<std::string, std::string>> messages = {
-        {"system", "You are a helpful assistant."},
-        {"user", "Hi"}
-    };
+    std::vector<std::pair<std::string, std::string>> messages
+        = {{"system", "You are a helpful assistant."}, {"user", "Hi"}};
     std::string result = t.apply(messages, true);
 
     EXPECT_NE(result.find("You are a helpful assistant."), std::string::npos);
@@ -69,9 +62,7 @@ TEST(ChatTemplateTest, SystemMessage) {
 
 TEST(ChatTemplateTest, NoGenerationPrompt) {
     auto t = ChatTemplate::default_deepseek_r1();
-    std::vector<std::pair<std::string, std::string>> messages = {
-        {"user", "Hello"}
-    };
+    std::vector<std::pair<std::string, std::string>> messages = {{"user", "Hello"}};
     std::string with_prompt = t.apply(messages, true);
     std::string without_prompt = t.apply(messages, false);
 
@@ -95,11 +86,8 @@ TEST(ChatTemplateTest, EmptyMessages) {
 
 TEST(ChatTemplateTest, BOSOnlyOnce) {
     auto t = ChatTemplate::default_deepseek_r1();
-    std::vector<std::pair<std::string, std::string>> messages = {
-        {"user", "Hello"},
-        {"assistant", "Hi"},
-        {"user", "Bye"}
-    };
+    std::vector<std::pair<std::string, std::string>> messages
+        = {{"user", "Hello"}, {"assistant", "Hi"}, {"user", "Bye"}};
     std::string result = t.apply(messages, true);
 
     // BOS should appear at least once
@@ -113,10 +101,7 @@ TEST(ChatTemplateTest, BOSOnlyOnce) {
 
 TEST(ChatTemplateTest, QwenChatMLSystemFormat) {
     auto t = ChatTemplate::default_qwen_chatml();
-    std::vector<std::pair<std::string, std::string>> messages = {
-        {"system", "You are helpful."},
-        {"user", "Hi"}
-    };
+    std::vector<std::pair<std::string, std::string>> messages = {{"system", "You are helpful."}, {"user", "Hi"}};
     std::string result = t.apply(messages, true);
 
     // ChatML system uses <|im_start|>system\n...<|im_end|>\n

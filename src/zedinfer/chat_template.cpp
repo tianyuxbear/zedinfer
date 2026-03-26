@@ -13,63 +13,70 @@ namespace zedinfer {
 
 // DeepSeek-R1 uses fullwidth Unicode delimiters in special token names.
 // U+FF5C (fullwidth vertical line) and U+2581 (lower one eighth block).
-static const std::string DS_SEP = "\xef\xbd\x9c";   // ｜
-static const std::string DS_MID = "\xe2\x96\x81";    // ▁
+static const std::string DS_SEP = "\xef\xbd\x9c"; // ｜
+static const std::string DS_MID = "\xe2\x96\x81"; // ▁
 
-static std::string ds_token(const std::string &name) {
+static std::string ds_token(const std::string& name) {
     return "<" + DS_SEP + name + DS_SEP + ">";
 }
 
-static std::string ds_sentence_token(const std::string &action) {
+static std::string ds_sentence_token(const std::string& action) {
     return "<" + DS_SEP + action + DS_MID + "of" + DS_MID + "sentence" + DS_SEP + ">";
 }
 
 ChatTemplate ChatTemplate::default_deepseek_r1() {
     ChatTemplate t;
-    t.bos_token            = ds_sentence_token("begin");
-    t.eos_token            = ds_sentence_token("end");
-    t.user_prefix          = ds_token("User");
-    t.user_suffix          = "";
-    t.assistant_prefix     = ds_token("Assistant");
-    t.assistant_suffix     = ds_sentence_token("end");
-    t.generation_prompt    = ds_token("Assistant") + "<think>\n";
-    t.output_prefix        = "<think> ";
-    t.system_prefix        = "";
-    t.system_suffix        = "";
+    t.bos_token = ds_sentence_token("begin");
+    t.eos_token = ds_sentence_token("end");
+    t.user_prefix = ds_token("User");
+    t.user_suffix = "";
+    t.assistant_prefix = ds_token("Assistant");
+    t.assistant_suffix = ds_sentence_token("end");
+    t.generation_prompt = ds_token("Assistant") + "<think>\n";
+    t.output_prefix = "<think> ";
+    t.system_prefix = "";
+    t.system_suffix = "";
     t.add_bos_first_turn_only = true;
     return t;
 }
 
 ChatTemplate ChatTemplate::default_qwen_chatml() {
     ChatTemplate t;
-    t.bos_token            = "";
-    t.eos_token            = "<|im_end|>";
-    t.user_prefix          = "<|im_start|>user\n";
-    t.user_suffix          = "<|im_end|>\n";
-    t.assistant_prefix     = "<|im_start|>assistant\n";
-    t.assistant_suffix     = "<|im_end|>\n";
-    t.generation_prompt    = "<|im_start|>assistant\n";
-    t.output_prefix        = "";
-    t.system_prefix        = "<|im_start|>system\n";
-    t.system_suffix        = "<|im_end|>\n";
+    t.bos_token = "";
+    t.eos_token = "<|im_end|>";
+    t.user_prefix = "<|im_start|>user\n";
+    t.user_suffix = "<|im_end|>\n";
+    t.assistant_prefix = "<|im_start|>assistant\n";
+    t.assistant_suffix = "<|im_end|>\n";
+    t.generation_prompt = "<|im_start|>assistant\n";
+    t.output_prefix = "";
+    t.system_prefix = "<|im_start|>system\n";
+    t.system_suffix = "<|im_end|>\n";
     t.add_bos_first_turn_only = false;
     return t;
 }
 
 // Extract token string from either a plain string or AddedToken object {"content": "..."}
-static std::string extract_token_string(const json &j, const std::string &key) {
-    if (!j.contains(key)) return "";
-    const auto &val = j[key];
-    if (val.is_string()) return val.get<std::string>();
-    if (val.is_object() && val.contains("content"))
+static std::string extract_token_string(const json& j, const std::string& key) {
+    if (!j.contains(key)) {
+        return "";
+    }
+    const auto& val = j[key];
+    if (val.is_string()) {
+        return val.get<std::string>();
+    }
+    if (val.is_object() && val.contains("content")) {
         return val["content"].get<std::string>();
+    }
     return "";
 }
 
 // Detect DeepSeek-R1 format by checking if eos_token contains the fullwidth delimiter.
-static bool is_deepseek_r1_format(const std::string &model_path) {
+static bool is_deepseek_r1_format(const std::string& model_path) {
     fs::path tc_path = fs::path(model_path) / "tokenizer_config.json";
-    if (!fs::exists(tc_path)) return false;
+    if (!fs::exists(tc_path)) {
+        return false;
+    }
 
     try {
         std::ifstream file(tc_path);
@@ -83,8 +90,7 @@ static bool is_deepseek_r1_format(const std::string &model_path) {
     return false;
 }
 
-ChatTemplate ChatTemplate::load(const std::string &model_path,
-                                const std::string &model_type) {
+ChatTemplate ChatTemplate::load(const std::string& model_path, const std::string& model_type) {
     // Try optional chat_template.json override
     fs::path override_path = fs::path(model_path) / "chat_template.json";
     if (fs::exists(override_path)) {
@@ -108,9 +114,9 @@ ChatTemplate ChatTemplate::load(const std::string &model_path,
 
             LOGI << "[ChatTemplate] Loaded from " << override_path.string();
             return t;
-        } catch (const std::exception &e) {
-            LOGW << "[ChatTemplate] Failed to parse " << override_path.string()
-                 << ": " << e.what() << "; falling back to model-type default";
+        } catch (const std::exception& e) {
+            LOGW << "[ChatTemplate] Failed to parse " << override_path.string() << ": " << e.what()
+                 << "; falling back to model-type default";
         }
     }
 
@@ -124,15 +130,12 @@ ChatTemplate ChatTemplate::load(const std::string &model_path,
         return default_qwen_chatml();
     }
 
-    LOGW << "[ChatTemplate] Unknown model_type=" << model_type
-         << "; using ChatML template as fallback";
+    LOGW << "[ChatTemplate] Unknown model_type=" << model_type << "; using ChatML template as fallback";
     return default_qwen_chatml();
 }
 
-std::string ChatTemplate::apply(
-    const std::vector<std::pair<std::string, std::string>> &messages,
-    bool add_generation_prompt) const {
-
+std::string ChatTemplate::apply(const std::vector<std::pair<std::string, std::string>>& messages,
+                                bool add_generation_prompt) const {
     std::string result;
 
     // BOS token: always prepend once. add_bos_first_turn_only is irrelevant here
@@ -142,7 +145,7 @@ std::string ChatTemplate::apply(
         result += bos_token;
     }
 
-    for (const auto &[role, content] : messages) {
+    for (const auto& [role, content] : messages) {
         if (role == "system") {
             if (!system_prefix.empty()) {
                 result += system_prefix + content + system_suffix;

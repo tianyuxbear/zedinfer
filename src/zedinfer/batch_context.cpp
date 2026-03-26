@@ -4,7 +4,7 @@ namespace zedinfer {
 
 int ScheduledBatch::total_tokens() const {
     int total = static_cast<int>(decode_requests.size()); // 1 token per decode
-    for (int cs : prefill_chunk_sizes) total += cs;
+    for (int cs : prefill_chunk_sizes) { total += cs; }
     return total;
 }
 
@@ -18,7 +18,7 @@ BatchContext ScheduledBatch::build_context() const {
 
     // Decode slots first (decode-first policy)
     ctx.decode_token_offset = 0;
-    for (auto *req : decode_requests) {
+    for (auto* req : decode_requests) {
         // Each decode request contributes 1 token (last_token)
         ctx.token_ids.push_back(req->last_token);
         ctx.position_ids.push_back(req->block_table().seq_len); // position = current kv length
@@ -43,7 +43,7 @@ BatchContext ScheduledBatch::build_context() const {
 
     // Prefill slots after decode
     for (size_t i = 0; i < prefill_requests.size(); ++i) {
-        auto *req = prefill_requests[i];
+        auto* req = prefill_requests[i];
         int chunk_start = prefill_chunk_starts[i];
         int chunk_size = prefill_chunk_sizes[i];
 

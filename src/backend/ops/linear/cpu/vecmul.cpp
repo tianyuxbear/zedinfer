@@ -8,15 +8,13 @@
 #include <immintrin.h>
 #include <omp.h>
 
-void vecmul(const float *a, const float *B, float *c, int N, int K) {
+void vecmul(const float* a, const float* B, float* c, int N, int K) {
     // Fall back to scalar implementation for small problems
     if (K < 64 || N < 4) {
         for (int i = 0; i < N; i++) {
             float sum = 0.0f;
-            const float *B_row = B + i * K;
-            for (int k = 0; k < K; k++) {
-                sum += a[k] * B_row[k];
-            }
+            const float* B_row = B + i * K;
+            for (int k = 0; k < K; k++) { sum += a[k] * B_row[k]; }
             c[i] += sum;
         }
         return;
@@ -27,7 +25,7 @@ void vecmul(const float *a, const float *B, float *c, int N, int K) {
     {
 #pragma omp for schedule(static)
         for (int i = 0; i < N; i++) {
-            const float *B_row = B + (long long)i * K;
+            const float* B_row = B + (long long)i * K;
 
             // Use 8 accumulators to reduce dependency chain latency
             __m512 sum0 = _mm512_setzero_ps();
@@ -123,9 +121,7 @@ void vecmul(const float *a, const float *B, float *c, int N, int K) {
             float sum = _mm512_reduce_add_ps(sum0);
 
             // Scalar tail processing for remaining elements (<16)
-            for (; k < K; k++) {
-                sum += a[k] * B_row[k];
-            }
+            for (; k < K; k++) { sum += a[k] * B_row[k]; }
 
             c[i] += sum;
         }
@@ -137,7 +133,7 @@ void vecmul(const float *a, const float *B, float *c, int N, int K) {
 #include <stdexcept>
 
 // AVX-512 not available. This function requires oneDNN (--onednn=y) on non-AVX-512 CPUs.
-void vecmul(const float * /*a*/, const float * /*B*/, float * /*c*/, int /*N*/, int /*K*/) {
+void vecmul(const float* /*a*/, const float* /*B*/, float* /*c*/, int /*N*/, int /*K*/) {
     throw std::runtime_error("vecmul requires AVX-512. Use --onednn=y on this CPU.");
 }
 

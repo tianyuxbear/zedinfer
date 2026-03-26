@@ -2,12 +2,9 @@
 
 namespace zedinfer::kvcache {
 
-PrefixCache::PrefixCache(BlockPool &pool, int num_layers)
-    : pool_(pool), num_layers_(num_layers) {}
+PrefixCache::PrefixCache(BlockPool& pool, int num_layers) : pool_(pool), num_layers_(num_layers) {}
 
-uint64_t PrefixCache::compute_block_hash(const std::vector<int> &tokens,
-                                          int start, int end,
-                                          uint64_t parent_hash) {
+uint64_t PrefixCache::compute_block_hash(const std::vector<int>& tokens, int start, int end, uint64_t parent_hash) {
     uint64_t hash = parent_hash;
     for (int i = start; i < end; ++i) {
         // FNV-1a mixing
@@ -17,9 +14,7 @@ uint64_t PrefixCache::compute_block_hash(const std::vector<int> &tokens,
     return hash;
 }
 
-int PrefixCache::match_prefix(const std::vector<int> &token_ids,
-                               int block_size,
-                               SequenceBlockTable &matched_table) {
+int PrefixCache::match_prefix(const std::vector<int>& token_ids, int block_size, SequenceBlockTable& matched_table) {
     int num_tokens = static_cast<int>(token_ids.size());
     int num_full_blocks = num_tokens / block_size; // only full blocks are cacheable
 
@@ -46,7 +41,7 @@ int PrefixCache::match_prefix(const std::vector<int> &token_ids,
         }
 
         hits_++;
-        const auto &entry = it->second;
+        const auto& entry = it->second;
 
         // Share all blocks across all layers
         for (int l = 0; l < num_layers_; ++l) {
@@ -68,13 +63,10 @@ int PrefixCache::match_prefix(const std::vector<int> &token_ids,
     return matched_tokens;
 }
 
-void PrefixCache::insert_blocks(const std::vector<int> &token_ids,
-                                 int block_size,
-                                 const SequenceBlockTable &table) {
+void PrefixCache::insert_blocks(const std::vector<int>& token_ids, int block_size, const SequenceBlockTable& table) {
     int num_tokens = static_cast<int>(token_ids.size());
     int num_full_blocks = num_tokens / block_size;
-    int blocks_in_table = table.k_blocks.empty() ? 0
-                          : static_cast<int>(table.k_blocks[0].size());
+    int blocks_in_table = table.k_blocks.empty() ? 0 : static_cast<int>(table.k_blocks[0].size());
     int blocks_to_cache = std::min(num_full_blocks, blocks_in_table);
 
     uint64_t parent_hash = 0;

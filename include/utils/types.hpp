@@ -21,71 +21,71 @@ typedef struct CustomBFloat16 bf16_t;
 namespace utils {
 inline size_t dsize(zedinferDataType_t dtype) {
     switch (dtype) {
-    case ZEDINFER_DTYPE_BYTE:
-        return sizeof(unsigned char);
-    case ZEDINFER_DTYPE_BOOL:
-        return sizeof(bool);
-    case ZEDINFER_DTYPE_I8:
-        return sizeof(int8_t);
-    case ZEDINFER_DTYPE_I16:
-        return sizeof(int16_t);
-    case ZEDINFER_DTYPE_I32:
-        return sizeof(int32_t);
-    case ZEDINFER_DTYPE_I64:
-        return sizeof(int64_t);
-    case ZEDINFER_DTYPE_U8:
-        return sizeof(uint8_t);
-    case ZEDINFER_DTYPE_U16:
-        return sizeof(uint16_t);
-    case ZEDINFER_DTYPE_U32:
-        return sizeof(uint32_t);
-    case ZEDINFER_DTYPE_U64:
-        return sizeof(uint64_t);
-    case ZEDINFER_DTYPE_F16:
-        return 2;
-    case ZEDINFER_DTYPE_F32:
-        return sizeof(float);
-    case ZEDINFER_DTYPE_F64:
-        return sizeof(double);
-    case ZEDINFER_DTYPE_BF16:
-        return 2;
-    default:
-        throw std::invalid_argument("Unsupported or invalid data type.");
+        case ZEDINFER_DTYPE_BYTE:
+            return sizeof(unsigned char);
+        case ZEDINFER_DTYPE_BOOL:
+            return sizeof(bool);
+        case ZEDINFER_DTYPE_I8:
+            return sizeof(int8_t);
+        case ZEDINFER_DTYPE_I16:
+            return sizeof(int16_t);
+        case ZEDINFER_DTYPE_I32:
+            return sizeof(int32_t);
+        case ZEDINFER_DTYPE_I64:
+            return sizeof(int64_t);
+        case ZEDINFER_DTYPE_U8:
+            return sizeof(uint8_t);
+        case ZEDINFER_DTYPE_U16:
+            return sizeof(uint16_t);
+        case ZEDINFER_DTYPE_U32:
+            return sizeof(uint32_t);
+        case ZEDINFER_DTYPE_U64:
+            return sizeof(uint64_t);
+        case ZEDINFER_DTYPE_F16:
+            return 2;
+        case ZEDINFER_DTYPE_F32:
+            return sizeof(float);
+        case ZEDINFER_DTYPE_F64:
+            return sizeof(double);
+        case ZEDINFER_DTYPE_BF16:
+            return 2;
+        default:
+            throw std::invalid_argument("Unsupported or invalid data type.");
     }
 }
 
-inline const char *dtype_to_str(zedinferDataType_t dtype) {
+inline const char* dtype_to_str(zedinferDataType_t dtype) {
     switch (dtype) {
-    case ZEDINFER_DTYPE_BYTE:
-        return "byte";
-    case ZEDINFER_DTYPE_BOOL:
-        return "bool";
-    case ZEDINFER_DTYPE_I8:
-        return "int8";
-    case ZEDINFER_DTYPE_I16:
-        return "int16";
-    case ZEDINFER_DTYPE_I32:
-        return "int32";
-    case ZEDINFER_DTYPE_I64:
-        return "int64";
-    case ZEDINFER_DTYPE_U8:
-        return "uint8";
-    case ZEDINFER_DTYPE_U16:
-        return "uint16";
-    case ZEDINFER_DTYPE_U32:
-        return "uint32";
-    case ZEDINFER_DTYPE_U64:
-        return "uint64";
-    case ZEDINFER_DTYPE_F16:
-        return "float16";
-    case ZEDINFER_DTYPE_F32:
-        return "float32";
-    case ZEDINFER_DTYPE_F64:
-        return "float64";
-    case ZEDINFER_DTYPE_BF16:
-        return "bfloat16";
-    default:
-        throw std::invalid_argument("Unsupported or invalid data type.");
+        case ZEDINFER_DTYPE_BYTE:
+            return "byte";
+        case ZEDINFER_DTYPE_BOOL:
+            return "bool";
+        case ZEDINFER_DTYPE_I8:
+            return "int8";
+        case ZEDINFER_DTYPE_I16:
+            return "int16";
+        case ZEDINFER_DTYPE_I32:
+            return "int32";
+        case ZEDINFER_DTYPE_I64:
+            return "int64";
+        case ZEDINFER_DTYPE_U8:
+            return "uint8";
+        case ZEDINFER_DTYPE_U16:
+            return "uint16";
+        case ZEDINFER_DTYPE_U32:
+            return "uint32";
+        case ZEDINFER_DTYPE_U64:
+            return "uint64";
+        case ZEDINFER_DTYPE_F16:
+            return "float16";
+        case ZEDINFER_DTYPE_F32:
+            return "float32";
+        case ZEDINFER_DTYPE_F64:
+            return "float64";
+        case ZEDINFER_DTYPE_BF16:
+            return "bfloat16";
+        default:
+            throw std::invalid_argument("Unsupported or invalid data type.");
     }
 }
 
@@ -145,14 +145,13 @@ bf16_t _f32_to_bf16(float val);
 float fp16_to_fp32_f16c(fp16_t x);
 fp16_t fp32_to_fp16_f16c(float x);
 
-void fp16_to_fp32_batch_f16c(float *dst, const fp16_t *src, size_t count);
-void fp32_to_fp16_batch_f16c(fp16_t *dst, const float *src, size_t count);
+void fp16_to_fp32_batch_f16c(float* dst, const fp16_t* src, size_t count);
+void fp32_to_fp16_batch_f16c(fp16_t* dst, const float* src, size_t count);
 
-void bf16_to_fp32_batch(float *dst, const bf16_t *src, size_t count);
-void fp32_to_bf16_batch(bf16_t *dst, const float *src, size_t count);
+void bf16_to_fp32_batch(float* dst, const bf16_t* src, size_t count);
+void fp32_to_bf16_batch(bf16_t* dst, const float* src, size_t count);
 
-template <typename TypeTo, typename TypeFrom>
-TypeTo cast(TypeFrom val) {
+template <typename TypeTo, typename TypeFrom> TypeTo cast(TypeFrom val) {
     if constexpr (std::is_same<TypeTo, TypeFrom>::value) {
         return val;
     } else if constexpr (std::is_same<TypeTo, fp16_t>::value && std::is_same<TypeFrom, float>::value) {

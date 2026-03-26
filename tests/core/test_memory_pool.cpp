@@ -18,19 +18,13 @@ protected:
         config_.fragmentation_threshold = 0.3f;
         config_.preallocate_sizes = {};
 
-        pool_ = std::make_unique<BestFitMemoryPool>(
-            [](size_t size) { return std::malloc(size); },
-            [](void *ptr) { std::free(ptr); },
-            config_);
+        pool_ = std::make_unique<BestFitMemoryPool>([](size_t size) { return std::malloc(size); },
+                                                    [](void* ptr) { std::free(ptr); }, config_);
     }
 
-    void TearDown() override {
-        pool_.reset();
-    }
+    void TearDown() override { pool_.reset(); }
 
-    bool isAligned(void *ptr, size_t alignment) {
-        return (reinterpret_cast<uintptr_t>(ptr) % alignment) == 0;
-    }
+    bool isAligned(void* ptr, size_t alignment) { return (reinterpret_cast<uintptr_t>(ptr) % alignment) == 0; }
 
     MemoryPoolConfig config_;
     std::unique_ptr<BestFitMemoryPool> pool_;
@@ -38,27 +32,24 @@ protected:
 
 // Test 1: Address Alignment
 TEST_F(MemoryPoolTest, AddressAlignment) {
-    std::vector<std::byte *> ptrs;
+    std::vector<std::byte*> ptrs;
     size_t sizes[] = {16, 128, 1024, 4096, 65536};
 
     for (auto size : sizes) {
         auto ptr = pool_->allocate(size);
         ASSERT_NE(ptr, nullptr) << "Allocation of size " << size << " failed";
         EXPECT_TRUE(isAligned(ptr, config_.alignment))
-            << "Pointer " << ptr << " (size " << size << ") is not "
-            << config_.alignment << "-byte aligned";
+            << "Pointer " << ptr << " (size " << size << ") is not " << config_.alignment << "-byte aligned";
         ptrs.push_back(ptr);
     }
 
     // Cleanup
-    for (auto ptr : ptrs) {
-        pool_->deallocate(ptr);
-    }
+    for (auto ptr : ptrs) { pool_->deallocate(ptr); }
 }
 
 TEST_F(MemoryPoolTest, AllAllocationsAreAligned) {
     const int NUM_ALLOCS = 100;
-    std::vector<std::byte *> ptrs;
+    std::vector<std::byte*> ptrs;
 
     // Test various sizes
     for (int i = 0; i < NUM_ALLOCS; ++i) {
@@ -70,9 +61,7 @@ TEST_F(MemoryPoolTest, AllAllocationsAreAligned) {
     }
 
     // Cleanup
-    for (auto ptr : ptrs) {
-        pool_->deallocate(ptr);
-    }
+    for (auto ptr : ptrs) { pool_->deallocate(ptr); }
 }
 
 // Test 2: Minimum Split Size
@@ -100,16 +89,14 @@ TEST_F(MemoryPoolTest, MinimumSplitSize) {
 
 TEST_F(MemoryPoolTest, MinSplitSizePreventsSmallFragments) {
     // Allocate and deallocate to create a known state
-    std::vector<std::byte *> ptrs;
+    std::vector<std::byte*> ptrs;
     for (int i = 0; i < 10; ++i) {
         ptrs.push_back(pool_->allocate(1023 * 1024)); // 100KB each
     }
     auto stats = pool_->getDetailedFragmentation();
     ASSERT_EQ(stats.free_block_count, 0);
 
-    for (auto ptr : ptrs) {
-        pool_->deallocate(ptr);
-    }
+    for (auto ptr : ptrs) { pool_->deallocate(ptr); }
 
     stats = pool_->getDetailedFragmentation();
     ASSERT_EQ(stats.free_block_count, 10);
@@ -126,11 +113,10 @@ TEST_F(MemoryPoolTest, MinSplitSizePreventsSmallFragments) {
 TEST_F(MemoryPoolTest, FragmentationCalculation) {
     // Scenario 1: Empty pool (should have low/zero fragmentation)
     auto stats1 = pool_->getDetailedFragmentation();
-    EXPECT_EQ(stats1.fragmentation_ratio, 0.0f)
-        << "Empty pool should have zero fragmentation";
+    EXPECT_EQ(stats1.fragmentation_ratio, 0.0f) << "Empty pool should have zero fragmentation";
 
     // Scenario 2: Create checkerboard fragmentation
-    std::vector<std::byte *> ptrs;
+    std::vector<std::byte*> ptrs;
     for (int i = 0; i < 20; ++i) {
         ptrs.push_back(pool_->allocate(256 * 1024)); // 256KB each
     }
@@ -147,8 +133,7 @@ TEST_F(MemoryPoolTest, FragmentationCalculation) {
     auto stats3 = pool_->getDetailedFragmentation();
     ASSERT_EQ(stats3.free_block_count, 10);
     ASSERT_GE(stats3.largest_free_block, 256 * 1024);
-    EXPECT_GT(stats3.fragmentation_ratio, 0.8f)
-        << "Checkerboard pattern should create significant fragmentation";
+    EXPECT_GT(stats3.fragmentation_ratio, 0.8f) << "Checkerboard pattern should create significant fragmentation";
 
     // Cleanup
     for (auto ptr : ptrs) {
@@ -182,10 +167,8 @@ TEST_F(MemoryPoolTest, FragmentationStatsAccuracy) {
     auto ptr = pool_->allocate(1024 * 1024);
     stats = pool_->getDetailedFragmentation();
 
-    EXPECT_GT(stats.memory_utilization, 0.0f)
-        << "After allocation, utilization should be > 0";
-    EXPECT_EQ(pool_->getTotalUsed(),
-              stats.memory_utilization * pool_->getTotalAllocated())
+    EXPECT_GT(stats.memory_utilization, 0.0f) << "After allocation, utilization should be > 0";
+    EXPECT_EQ(pool_->getTotalUsed(), stats.memory_utilization * pool_->getTotalAllocated())
         << "Utilization calculation should match";
 
     pool_->deallocate(ptr);
@@ -197,7 +180,7 @@ TEST_F(MemoryPoolTest, LargestFreeBlockTracking) {
     auto ptr2 = pool_->allocate(2 * 1024 * 1024); // 2MB
     auto ptr3 = pool_->allocate(3 * 1024 * 1024); // 3MB
 
-    pool_->deallocate(ptr2); // Free the 2MB block
+    pool_->deallocate(ptr2);                      // Free the 2MB block
 
     auto stats = pool_->getDetailedFragmentation();
 
@@ -241,10 +224,8 @@ TEST_F(MemoryPoolTest, BlockCoalescing) {
 
 TEST_F(MemoryPoolTest, IncrementalCoalescing) {
     // Allocate 3 x 512KB blocks (smaller, easier to control)
-    std::vector<std::byte *> ptrs;
-    for (int i = 0; i < 3; ++i) {
-        ptrs.push_back(pool_->allocate(512 * 1024));
-    }
+    std::vector<std::byte*> ptrs;
+    for (int i = 0; i < 3; ++i) { ptrs.push_back(pool_->allocate(512 * 1024)); }
 
     // Free one by one, observe incremental coalescing
     pool_->deallocate(ptrs[1]);
@@ -265,7 +246,7 @@ TEST_F(MemoryPoolTest, IncrementalCoalescing) {
 // Test 5: Performance Benchmark
 TEST_F(MemoryPoolTest, PerformanceBenchmark) {
     const int NUM_ALLOCS = 10000;
-    std::vector<std::byte *> ptrs;
+    std::vector<std::byte*> ptrs;
     ptrs.reserve(NUM_ALLOCS);
 
     auto base = pool_->allocate(config_.max_pool_size);
@@ -287,9 +268,7 @@ TEST_F(MemoryPoolTest, PerformanceBenchmark) {
     auto mid = std::chrono::high_resolution_clock::now();
 
     // Mixed phase: deallocate half and reallocate
-    for (size_t i = 0; i < ptrs.size() / 2; ++i) {
-        pool_->deallocate(ptrs[i]);
-    }
+    for (size_t i = 0; i < ptrs.size() / 2; ++i) { pool_->deallocate(ptrs[i]); }
 
     for (int i = 0; i < NUM_ALLOCS / 2; ++i) {
         size_t size = sizes[i % 6];
@@ -312,14 +291,11 @@ TEST_F(MemoryPoolTest, PerformanceBenchmark) {
     auto mixed_time = std::chrono::duration_cast<std::chrono::microseconds>(end - mid).count();
 
     // Performance expectations (adjust based on your requirements)
-    EXPECT_LT(alloc_time / NUM_ALLOCS, 10)
-        << "Average allocation should be < 10 microseconds";
-    EXPECT_LT(mixed_time / NUM_ALLOCS, 20)
-        << "Average mixed operation should be < 20 microseconds";
+    EXPECT_LT(alloc_time / NUM_ALLOCS, 10) << "Average allocation should be < 10 microseconds";
+    EXPECT_LT(mixed_time / NUM_ALLOCS, 20) << "Average mixed operation should be < 20 microseconds";
 
     auto stats = pool_->getDetailedFragmentation();
-    EXPECT_LT(stats.fragmentation_ratio, 0.5f)
-        << "After heavy usage, fragmentation should be < 50%";
+    EXPECT_LT(stats.fragmentation_ratio, 0.5f) << "After heavy usage, fragmentation should be < 50%";
 }
 
 TEST_F(MemoryPoolTest, AllocationSpeed) {
@@ -327,10 +303,8 @@ TEST_F(MemoryPoolTest, AllocationSpeed) {
 
     auto start = std::chrono::high_resolution_clock::now();
 
-    std::vector<std::byte *> ptrs;
-    for (int i = 0; i < NUM_ALLOCS; ++i) {
-        ptrs.push_back(pool_->allocate(4096));
-    }
+    std::vector<std::byte*> ptrs;
+    for (int i = 0; i < NUM_ALLOCS; ++i) { ptrs.push_back(pool_->allocate(4096)); }
 
     auto end = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
@@ -339,9 +313,7 @@ TEST_F(MemoryPoolTest, AllocationSpeed) {
     EXPECT_LT(duration, 10000) << "1000 allocations should complete in < 10ms";
 
     // Cleanup
-    for (auto ptr : ptrs) {
-        pool_->deallocate(ptr);
-    }
+    for (auto ptr : ptrs) { pool_->deallocate(ptr); }
 }
 
 // Test 6: Edge Cases
@@ -356,10 +328,8 @@ TEST_F(MemoryPoolTest, VeryLargeAllocation) {
     small_config.max_pool_size = 10 * 1024 * 1024; // 10 MB
     small_config.allow_growth = false;
 
-    BestFitMemoryPool small_pool(
-        [](size_t size) { return std::malloc(size); },
-        [](void *ptr) { std::free(ptr); },
-        small_config);
+    BestFitMemoryPool small_pool([](size_t size) { return std::malloc(size); }, [](void* ptr) { std::free(ptr); },
+                                 small_config);
 
     auto ptr = small_pool.allocate(100 * 1024 * 1024); // 100 MB
     EXPECT_EQ(ptr, nullptr) << "Allocation exceeding max_pool_size should fail";
@@ -391,8 +361,7 @@ TEST_F(MemoryPoolTest, MemoryStatistics) {
 
     pool_->deallocate(ptr);
 
-    EXPECT_EQ(pool_->getTotalUsed(), initial_used)
-        << "After deallocation, used memory should return to initial";
+    EXPECT_EQ(pool_->getTotalUsed(), initial_used) << "After deallocation, used memory should return to initial";
 }
 
 TEST_F(MemoryPoolTest, MemoryUtilization) {
@@ -402,10 +371,8 @@ TEST_F(MemoryPoolTest, MemoryUtilization) {
 
     auto stats = pool_->getDetailedFragmentation();
 
-    EXPECT_GT(stats.memory_utilization, 0.3f)
-        << "Should have reasonable utilization";
-    EXPECT_LT(stats.memory_utilization, 0.7f)
-        << "Should not be over-utilized";
+    EXPECT_GT(stats.memory_utilization, 0.3f) << "Should have reasonable utilization";
+    EXPECT_LT(stats.memory_utilization, 0.7f) << "Should not be over-utilized";
 
     pool_->deallocate(ptr);
 }
@@ -413,7 +380,7 @@ TEST_F(MemoryPoolTest, MemoryUtilization) {
 // Test 8: Stress Test
 TEST_F(MemoryPoolTest, StressTestRandomAllocations) {
     const int NUM_ITERATIONS = 1000;
-    std::vector<std::byte *> ptrs;
+    std::vector<std::byte*> ptrs;
 
     for (int i = 0; i < NUM_ITERATIONS; ++i) {
         // Random operation: allocate or deallocate
@@ -434,17 +401,14 @@ TEST_F(MemoryPoolTest, StressTestRandomAllocations) {
     }
 
     // Cleanup
-    for (auto ptr : ptrs) {
-        pool_->deallocate(ptr);
-    }
+    for (auto ptr : ptrs) { pool_->deallocate(ptr); }
 
     auto stats = pool_->getDetailedFragmentation();
-    EXPECT_LT(stats.fragmentation_ratio, 0.7f)
-        << "After stress test, fragmentation should be manageable";
+    EXPECT_LT(stats.fragmentation_ratio, 0.7f) << "After stress test, fragmentation should be manageable";
 }
 
 TEST_F(MemoryPoolTest, StressTestLargeAllocations) {
-    std::vector<std::byte *> ptrs;
+    std::vector<std::byte*> ptrs;
 
     // Allocate many large blocks
     for (int i = 0; i < 50; ++i) {
@@ -458,7 +422,5 @@ TEST_F(MemoryPoolTest, StressTestLargeAllocations) {
     EXPECT_GT(ptrs.size(), 30u) << "Should successfully allocate many large blocks";
 
     // Cleanup
-    for (auto ptr : ptrs) {
-        pool_->deallocate(ptr);
-    }
+    for (auto ptr : ptrs) { pool_->deallocate(ptr); }
 }

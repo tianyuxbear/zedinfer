@@ -44,10 +44,8 @@ std::string GenerationStats::summary() const {
         << "  Generated:  " << generated_tokens << "\n"
         << "  Total:      " << total_tokens << "\n"
         << "Performance:\n"
-        << "  Prefill:  " << prefill_time_ms << " ms ("
-        << prefill_tokens_per_second() << " token/s)\n"
-        << "  Decode:   " << decode_time_ms << " ms ("
-        << decode_tokens_per_second() << " token/s)\n"
+        << "  Prefill:  " << prefill_time_ms << " ms (" << prefill_tokens_per_second() << " token/s)\n"
+        << "  Decode:   " << decode_time_ms << " ms (" << decode_tokens_per_second() << " token/s)\n"
         << "  Total:    " << total_time_ms << " ms\n"
         << "=============================";
 

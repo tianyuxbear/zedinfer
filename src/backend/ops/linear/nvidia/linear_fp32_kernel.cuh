@@ -14,15 +14,9 @@
 // Thread block: 256 threads (8 warps)
 // Each warp computes a 32x64 output tile
 // Each thread computes an 8x8 output sub-tile
-__global__
-__launch_bounds__(256, 2) void linear_fp32_kernel(
-    float *C,
-    const float *A,
-    const float *B,
-    const float *bias,
-    const size_t M,
-    const size_t N,
-    const size_t K) {
+__global__ __launch_bounds__(256, 2) void linear_fp32_kernel(float* C, const float* A, const float* B,
+                                                             const float* bias, const size_t M, const size_t N,
+                                                             const size_t K) {
     // ===== Shared Memory Configuration =====
     // Using double buffering to hide memory latency
     // Buffer layout: [A_buffer0, A_buffer1, B_buffer0, B_buffer1]
@@ -34,8 +28,7 @@ __launch_bounds__(256, 2) void linear_fp32_kernel(
     constexpr int smem_b_size = smem_b_padding * 8;
     constexpr int smem_b_ld = 132;
 
-    __shared__ float __align__(2 * smem_a_size * sizeof(float))
-        smem_ptr[2 * (smem_a_size + smem_b_size)];
+    __shared__ float __align__(2 * smem_a_size * sizeof(float)) smem_ptr[2 * (smem_a_size + smem_b_size)];
 
     // ===== Register Allocation =====
     float accumulator[8][8]{}; // Per-thread output tile (8x8)
@@ -49,8 +42,8 @@ __launch_bounds__(256, 2) void linear_fp32_kernel(
     unsigned ldg_b_bitmask = 0x0;
 
     // Shared memory pointers for A and B tiles
-    float *smem_a_ptr = smem_ptr;
-    float *smem_b_ptr = smem_ptr + 2 * smem_a_size;
+    float* smem_a_ptr = smem_ptr;
+    float* smem_b_ptr = smem_ptr + 2 * smem_a_size;
 
     // Thread mapping
     const int warp_id = threadIdx.x / 32;
@@ -62,7 +55,7 @@ __launch_bounds__(256, 2) void linear_fp32_kernel(
     const int ldg_a_start_x = threadIdx.x % 8;                          // K dimension offset
     const int ldg_a_start_y = blockIdx.y * 128 + 4 * (threadIdx.x / 8); // M dimension offset
     const int ldg_a_start = ldg_a_start_x + ldg_a_start_y * K;
-    const float *ldg_a_ptr = A + ldg_a_start;
+    const float* ldg_a_ptr = A + ldg_a_start;
 
     // Precompute offsets for the 4 elements each thread loads
     int ldg_a_offsets_y[4];
@@ -86,7 +79,7 @@ __launch_bounds__(256, 2) void linear_fp32_kernel(
     const int ldg_b_start_x = threadIdx.x % 8;
     const int ldg_b_start_y = blockIdx.x * 128 + 4 * (threadIdx.x / 8);
     const int ldg_b_start = ldg_b_start_x + ldg_b_start_y * K;
-    const float *ldg_b_ptr = B + ldg_b_start;
+    const float* ldg_b_ptr = B + ldg_b_start;
 
     int ldg_b_offsets_y[4];
     int ldg_b_offsets[4];
@@ -110,12 +103,12 @@ __launch_bounds__(256, 2) void linear_fp32_kernel(
     const int sts_a_start_x = 4 * (threadIdx.x / 8);
     const int sts_a_start_y = threadIdx.x % 8;
     const int sts_a_start = sts_a_start_x + sts_a_start_y * smem_a_ld;
-    float *sts_a_ptr = smem_a_ptr + sts_a_start;
+    float* sts_a_ptr = smem_a_ptr + sts_a_start;
 
     const int sts_b_start_x = 4 * (threadIdx.x / 8);
     const int sts_b_start_y = threadIdx.x % 8;
     const int sts_b_start = sts_b_start_x + sts_b_start_y * smem_b_ld;
-    float *sts_b_ptr = smem_b_ptr + sts_b_start;
+    float* sts_b_ptr = smem_b_ptr + sts_b_start;
 
     uint64_t sts_a_addr;
     uint64_t sts_b_addr;
@@ -164,19 +157,17 @@ __launch_bounds__(256, 2) void linear_fp32_kernel(
 
     const int lds_a_start = 4 * lane_id_mapped_y + warp_id_mapped_y;
     const int lds_b_start = 4 * lane_id_mapped_x + warp_id_mapped_x;
-    float *lds_a_ptr = smem_a_ptr + lds_a_start;
-    float *lds_b_ptr = smem_b_ptr + lds_b_start;
+    float* lds_a_ptr = smem_a_ptr + lds_a_start;
+    float* lds_b_ptr = smem_b_ptr + lds_b_start;
 
     CVTA_TO_SHARED_PTX(lds_a_addr, lds_a_ptr);
     CVTA_TO_SHARED_PTX(lds_b_addr, lds_b_ptr);
 
     // Load first fragments from shared memory for computation
     LDS128_PTX(frag_a[0][0], frag_a[0][1], frag_a[0][2], frag_a[0][3], lds_a_addr);
-    LDS128_PTX(frag_a[0][4], frag_a[0][5], frag_a[0][6], frag_a[0][7],
-               lds_a_addr + 16 * sizeof(float));
+    LDS128_PTX(frag_a[0][4], frag_a[0][5], frag_a[0][6], frag_a[0][7], lds_a_addr + 16 * sizeof(float));
     LDS128_PTX(frag_b[0][0], frag_b[0][1], frag_b[0][2], frag_b[0][3], lds_b_addr);
-    LDS128_PTX(frag_b[0][4], frag_b[0][5], frag_b[0][6], frag_b[0][7],
-               lds_b_addr + 32 * sizeof(float));
+    LDS128_PTX(frag_b[0][4], frag_b[0][5], frag_b[0][6], frag_b[0][7], lds_b_addr + 32 * sizeof(float));
 
     // Advance pointers to next K-block
     ldg_a_ptr += first_block_k_size;
@@ -188,7 +179,6 @@ __launch_bounds__(256, 2) void linear_fp32_kernel(
 
     // ===== Main K-dimension Loop =====
     for (int block_k = 0; block_k < n_blocks_k; block_k++) {
-
 // Prefetch next K-block from global memory
 #pragma unroll
         for (int i = 0; i < 4; i++) {
@@ -207,26 +197,20 @@ __launch_bounds__(256, 2) void linear_fp32_kernel(
             const int frag_next_idx = (warp_k + 1) & 1;
 
             // Prefetch next fragments from shared memory (double buffering)
-            LDS128_PTX(frag_a[frag_next_idx][0], frag_a[frag_next_idx][1],
-                       frag_a[frag_next_idx][2], frag_a[frag_next_idx][3],
-                       lds_a_addr + prefetch * smem_a_ld * sizeof(float));
-            LDS128_PTX(frag_a[frag_next_idx][4], frag_a[frag_next_idx][5],
-                       frag_a[frag_next_idx][6], frag_a[frag_next_idx][7],
-                       lds_a_addr + (prefetch * smem_a_ld + 16) * sizeof(float));
-            LDS128_PTX(frag_b[frag_next_idx][0], frag_b[frag_next_idx][1],
-                       frag_b[frag_next_idx][2], frag_b[frag_next_idx][3],
-                       lds_b_addr + prefetch * smem_b_ld * sizeof(float));
-            LDS128_PTX(frag_b[frag_next_idx][4], frag_b[frag_next_idx][5],
-                       frag_b[frag_next_idx][6], frag_b[frag_next_idx][7],
-                       lds_b_addr + (prefetch * smem_b_ld + 32) * sizeof(float));
+            LDS128_PTX(frag_a[frag_next_idx][0], frag_a[frag_next_idx][1], frag_a[frag_next_idx][2],
+                       frag_a[frag_next_idx][3], lds_a_addr + prefetch * smem_a_ld * sizeof(float));
+            LDS128_PTX(frag_a[frag_next_idx][4], frag_a[frag_next_idx][5], frag_a[frag_next_idx][6],
+                       frag_a[frag_next_idx][7], lds_a_addr + (prefetch * smem_a_ld + 16) * sizeof(float));
+            LDS128_PTX(frag_b[frag_next_idx][0], frag_b[frag_next_idx][1], frag_b[frag_next_idx][2],
+                       frag_b[frag_next_idx][3], lds_b_addr + prefetch * smem_b_ld * sizeof(float));
+            LDS128_PTX(frag_b[frag_next_idx][4], frag_b[frag_next_idx][5], frag_b[frag_next_idx][6],
+                       frag_b[frag_next_idx][7], lds_b_addr + (prefetch * smem_b_ld + 32) * sizeof(float));
 
 // Compute outer product and accumulate (8x8 sub-tile)
 #pragma unroll
             for (int i = 0; i < 8; i++) {
 #pragma unroll
-                for (int j = 0; j < 8; j++) {
-                    accumulator[i][j] += frag_a[frag_idx][i] * frag_b[frag_idx][j];
-                }
+                for (int j = 0; j < 8; j++) { accumulator[i][j] += frag_a[frag_idx][i] * frag_b[frag_idx][j]; }
             }
         }
 
@@ -249,11 +233,9 @@ __launch_bounds__(256, 2) void linear_fp32_kernel(
 
         // Load first fragments from new shared memory buffer
         LDS128_PTX(frag_a[0][0], frag_a[0][1], frag_a[0][2], frag_a[0][3], lds_a_addr);
-        LDS128_PTX(frag_a[0][4], frag_a[0][5], frag_a[0][6], frag_a[0][7],
-                   lds_a_addr + 16 * sizeof(float));
+        LDS128_PTX(frag_a[0][4], frag_a[0][5], frag_a[0][6], frag_a[0][7], lds_a_addr + 16 * sizeof(float));
         LDS128_PTX(frag_b[0][0], frag_b[0][1], frag_b[0][2], frag_b[0][3], lds_b_addr);
-        LDS128_PTX(frag_b[0][4], frag_b[0][5], frag_b[0][6], frag_b[0][7],
-                   lds_b_addr + 32 * sizeof(float));
+        LDS128_PTX(frag_b[0][4], frag_b[0][5], frag_b[0][6], frag_b[0][7], lds_b_addr + 32 * sizeof(float));
     }
 
 // ===== Process Last K-block =====
@@ -263,25 +245,19 @@ __launch_bounds__(256, 2) void linear_fp32_kernel(
         const int frag_idx = warp_k & 1;
         const int frag_next_idx = (warp_k + 1) & 1;
 
-        LDS128_PTX(frag_a[frag_next_idx][0], frag_a[frag_next_idx][1],
-                   frag_a[frag_next_idx][2], frag_a[frag_next_idx][3],
-                   lds_a_addr + prefetch * smem_a_ld * sizeof(float));
-        LDS128_PTX(frag_a[frag_next_idx][4], frag_a[frag_next_idx][5],
-                   frag_a[frag_next_idx][6], frag_a[frag_next_idx][7],
-                   lds_a_addr + (prefetch * smem_a_ld + 16) * sizeof(float));
-        LDS128_PTX(frag_b[frag_next_idx][0], frag_b[frag_next_idx][1],
-                   frag_b[frag_next_idx][2], frag_b[frag_next_idx][3],
-                   lds_b_addr + prefetch * smem_b_ld * sizeof(float));
-        LDS128_PTX(frag_b[frag_next_idx][4], frag_b[frag_next_idx][5],
-                   frag_b[frag_next_idx][6], frag_b[frag_next_idx][7],
-                   lds_b_addr + (prefetch * smem_b_ld + 32) * sizeof(float));
+        LDS128_PTX(frag_a[frag_next_idx][0], frag_a[frag_next_idx][1], frag_a[frag_next_idx][2],
+                   frag_a[frag_next_idx][3], lds_a_addr + prefetch * smem_a_ld * sizeof(float));
+        LDS128_PTX(frag_a[frag_next_idx][4], frag_a[frag_next_idx][5], frag_a[frag_next_idx][6],
+                   frag_a[frag_next_idx][7], lds_a_addr + (prefetch * smem_a_ld + 16) * sizeof(float));
+        LDS128_PTX(frag_b[frag_next_idx][0], frag_b[frag_next_idx][1], frag_b[frag_next_idx][2],
+                   frag_b[frag_next_idx][3], lds_b_addr + prefetch * smem_b_ld * sizeof(float));
+        LDS128_PTX(frag_b[frag_next_idx][4], frag_b[frag_next_idx][5], frag_b[frag_next_idx][6],
+                   frag_b[frag_next_idx][7], lds_b_addr + (prefetch * smem_b_ld + 32) * sizeof(float));
 
 #pragma unroll
         for (int i = 0; i < 8; i++) {
 #pragma unroll
-            for (int j = 0; j < 8; j++) {
-                accumulator[i][j] += frag_a[frag_idx][i] * frag_b[frag_idx][j];
-            }
+            for (int j = 0; j < 8; j++) { accumulator[i][j] += frag_a[frag_idx][i] * frag_b[frag_idx][j]; }
         }
     }
 
@@ -291,11 +267,11 @@ __launch_bounds__(256, 2) void linear_fp32_kernel(
     const int sts_c_offset = 512 * warp_id + 4 * 32 * lane_id_mapped_y + 4 * lane_id_mapped_x;
     CVTA_TO_SHARED_PTX(sts_c_addr, smem_ptr + sts_c_offset);
 
-    float *lds_c_ptr = smem_ptr + 512 * warp_id + lane_id;
+    float* lds_c_ptr = smem_ptr + 512 * warp_id + lane_id;
 
     const int m_idx = blockIdx.y * 128 + warp_id_mapped_y;
     const int n_idx = blockIdx.x * 128 + warp_id_mapped_x + lane_id;
-    float *stg_c_ptr = C + m_idx * N + n_idx;
+    float* stg_c_ptr = C + m_idx * N + n_idx;
 
     // Write output tile warp by warp with bias addition
     if (m_idx < M) {
@@ -309,10 +285,8 @@ __launch_bounds__(256, 2) void linear_fp32_kernel(
 // Stage 4 rows (16 elements total) to shared memory
 #pragma unroll 2
                 for (int p = 0; p < 4; ++p) {
-                    STS128_PTX(accumulator[i * 4 + p][j * 4],
-                               accumulator[i * 4 + p][j * 4 + 1],
-                               accumulator[i * 4 + p][j * 4 + 2],
-                               accumulator[i * 4 + p][j * 4 + 3],
+                    STS128_PTX(accumulator[i * 4 + p][j * 4], accumulator[i * 4 + p][j * 4 + 1],
+                               accumulator[i * 4 + p][j * 4 + 2], accumulator[i * 4 + p][j * 4 + 3],
                                sts_c_addr + p * 8 * sizeof(float4));
                 }
                 __syncthreads();
@@ -324,9 +298,7 @@ __launch_bounds__(256, 2) void linear_fp32_kernel(
                     const int n_pos = n_idx + j * 32;
                     const float c = (n_pos < N && bias) ? bias[n_pos] : 0.0f;
                     const bool guard = p < m_edge && n_pos < N;
-                    STG32_GUARD_PTX(lds_c_ptr[p * 32] + c,
-                                    stg_c_ptr + (i * 16 + p) * N + j * 32,
-                                    (unsigned)guard);
+                    STG32_GUARD_PTX(lds_c_ptr[p * 32] + c, stg_c_ptr + (i * 16 + p) * N + j * 32, (unsigned)guard);
                 }
             }
         }

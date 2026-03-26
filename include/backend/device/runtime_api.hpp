@@ -15,17 +15,17 @@ typedef void (*destroy_stream_api)(zedinferStream_t);
 typedef void (*stream_synchronize_api)(zedinferStream_t);
 
 // Device/host memory allocation
-typedef void *(*malloc_device_api)(size_t);
-typedef void (*free_device_api)(void *);
-typedef void *(*malloc_host_api)(size_t);
-typedef void (*free_host_api)(void *);
+typedef void* (*malloc_device_api)(size_t);
+typedef void (*free_device_api)(void*);
+typedef void* (*malloc_host_api)(size_t);
+typedef void (*free_host_api)(void*);
 
 // Memory copy (sync/async)
-typedef void (*memcpy_sync_api)(void *, const void *, size_t, zedinferMemcpyKind_t);
-typedef void (*memcpy_async_api)(void *, const void *, size_t, zedinferMemcpyKind_t, zedinferStream_t);
+typedef void (*memcpy_sync_api)(void*, const void*, size_t, zedinferMemcpyKind_t);
+typedef void (*memcpy_async_api)(void*, const void*, size_t, zedinferMemcpyKind_t, zedinferStream_t);
 
 // Memory info query
-typedef void (*get_memory_info_api)(size_t *free, size_t *total);
+typedef void (*get_memory_info_api)(size_t* free, size_t* total);
 
 // Runtime API table for a backend (e.g., CUDA, CPU)
 typedef struct ZedinferRuntimeAPI {
@@ -55,15 +55,15 @@ typedef struct ZedinferRuntimeAPI {
 
 namespace zedinfer::device {
 
-const ZedinferRuntimeAPI *getRuntimeAPI(zedinferDeviceType_t device_type);
+const ZedinferRuntimeAPI* getRuntimeAPI(zedinferDeviceType_t device_type);
 
 namespace cpu {
-const ZedinferRuntimeAPI *getRuntimeAPI();
+const ZedinferRuntimeAPI* getRuntimeAPI();
 }
 
 #ifdef ENABLE_NVIDIA_API
 namespace nvidia {
-const ZedinferRuntimeAPI *getRuntimeAPI();
+const ZedinferRuntimeAPI* getRuntimeAPI();
 }
 #endif
 

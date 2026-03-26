@@ -15,7 +15,7 @@ enum {
     BOTH = 2          // Both File and Console logger
 };
 
-inline bool initLoggerWithOverwrite(plog::Severity level, const std::string &filepath) {
+inline bool initLoggerWithOverwrite(plog::Severity level, const std::string& filepath) {
     // Extract directory path
     std::filesystem::path logPath(filepath);
     std::filesystem::path logDir = logPath.parent_path();

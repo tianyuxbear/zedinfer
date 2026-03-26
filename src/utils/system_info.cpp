@@ -32,8 +32,7 @@ int get_physical_cores() {
             }
         }
     }
-    return unique_cores.empty() ? std::thread::hardware_concurrency() / 2
-                                : unique_cores.size();
+    return unique_cores.empty() ? std::thread::hardware_concurrency() / 2 : unique_cores.size();
 #else
     return std::thread::hardware_concurrency() / 2;
 #endif
@@ -101,8 +100,7 @@ std::string get_runtime_info() {
     oss << "   OpenMP:          ❌ DISABLED" << std::endl;
 #endif
 
-    oss << "\n================================================\n"
-        << std::endl;
+    oss << "\n================================================\n" << std::endl;
 
     return oss.str();
 }

@@ -19,7 +19,7 @@ using runtime_t = std::unique_ptr<Runtime>;
 class Context;
 
 // Returns the thread-local Context instance.
-Context &context();
+Context& context();
 
 } // namespace core
 } // namespace zedinfer

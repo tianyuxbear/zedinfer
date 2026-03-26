@@ -33,8 +33,7 @@ struct ChatTemplate {
     bool add_bos_first_turn_only = true;
 
     // Load template from model directory, inferring from model_type with optional override
-    static ChatTemplate load(const std::string &model_path,
-                             const std::string &model_type);
+    static ChatTemplate load(const std::string& model_path, const std::string& model_type);
 
     // Built-in default for DeepSeek-R1 distillation models
     static ChatTemplate default_deepseek_r1();
@@ -45,9 +44,8 @@ struct ChatTemplate {
     // Format an OpenAI-style messages array into a prompt string.
     // Each pair is (role, content) where role is "system", "user", or "assistant".
     // If add_generation_prompt is true, appends generation_prompt at the end.
-    std::string apply(
-        const std::vector<std::pair<std::string, std::string>> &messages,
-        bool add_generation_prompt = true) const;
+    std::string apply(const std::vector<std::pair<std::string, std::string>>& messages,
+                      bool add_generation_prompt = true) const;
 };
 
 } // namespace zedinfer

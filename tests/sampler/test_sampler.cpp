@@ -1,5 +1,5 @@
-#include "frontend/sampler/sampler.hpp"
 #include "backend/tensor/tensor.hpp"
+#include "frontend/sampler/sampler.hpp"
 
 #include <cmath>
 #include <gtest/gtest.h>
@@ -10,13 +10,13 @@ using namespace zedinfer;
 using namespace zedinfer::sampler;
 
 // Helper: create a CPU FP32 logits tensor from a vector
-static tensor_t make_logits(const std::vector<float> &data, size_t vocab_size) {
+static tensor_t make_logits(const std::vector<float>& data, size_t vocab_size) {
     auto t = Tensor::create({vocab_size}, ZEDINFER_DTYPE_F32, ZEDINFER_DEVICE_CPU, 0);
     t->load(data.data());
     return t;
 }
 
-static tensor_t make_logits_2d(const std::vector<float> &data, size_t seq_len, size_t vocab_size) {
+static tensor_t make_logits_2d(const std::vector<float>& data, size_t seq_len, size_t vocab_size) {
     auto t = Tensor::create({seq_len, vocab_size}, ZEDINFER_DTYPE_F32, ZEDINFER_DEVICE_CPU, 0);
     t->load(data.data());
     return t;
@@ -89,9 +89,9 @@ TEST_F(ArgmaxSamplerTest, PicksFirstOnTie) {
 TEST_F(ArgmaxSamplerTest, WorksWith2DLogits) {
     // [seq_len=3, vocab_size=4] — should pick argmax of last row
     std::vector<float> data = {
-        0.1f, 0.2f, 0.3f, 0.4f,  // row 0
-        0.5f, 0.6f, 0.7f, 0.8f,  // row 1
-        0.9f, 0.1f, 0.2f, 0.3f,  // row 2 (last) — max at index 0
+        0.1f, 0.2f, 0.3f, 0.4f, // row 0
+        0.5f, 0.6f, 0.7f, 0.8f, // row 1
+        0.9f, 0.1f, 0.2f, 0.3f, // row 2 (last) — max at index 0
     };
     auto logits = make_logits_2d(data, 3, 4);
     int token = sampler_->sample(logits);
@@ -148,8 +148,7 @@ TEST(GeneralSamplerTest, TopKFiltering) {
     // top_k=2 means only indices 3 and 1 are candidates
     auto logits = make_logits({0.1f, 0.5f, 0.3f, 0.9f, 0.2f}, 5);
     int token = s.sample(logits);
-    EXPECT_TRUE(token == 3 || token == 1)
-        << "Top-k=2 should only select from top 2 tokens, got: " << token;
+    EXPECT_TRUE(token == 3 || token == 1) << "Top-k=2 should only select from top 2 tokens, got: " << token;
 }
 
 TEST(GeneralSamplerTest, TopPFiltering) {

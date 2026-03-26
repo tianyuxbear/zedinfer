@@ -12,20 +12,22 @@
 
 namespace zedinfer {
 
-static bool is_stop_token(int token_id, const std::vector<int> &stop_ids) {
+static bool is_stop_token(int token_id, const std::vector<int>& stop_ids) {
     for (int stop_id : stop_ids) {
-        if (token_id == stop_id) return true;
+        if (token_id == stop_id) {
+            return true;
+        }
     }
     return false;
 }
 
 Scheduler::Scheduler(SchedulerConfig config) : config_(config) {}
 
-void Scheduler::set_block_allocator(kvcache::BlockAllocator *allocator) {
+void Scheduler::set_block_allocator(kvcache::BlockAllocator* allocator) {
     block_allocator_ = allocator;
 }
 
-void Scheduler::set_prefix_cache(kvcache::PrefixCache *cache) {
+void Scheduler::set_prefix_cache(kvcache::PrefixCache* cache) {
     prefix_cache_ = cache;
 }
 
@@ -53,20 +55,20 @@ int Scheduler::active_count() const {
 
 void Scheduler::cleanup_failed_requests() {
     // Clean active requests (decode phase)
-    active_requests_.erase(
-        std::remove_if(active_requests_.begin(), active_requests_.end(),
-            [](const auto &ptr) { return ptr->phase == RequestPhase::COMPLETE; }),
-        active_requests_.end());
+    active_requests_.erase(std::remove_if(active_requests_.begin(), active_requests_.end(),
+                                          [](const auto& ptr) { return ptr->phase == RequestPhase::COMPLETE; }),
+                           active_requests_.end());
 
     // Also clean waiting queue — failed prefill requests (chunked) might still be there
-    while (!waiting_queue_.empty() &&
-           waiting_queue_.front()->phase == RequestPhase::COMPLETE) {
+    while (!waiting_queue_.empty() && waiting_queue_.front()->phase == RequestPhase::COMPLETE) {
         waiting_queue_.pop_front();
     }
 }
 
-bool Scheduler::can_admit(const InferenceRequest &req) const {
-    if (!block_allocator_) return true;
+bool Scheduler::can_admit(const InferenceRequest& req) const {
+    if (!block_allocator_) {
+        return true;
+    }
 
     int bs = block_allocator_->block_size();
     int num_layers = block_allocator_->num_layers();
@@ -75,8 +77,7 @@ bool Scheduler::can_admit(const InferenceRequest &req) const {
     // Multi-turn with existing blocks: only count ADDITIONAL blocks needed
     if (req.has_block_table() && req.block_table().num_layers > 0) {
         int current_blocks = static_cast<int>(req.block_table().k_blocks[0].size());
-        int total_after = req.block_table().seq_len + prompt_len +
-                          std::min(req.config.max_new_tokens, 256);
+        int total_after = req.block_table().seq_len + prompt_len + std::min(req.config.max_new_tokens, 256);
         int needed_per_layer = (total_after + bs - 1) / bs;
         int additional = std::max(0, needed_per_layer - current_blocks);
         return block_allocator_->available_blocks() >= additional * num_layers * 2;
@@ -93,15 +94,16 @@ bool Scheduler::can_admit(const InferenceRequest &req) const {
 // Batched Scheduling
 // ============================================================================
 
-void Scheduler::allocate_blocks_for_request(InferenceRequest *req) {
-    if (!block_allocator_) return;
+void Scheduler::allocate_blocks_for_request(InferenceRequest* req) {
+    if (!block_allocator_) {
+        return;
+    }
 
     if (!req->has_block_table() || req->block_table().num_layers == 0) {
         // New request: try prefix cache match first
         if (prefix_cache_ && !req->input_ids.empty()) {
             kvcache::SequenceBlockTable matched;
-            int cached = prefix_cache_->match_prefix(
-                req->input_ids, block_allocator_->block_size(), matched);
+            int cached = prefix_cache_->match_prefix(req->input_ids, block_allocator_->block_size(), matched);
             if (cached > 0) {
                 if (req->has_block_table()) {
                     req->block_table() = std::move(matched);
@@ -114,9 +116,8 @@ void Scheduler::allocate_blocks_for_request(InferenceRequest *req) {
 
         if (!req->has_block_table() || req->block_table().num_layers == 0) {
             // No prefix match — allocate from scratch
-            int est = std::min(
-                static_cast<int>(req->input_ids.size()) + 256,
-                static_cast<int>(req->input_ids.size()) + req->config.max_new_tokens);
+            int est = std::min(static_cast<int>(req->input_ids.size()) + 256,
+                               static_cast<int>(req->input_ids.size()) + req->config.max_new_tokens);
             auto allocated = block_allocator_->allocate_sequence(est);
             if (req->has_block_table()) {
                 req->block_table() = std::move(allocated);
@@ -130,7 +131,7 @@ void Scheduler::allocate_blocks_for_request(InferenceRequest *req) {
         }
     } else {
         // Multi-turn: extend blocks for new tokens
-        auto &bt = req->block_table();
+        auto& bt = req->block_table();
         int total = bt.seq_len + static_cast<int>(req->input_ids.size()) + 256;
         block_allocator_->ensure_blocks(bt, total);
     }
@@ -141,8 +142,10 @@ ScheduledBatch Scheduler::schedule() {
     int token_budget = config_.max_batch_tokens;
 
     // 1. Decode-first: all active decode requests (1 token each)
-    for (auto &req_ptr : active_requests_) {
-        if (token_budget <= 0) break;
+    for (auto& req_ptr : active_requests_) {
+        if (token_budget <= 0) {
+            break;
+        }
         if (block_allocator_) {
             block_allocator_->ensure_blocks(req_ptr->block_table(), req_ptr->block_table().seq_len + 1);
         }
@@ -155,16 +158,16 @@ ScheduledBatch Scheduler::schedule() {
     std::lock_guard<std::mutex> lock(submit_mutex_);
 
     while (!waiting_queue_.empty() && prefill_budget > 0) {
-        auto *req = waiting_queue_.front().get();
+        auto* req = waiting_queue_.front().get();
 
-        if (static_cast<int>(active_requests_.size()) +
-            static_cast<int>(batch.prefill_requests.size()) >= config_.max_batch_requests)
+        if (static_cast<int>(active_requests_.size()) + static_cast<int>(batch.prefill_requests.size())
+            >= config_.max_batch_requests) {
             break;
+        }
 
         if (!can_admit(*req)) {
-            LOGW << "[Scheduler] Cannot admit request " << req->request_id
-                 << ": prompt=" << req->input_ids.size() << " tokens"
-                 << ", available=" << (block_allocator_ ? block_allocator_->available_blocks() : -1);
+            LOGW << "[Scheduler] Cannot admit request " << req->request_id << ": prompt=" << req->input_ids.size()
+                 << " tokens" << ", available=" << (block_allocator_ ? block_allocator_->available_blocks() : -1);
             break;
         }
 
@@ -193,17 +196,12 @@ ScheduledBatch Scheduler::schedule() {
     return batch;
 }
 
-void Scheduler::process_results(
-    ScheduledBatch &batch,
-    tensor_t logits,
-    sampler::Sampler &sampler,
-    tokenizer::Tokenizer &tokenizer,
-    const std::vector<int> &stop_token_ids) {
-
+void Scheduler::process_results(ScheduledBatch& batch, tensor_t logits, sampler::Sampler& sampler,
+                                tokenizer::Tokenizer& tokenizer, const std::vector<int>& stop_token_ids) {
     int offset = 0;
 
     // Process decode results
-    for (auto *req : batch.decode_requests) {
+    for (auto* req : batch.decode_requests) {
         // Check cancellation (client disconnected)
         if (req->cancelled && req->cancelled->load()) {
             LOGI << "[Scheduler] Request " << req->request_id << " cancelled";
@@ -221,8 +219,7 @@ void Scheduler::process_results(
         req->generated_count++;
         req->block_table().seq_len++;
 
-        if (is_stop_token(token, stop_token_ids) ||
-            req->generated_count >= req->config.max_new_tokens) {
+        if (is_stop_token(token, stop_token_ids) || req->generated_count >= req->config.max_new_tokens) {
             complete_request(*req);
         } else if (req->config.stream && req->stream_callback) {
             req->stream_callback(tokenizer.decode({token}));
@@ -232,20 +229,17 @@ void Scheduler::process_results(
 
     // Process prefill results
     for (size_t i = 0; i < batch.prefill_requests.size(); ++i) {
-        auto *req = batch.prefill_requests[i];
+        auto* req = batch.prefill_requests[i];
         int chunk = batch.prefill_chunk_sizes[i];
 
         req->block_table().seq_len += chunk;
 
-        if (req->phase == RequestPhase::DECODE ||
-            req->prefill_progress >= static_cast<int>(req->input_ids.size())) {
+        if (req->phase == RequestPhase::DECODE || req->prefill_progress >= static_cast<int>(req->input_ids.size())) {
             req->phase = RequestPhase::DECODE;
 
             // Insert full blocks into prefix cache after prefill completes
             if (prefix_cache_ && block_allocator_) {
-                prefix_cache_->insert_blocks(
-                    req->input_ids, block_allocator_->block_size(),
-                    req->block_table());
+                prefix_cache_->insert_blocks(req->input_ids, block_allocator_->block_size(), req->block_table());
             }
 
             auto req_logits = logits->slice(0, offset, offset + chunk);
@@ -266,13 +260,12 @@ void Scheduler::process_results(
     }
 
     // Remove completed requests
-    active_requests_.erase(
-        std::remove_if(active_requests_.begin(), active_requests_.end(),
-            [](const auto &ptr) { return ptr->phase == RequestPhase::COMPLETE; }),
-        active_requests_.end());
+    active_requests_.erase(std::remove_if(active_requests_.begin(), active_requests_.end(),
+                                          [](const auto& ptr) { return ptr->phase == RequestPhase::COMPLETE; }),
+                           active_requests_.end());
 }
 
-void Scheduler::complete_request(InferenceRequest &req) {
+void Scheduler::complete_request(InferenceRequest& req) {
     req.phase = RequestPhase::COMPLETE;
 
     // Release blocks for owned tables (not borrowed session tables).
@@ -289,8 +282,7 @@ void Scheduler::complete_request(InferenceRequest &req) {
 
     try {
         req.result_promise.set_value(std::move(result));
-    } catch (...) {
-    }
+    } catch (...) {}
 }
 
 } // namespace zedinfer

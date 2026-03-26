@@ -4,4 +4,4 @@
 // C: [M, N]
 // A: [M, K]
 // B: [N, K]
-void matmul(const float *A, const float *B, float *C, int M, int N, int K);
+void matmul(const float* A, const float* B, float* C, int M, int N, int K);

@@ -4,17 +4,17 @@
 namespace zedinfer::device {
 
 // Returns the runtime API for the given device type
-const ZedinferRuntimeAPI *getRuntimeAPI(zedinferDeviceType_t device_type) {
+const ZedinferRuntimeAPI* getRuntimeAPI(zedinferDeviceType_t device_type) {
     switch (device_type) {
-    case ZEDINFER_DEVICE_CPU:
-        return zedinfer::device::cpu::getRuntimeAPI();
+        case ZEDINFER_DEVICE_CPU:
+            return zedinfer::device::cpu::getRuntimeAPI();
 #ifdef ENABLE_NVIDIA_API
-    case ZEDINFER_DEVICE_NVIDIA:
-        return zedinfer::device::nvidia::getRuntimeAPI();
+        case ZEDINFER_DEVICE_NVIDIA:
+            return zedinfer::device::nvidia::getRuntimeAPI();
 #endif
-    default:
-        EXCEPTION_UNSUPPORTED_DEVICE;
-        return nullptr;
+        default:
+            EXCEPTION_UNSUPPORTED_DEVICE;
+            return nullptr;
     }
 }
 

@@ -21,14 +21,14 @@ void add(tensor_t c, tensor_t a, tensor_t b) {
     zedinfer::core::context().setDevice(c->deviceType(), c->deviceId());
 
     switch (c->deviceType()) {
-    case ZEDINFER_DEVICE_CPU:
-        return cpu::add(c->data(), a->data(), b->data(), c->dtype(), c->numel());
+        case ZEDINFER_DEVICE_CPU:
+            return cpu::add(c->data(), a->data(), b->data(), c->dtype(), c->numel());
 #ifdef ENABLE_NVIDIA_API
-    case ZEDINFER_DEVICE_NVIDIA:
-        return nvidia::add(c->data(), a->data(), b->data(), c->dtype(), c->numel());
+        case ZEDINFER_DEVICE_NVIDIA:
+            return nvidia::add(c->data(), a->data(), b->data(), c->dtype(), c->numel());
 #endif
-    default:
-        EXCEPTION_UNSUPPORTED_DEVICE;
+        default:
+            EXCEPTION_UNSUPPORTED_DEVICE;
     }
 }
 } // namespace zedinfer::ops

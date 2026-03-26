@@ -17,13 +17,10 @@
 
 // Handwritten fallback (used when oneDNN is not available)
 template <typename T>
-static void linear_fallback(T *output, const T *input, const T *weight, const T *bias,
-                            size_t M, size_t N, size_t K) {
+static void linear_fallback(T* output, const T* input, const T* weight, const T* bias, size_t M, size_t N, size_t K) {
     if constexpr (std::is_same_v<T, float>) {
         if (bias) {
-            for (size_t i = 0; i < M; ++i) {
-                std::memcpy(output + i * N, bias, N * sizeof(T));
-            }
+            for (size_t i = 0; i < M; ++i) { std::memcpy(output + i * N, bias, N * sizeof(T)); }
         } else {
             std::memset(output, 0, M * N * sizeof(T));
         }
@@ -85,32 +82,30 @@ static void linear_fallback(T *output, const T *input, const T *weight, const T 
 
 namespace zedinfer::ops::cpu {
 
-void linear(std::byte *output, const std::byte *input, const std::byte *weight,
-            const std::byte *bias, zedinferDataType_t type, size_t M, size_t N, size_t K) {
-
+void linear(std::byte* output, const std::byte* input, const std::byte* weight, const std::byte* bias,
+            zedinferDataType_t type, size_t M, size_t N, size_t K) {
 #ifdef USE_ONEDNN
     // oneDNN handles all dtypes (FP32, BF16, FP16) with automatic ISA dispatch.
     // No manual type conversion needed.
     onednn::linear(output, input, weight, bias, type, M, N, K);
 #else
     switch (type) {
-    case ZEDINFER_DTYPE_F32:
-        return linear_fallback(reinterpret_cast<float *>(output),
-                               reinterpret_cast<const float *>(input),
-                               reinterpret_cast<const float *>(weight),
-                               reinterpret_cast<const float *>(bias), M, N, K);
-    case ZEDINFER_DTYPE_BF16:
-        return linear_fallback(reinterpret_cast<zedinfer::bf16_t *>(output),
-                               reinterpret_cast<const zedinfer::bf16_t *>(input),
-                               reinterpret_cast<const zedinfer::bf16_t *>(weight),
-                               reinterpret_cast<const zedinfer::bf16_t *>(bias), M, N, K);
-    case ZEDINFER_DTYPE_F16:
-        return linear_fallback(reinterpret_cast<zedinfer::fp16_t *>(output),
-                               reinterpret_cast<const zedinfer::fp16_t *>(input),
-                               reinterpret_cast<const zedinfer::fp16_t *>(weight),
-                               reinterpret_cast<const zedinfer::fp16_t *>(bias), M, N, K);
-    default:
-        EXCEPTION_UNSUPPORTED_DATATYPE(type);
+        case ZEDINFER_DTYPE_F32:
+            return linear_fallback(reinterpret_cast<float*>(output), reinterpret_cast<const float*>(input),
+                                   reinterpret_cast<const float*>(weight), reinterpret_cast<const float*>(bias), M, N,
+                                   K);
+        case ZEDINFER_DTYPE_BF16:
+            return linear_fallback(reinterpret_cast<zedinfer::bf16_t*>(output),
+                                   reinterpret_cast<const zedinfer::bf16_t*>(input),
+                                   reinterpret_cast<const zedinfer::bf16_t*>(weight),
+                                   reinterpret_cast<const zedinfer::bf16_t*>(bias), M, N, K);
+        case ZEDINFER_DTYPE_F16:
+            return linear_fallback(reinterpret_cast<zedinfer::fp16_t*>(output),
+                                   reinterpret_cast<const zedinfer::fp16_t*>(input),
+                                   reinterpret_cast<const zedinfer::fp16_t*>(weight),
+                                   reinterpret_cast<const zedinfer::fp16_t*>(bias), M, N, K);
+        default:
+            EXCEPTION_UNSUPPORTED_DATATYPE(type);
     }
 #endif
 }

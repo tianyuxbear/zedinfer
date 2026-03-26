@@ -19,7 +19,7 @@ namespace zedinfer::kvcache {
  */
 class PrefixCache {
 public:
-    explicit PrefixCache(BlockPool &pool, int num_layers);
+    explicit PrefixCache(BlockPool& pool, int num_layers);
 
     /**
      * Match a prompt's prefix against cached blocks.
@@ -27,18 +27,14 @@ public:
      * Fills matched_table with shared block IDs for the matched prefix.
      * Calls pool.share() and pool.touch() on matched blocks.
      */
-    int match_prefix(const std::vector<int> &token_ids,
-                     int block_size,
-                     SequenceBlockTable &matched_table);
+    int match_prefix(const std::vector<int>& token_ids, int block_size, SequenceBlockTable& matched_table);
 
     /**
      * Insert completed full blocks from a request into the cache.
      * Only full blocks (block_size tokens) are cached; partial blocks are skipped.
      * Sets content_hash and immutable on cached blocks.
      */
-    void insert_blocks(const std::vector<int> &token_ids,
-                       int block_size,
-                       const SequenceBlockTable &table);
+    void insert_blocks(const std::vector<int>& token_ids, int block_size, const SequenceBlockTable& table);
 
     /**
      * Remove a cache entry (used during eviction).
@@ -53,9 +49,7 @@ public:
     /**
      * Compute chain hash for a block of tokens.
      */
-    static uint64_t compute_block_hash(const std::vector<int> &tokens,
-                                       int start, int end,
-                                       uint64_t parent_hash);
+    static uint64_t compute_block_hash(const std::vector<int>& tokens, int start, int end, uint64_t parent_hash);
 
 private:
     struct CacheEntry {
@@ -63,7 +57,7 @@ private:
         std::vector<int> v_block_ids; // [num_layers]
     };
 
-    BlockPool &pool_;
+    BlockPool& pool_;
     int num_layers_;
     std::unordered_map<uint64_t, CacheEntry> cache_;
 

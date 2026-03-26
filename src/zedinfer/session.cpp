@@ -8,7 +8,7 @@
 
 namespace zedinfer {
 
-static std::string clean_output(const std::string &raw, const ChatTemplate &tmpl) {
+static std::string clean_output(const std::string& raw, const ChatTemplate& tmpl) {
     std::string text = raw;
 
     if (!tmpl.eos_token.empty()) {
@@ -19,7 +19,9 @@ static std::string clean_output(const std::string &raw, const ChatTemplate &tmpl
     }
 
     size_t end = text.find_last_not_of(" \t\n\r");
-    if (end == std::string::npos) return "";
+    if (end == std::string::npos) {
+        return "";
+    }
     return text.substr(0, end + 1);
 }
 
@@ -32,19 +34,14 @@ std::string InferenceSession::generate_uuid() {
     uint64_t low = dis(gen);
 
     std::ostringstream oss;
-    oss << std::hex << std::setfill('0')
-        << std::setw(16) << high
-        << std::setw(16) << low;
+    oss << std::hex << std::setfill('0') << std::setw(16) << high << std::setw(16) << low;
 
     return oss.str();
 }
 
-InferenceSession::InferenceSession(
-    std::shared_ptr<InferenceEngine> engine,
-    kvcache::SequenceBlockTable block_table,
-    kvcache::BlockAllocator *allocator,
-    const GenerationConfig &gen_config,
-    const ChatTemplate &chat_template)
+InferenceSession::InferenceSession(std::shared_ptr<InferenceEngine> engine, kvcache::SequenceBlockTable block_table,
+                                   kvcache::BlockAllocator* allocator, const GenerationConfig& gen_config,
+                                   const ChatTemplate& chat_template)
     : engine_(std::move(engine)),
       session_id_(generate_uuid()),
       block_table_(std::move(block_table)),
@@ -60,7 +57,7 @@ InferenceSession::~InferenceSession() {
     }
 }
 
-std::string InferenceSession::chat(const std::string &user_input) {
+std::string InferenceSession::chat(const std::string& user_input) {
     std::string input;
 
     if (is_first_turn_) {
@@ -89,7 +86,7 @@ std::string InferenceSession::chat(const std::string &user_input) {
     return output;
 }
 
-std::string InferenceSession::prepare_prompt(const std::string &user_input) {
+std::string InferenceSession::prepare_prompt(const std::string& user_input) {
     std::string input;
     if (is_first_turn_) {
         input += template_.bos_token;
@@ -99,8 +96,7 @@ std::string InferenceSession::prepare_prompt(const std::string &user_input) {
     return input;
 }
 
-void InferenceSession::complete_turn(const std::string &user_input,
-                                      const std::string &raw_output) {
+void InferenceSession::complete_turn(const std::string& user_input, const std::string& raw_output) {
     is_first_turn_ = false;
     chat_history_.push_back({"user", user_input});
     chat_history_.push_back({"assistant", raw_output});
