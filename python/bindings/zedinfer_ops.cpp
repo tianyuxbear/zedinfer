@@ -280,11 +280,11 @@ struct Ops {
                      float theta) {
         zedinfer::ops::rope(out.tensor, in.tensor, pos_ids.tensor, theta);
     }
-    static void self_attention(PyTensor &out, PyTensor &q, PyTensor &k,
-                               PyTensor &v, float scale) {
-        zedinfer::ops::self_attention(out.tensor, q.tensor, k.tensor,
-                                      v.tensor, scale);
-    }
+    // static void self_attention(PyTensor &out, PyTensor &q, PyTensor &k,
+    //                            PyTensor &v, float scale) {
+    //     zedinfer::ops::self_attention(out.tensor, q.tensor, k.tensor,
+    //                                   v.tensor, scale);
+    // }
     static void swiglu(PyTensor &out, PyTensor &gate, PyTensor &up) {
         zedinfer::ops::swiglu(out.tensor, gate.tensor, up.tensor);
     }
@@ -348,8 +348,8 @@ PYBIND11_MODULE(zedinfer_ops, m) {
         .def_static("rope", &Ops::rope,
                     py::arg("out"), py::arg("input"), py::arg("pos_ids"),
                     py::arg("theta") = 10000.0f)
-        .def_static("self_attention", &Ops::self_attention,
-                    py::arg("out"), py::arg("q"), py::arg("k"), py::arg("v"),
-                    py::arg("scale"))
+        // .def_static("self_attention", &Ops::self_attention,
+        //             py::arg("out"), py::arg("q"), py::arg("k"), py::arg("v"),
+        //             py::arg("scale"))
         .def_static("swiglu", &Ops::swiglu);
 }
