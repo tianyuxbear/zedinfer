@@ -3,6 +3,7 @@
 #include "backend/tensor/tensor.hpp"
 #include "zedinfer.h"
 
+#include <memory>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
 #include <string>
@@ -61,8 +62,13 @@ public:
 
     const auto& get_all_weights() const { return weights_; }
 
+    void retain_resource(std::shared_ptr<void> resource) {
+        resources_.push_back(std::move(resource));
+    }
+
 private:
     std::unordered_map<std::string, tensor_t> weights_;
+    std::vector<std::shared_ptr<void>> resources_;
 };
 
 /**
@@ -88,7 +94,8 @@ public:
     static void load_base_config(ModelConfig& config, const json& j);
     static std::unique_ptr<ModelConfig> load_config(const std::string& config_path);
     static std::unique_ptr<ModelWeights> load_weights(const std::string& model_path,
-                                                      zedinferDeviceType_t target_device);
+                                                      zedinferDeviceType_t target_device,
+                                                      const ModelConfig& config);
     static std::string map_weight_name(const std::string& raw_name);
 
 private:
