@@ -1,6 +1,7 @@
 #include "backend/core/context/context.hpp"
 #include "backend/core/core.hpp"
 #include "backend/ops/linear/cpu/linear_cpu.hpp"
+#include "backend/ops/linear/cpu/permute.hpp"
 #include "backend/ops/linear/nvidia/linear_nvidia.cuh"
 #include "backend/ops/ops.hpp"
 #include "utils/check.hpp"
@@ -8,6 +9,12 @@
 #include <cstddef>
 
 namespace zedinfer::ops {
+
+static tensor_t permute_quantized_linear_input(tensor_t input, tensor_t g_idx) {
+    ASSERT(input && g_idx, "permute_quantized_linear_input requires input and g_idx.");
+    return cpu::permute_cols(input, g_idx);
+}
+
 void linear(tensor_t out, tensor_t in, tensor_t weight, tensor_t bias) {
     if (bias) {
         CHECK_SAME_DEVICE(out, in, weight, bias);
@@ -92,14 +99,20 @@ void linear_quantized(tensor_t out, tensor_t in, tensor_t weight, tensor_t bias,
     ASSERT(group_size == -1 || group_size > 0,
            "Linear quantized group_size must be -1 or positive.");
 
+    tensor_t current_input = in;
+    if (g_idx && out->deviceType() == ZEDINFER_DEVICE_CPU) {
+        current_input = permute_quantized_linear_input(in, g_idx);
+        g_idx = nullptr;
+    }
+
     std::byte *bias_data = bias ? bias->data() : nullptr;
     std::byte *g_idx_data = g_idx ? g_idx->data() : nullptr;
 
     if (out->deviceType() == ZEDINFER_DEVICE_CPU) {
         return cpu::linear_quantized(
-            out->data(), in->data(), weight->data(), bias_data,
+            out->data(), current_input->data(), weight->data(), bias_data,
             scale->data(), g_idx_data, out->dtype(), num_bits, group_size,
-            out->dim(0), out->dim(1), in->dim(1));
+            out->dim(0), out->dim(1), current_input->dim(1));
     }
 
     zedinfer::core::context().setDevice(out->deviceType(), out->deviceId());
@@ -107,15 +120,15 @@ void linear_quantized(tensor_t out, tensor_t in, tensor_t weight, tensor_t bias,
     switch (out->deviceType()) {
     case ZEDINFER_DEVICE_CPU:
         return cpu::linear_quantized(
-            out->data(), in->data(), weight->data(), bias_data,
+            out->data(), current_input->data(), weight->data(), bias_data,
             scale->data(), g_idx_data, out->dtype(), num_bits, group_size,
-            out->dim(0), out->dim(1), in->dim(1));
+            out->dim(0), out->dim(1), current_input->dim(1));
 #ifdef ENABLE_NVIDIA_API
     case ZEDINFER_DEVICE_NVIDIA:
         return nvidia::linear_quantized(
-            out->data(), in->data(), weight->data(), bias_data,
+            out->data(), current_input->data(), weight->data(), bias_data,
             scale->data(), g_idx_data, out->dtype(), num_bits, group_size,
-            out->dim(0), out->dim(1), in->dim(1));
+            out->dim(0), out->dim(1), current_input->dim(1));
 #endif
     default:
         EXCEPTION_UNSUPPORTED_DEVICE;
