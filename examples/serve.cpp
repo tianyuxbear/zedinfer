@@ -36,7 +36,7 @@ int main(int argc, char *argv[]) {
 
     program.add_argument("--host")
         .help("Host to bind to")
-        .default_value(std::string("0.0.0.0"));
+        .default_value(std::string("127.0.0.1"));
 
     program.add_argument("--port")
         .help("Port to listen on")
