@@ -14,7 +14,9 @@ namespace wmma = nvcuda::wmma;
 namespace detail {
 
 inline constexpr unsigned kFullWarpMask = 0xffffffffu;
+inline constexpr int kBlockSize = BLOCK_SIZE;
 inline constexpr int kWarpSize = 32;
+inline constexpr int kMaxSmallBatchRows = 8;
 
 __device__ __forceinline__ void unpack_row_int4x64(int8_t* __restrict__ dst, const uint8_t* __restrict__ src) {
     const uint32_t* src4 = reinterpret_cast<const uint32_t*>(src);
@@ -66,6 +68,16 @@ __device__ __forceinline__ float warp_reduce_sum(float value) {
         value += __shfl_down_sync(kFullWarpMask, value, offset);
     }
     return value;
+}
+
+template <int NumValues> __device__ __forceinline__ void warp_reduce_sum_array(float (&values)[NumValues]) {
+#pragma unroll
+    for (int offset = kWarpSize / 2; offset > 0; offset >>= 1) {
+#pragma unroll
+        for (int i = 0; i < NumValues; ++i) {
+            values[i] += __shfl_down_sync(kFullWarpMask, values[i], offset);
+        }
+    }
 }
 
 __device__ __forceinline__ float block_reduce_sum(float value, float* shared_sum, int tid, int num_threads) {
@@ -163,7 +175,7 @@ __global__ void matvec_q4_0_q8_row_soa_kernel(T* __restrict__ out, const int32_t
     }
 }
 
-template <typename T>
+template <bool SingleGroup, typename T>
 __global__ void matvec_q8_0_q8_row_soa_kernel(T* __restrict__ out, const int8_t* __restrict__ weight_q,
                                               const T* __restrict__ weight_scales, const int8_t* __restrict__ act_q,
                                               const T* __restrict__ act_scales, const T* __restrict__ bias, size_t N,
@@ -176,15 +188,18 @@ __global__ void matvec_q8_0_q8_row_soa_kernel(T* __restrict__ out, const int8_t*
     const int tid = threadIdx.x;
     const int num_threads = blockDim.x;
 
+    const int num_groups = SingleGroup ? 1 : static_cast<int>(K) / group_size;
     const int8_t* w_row = weight_q + row_idx * K;
-    const T* w_scales_row = weight_scales + row_idx * (K / group_size);
+    const T* w_scales_row = weight_scales + row_idx * num_groups;
 
     float d_a = __ldg(&act_scales[0]);
+    const float d_w_row = SingleGroup ? to_float(__ldg(&w_scales_row[0])) : 0.0f;
     float thread_sum = 0.0f;
     const int num_blocks = K / 32;
 
     for (int b = tid; b < num_blocks; b += num_threads) {
-        float d_w = to_float(__ldg(&w_scales_row[b * 32 / group_size]));
+        const int group_idx = SingleGroup ? 0 : (b * 32) / group_size;
+        const float d_w = SingleGroup ? d_w_row : to_float(__ldg(&w_scales_row[group_idx]));
 
         int4 w0 = __ldg(reinterpret_cast<const int4*>(w_row + b * 32));
         int4 w1 = __ldg(reinterpret_cast<const int4*>(w_row + b * 32 + 16));
@@ -209,6 +224,202 @@ __global__ void matvec_q8_0_q8_row_soa_kernel(T* __restrict__ out, const int8_t*
     if (tid < 32) {
         if (tid == 0) {
             detail::store_matvec_output(out, bias, row_idx, thread_sum, d_a, static_cast<int>(N));
+        }
+    }
+}
+
+template <int RowsPerBlock, typename T>
+__global__ void matmul_q4_0_q8_small_batch_soa_kernel(T* __restrict__ out, const int32_t* __restrict__ weight_q,
+                                                      const T* __restrict__ weight_scales,
+                                                      const int8_t* __restrict__ act_q,
+                                                      const T* __restrict__ act_scales,
+                                                      const T* __restrict__ bias, size_t M, size_t N, size_t K,
+                                                      int group_size) {
+    static_assert(RowsPerBlock > 0 && RowsPerBlock <= detail::kMaxSmallBatchRows, "Invalid small-batch tile size.");
+
+    const size_t row_idx = blockIdx.x;
+    const size_t batch_row0 = static_cast<size_t>(blockIdx.y) * RowsPerBlock;
+    if (row_idx >= N || batch_row0 >= M) {
+        return;
+    }
+
+    const int tid = threadIdx.x;
+    const int lane_id = tid & (detail::kWarpSize - 1);
+    const int warp_id = tid / detail::kWarpSize;
+    const int num_threads = blockDim.x;
+    const int num_warps = (num_threads + detail::kWarpSize - 1) / detail::kWarpSize;
+    const int num_groups = static_cast<int>(K) / group_size;
+
+    const int32_t* w_row = weight_q + row_idx * (K / 8);
+    const T* w_scales_row = weight_scales + row_idx * num_groups;
+    const int num_blocks = static_cast<int>(K) / 32;
+
+    float partial_sums[RowsPerBlock] = {0.0f};
+
+    for (int b = tid; b < num_blocks; b += num_threads) {
+        const int group_idx = (b * 32) / group_size;
+        const float d_w = to_float(__ldg(&w_scales_row[group_idx]));
+        const int4 w_v = __ldg(reinterpret_cast<const int4*>(w_row + b * 4));
+
+#pragma unroll
+        for (int r = 0; r < RowsPerBlock; ++r) {
+            const size_t batch_row = batch_row0 + static_cast<size_t>(r);
+            if (batch_row >= M) {
+                continue;
+            }
+
+            const int8_t* a_row = act_q + batch_row * K;
+            const float d_a = to_float(__ldg(&act_scales[batch_row * num_groups + group_idx]));
+
+            const int4 a0 = __ldg(reinterpret_cast<const int4*>(a_row + b * 32));
+            const int4 a1 = __ldg(reinterpret_cast<const int4*>(a_row + b * 32 + 16));
+
+            int sumi = 0;
+            sumi = detail::dp4a_q4_chunk(w_v.x, a0.x, a0.y, sumi);
+            sumi = detail::dp4a_q4_chunk(w_v.y, a0.z, a0.w, sumi);
+            sumi = detail::dp4a_q4_chunk(w_v.z, a1.x, a1.y, sumi);
+            sumi = detail::dp4a_q4_chunk(w_v.w, a1.z, a1.w, sumi);
+
+            partial_sums[r] += static_cast<float>(sumi) * d_w * d_a;
+        }
+    }
+
+    __shared__ float shared_sum[RowsPerBlock * (detail::kBlockSize / detail::kWarpSize)];
+    detail::warp_reduce_sum_array(partial_sums);
+
+    if (lane_id == 0) {
+#pragma unroll
+        for (int r = 0; r < RowsPerBlock; ++r) {
+            shared_sum[r * (detail::kBlockSize / detail::kWarpSize) + warp_id] = partial_sums[r];
+        }
+    }
+    __syncthreads();
+
+    if (warp_id == 0) {
+        float block_sums[RowsPerBlock] = {0.0f};
+#pragma unroll
+        for (int r = 0; r < RowsPerBlock; ++r) {
+            block_sums[r] = (lane_id < num_warps) ? shared_sum[r * (detail::kBlockSize / detail::kWarpSize) + lane_id]
+                                                  : 0.0f;
+        }
+        detail::warp_reduce_sum_array(block_sums);
+
+        if (lane_id == 0) {
+            const float bias_value = detail::load_or_zero(bias, static_cast<int>(row_idx), static_cast<int>(N));
+#pragma unroll
+            for (int r = 0; r < RowsPerBlock; ++r) {
+                const size_t batch_row = batch_row0 + static_cast<size_t>(r);
+                if (batch_row < M) {
+                    out[batch_row * N + row_idx] = from_float<T>(block_sums[r] + bias_value);
+                }
+            }
+        }
+    }
+}
+
+template <int RowsPerBlock, bool SingleGroup, typename T>
+__global__ void matmul_q8_0_q8_small_batch_soa_kernel(T* __restrict__ out, const int8_t* __restrict__ weight_q,
+                                                      const T* __restrict__ weight_scales,
+                                                      const int8_t* __restrict__ act_q,
+                                                      const T* __restrict__ act_scales,
+                                                      const T* __restrict__ bias, size_t M, size_t N, size_t K,
+                                                      int group_size) {
+    static_assert(RowsPerBlock > 0 && RowsPerBlock <= detail::kMaxSmallBatchRows, "Invalid small-batch tile size.");
+
+    const size_t row_idx = blockIdx.x;
+    const size_t batch_row0 = static_cast<size_t>(blockIdx.y) * RowsPerBlock;
+    if (row_idx >= N || batch_row0 >= M) {
+        return;
+    }
+
+    const int tid = threadIdx.x;
+    const int lane_id = tid & (detail::kWarpSize - 1);
+    const int warp_id = tid / detail::kWarpSize;
+    const int num_threads = blockDim.x;
+    const int num_warps = (num_threads + detail::kWarpSize - 1) / detail::kWarpSize;
+    const int num_groups = SingleGroup ? 1 : static_cast<int>(K) / group_size;
+
+    const int8_t* w_row = weight_q + row_idx * K;
+    const T* w_scales_row = weight_scales + row_idx * num_groups;
+    const int num_blocks = static_cast<int>(K) / 32;
+
+    float partial_sums[RowsPerBlock] = {0.0f};
+    float row_act_scales[RowsPerBlock] = {0.0f};
+
+    if constexpr (SingleGroup) {
+#pragma unroll
+        for (int r = 0; r < RowsPerBlock; ++r) {
+            const size_t batch_row = batch_row0 + static_cast<size_t>(r);
+            if (batch_row < M) {
+                row_act_scales[r] = to_float(__ldg(&act_scales[batch_row]));
+            }
+        }
+    }
+
+    const float row_weight_scale = SingleGroup ? to_float(__ldg(&w_scales_row[0])) : 0.0f;
+
+    for (int b = tid; b < num_blocks; b += num_threads) {
+        const int group_idx = SingleGroup ? 0 : (b * 32) / group_size;
+        const float d_w = SingleGroup ? row_weight_scale : to_float(__ldg(&w_scales_row[group_idx]));
+        const int4 w0 = __ldg(reinterpret_cast<const int4*>(w_row + b * 32));
+        const int4 w1 = __ldg(reinterpret_cast<const int4*>(w_row + b * 32 + 16));
+
+#pragma unroll
+        for (int r = 0; r < RowsPerBlock; ++r) {
+            const size_t batch_row = batch_row0 + static_cast<size_t>(r);
+            if (batch_row >= M) {
+                continue;
+            }
+
+            const int8_t* a_row = act_q + batch_row * K;
+            const float d_a = SingleGroup ? row_act_scales[r]
+                                          : to_float(__ldg(&act_scales[batch_row * num_groups + group_idx]));
+            const int4 a0 = __ldg(reinterpret_cast<const int4*>(a_row + b * 32));
+            const int4 a1 = __ldg(reinterpret_cast<const int4*>(a_row + b * 32 + 16));
+
+            int sumi = 0;
+            sumi = __dp4a(w0.x, a0.x, sumi);
+            sumi = __dp4a(w0.y, a0.y, sumi);
+            sumi = __dp4a(w0.z, a0.z, sumi);
+            sumi = __dp4a(w0.w, a0.w, sumi);
+            sumi = __dp4a(w1.x, a1.x, sumi);
+            sumi = __dp4a(w1.y, a1.y, sumi);
+            sumi = __dp4a(w1.z, a1.z, sumi);
+            sumi = __dp4a(w1.w, a1.w, sumi);
+
+            partial_sums[r] += static_cast<float>(sumi) * d_w * d_a;
+        }
+    }
+
+    __shared__ float shared_sum[RowsPerBlock * (detail::kBlockSize / detail::kWarpSize)];
+    detail::warp_reduce_sum_array(partial_sums);
+
+    if (lane_id == 0) {
+#pragma unroll
+        for (int r = 0; r < RowsPerBlock; ++r) {
+            shared_sum[r * (detail::kBlockSize / detail::kWarpSize) + warp_id] = partial_sums[r];
+        }
+    }
+    __syncthreads();
+
+    if (warp_id == 0) {
+        float block_sums[RowsPerBlock] = {0.0f};
+#pragma unroll
+        for (int r = 0; r < RowsPerBlock; ++r) {
+            block_sums[r] = (lane_id < num_warps) ? shared_sum[r * (detail::kBlockSize / detail::kWarpSize) + lane_id]
+                                                  : 0.0f;
+        }
+        detail::warp_reduce_sum_array(block_sums);
+
+        if (lane_id == 0) {
+            const float bias_value = detail::load_or_zero(bias, static_cast<int>(row_idx), static_cast<int>(N));
+#pragma unroll
+            for (int r = 0; r < RowsPerBlock; ++r) {
+                const size_t batch_row = batch_row0 + static_cast<size_t>(r);
+                if (batch_row < M) {
+                    out[batch_row * N + row_idx] = from_float<T>(block_sums[r] + bias_value);
+                }
+            }
         }
     }
 }
