@@ -74,9 +74,7 @@ template <int NumValues> __device__ __forceinline__ void warp_reduce_sum_array(f
 #pragma unroll
     for (int offset = kWarpSize / 2; offset > 0; offset >>= 1) {
 #pragma unroll
-        for (int i = 0; i < NumValues; ++i) {
-            values[i] += __shfl_down_sync(kFullWarpMask, values[i], offset);
-        }
+        for (int i = 0; i < NumValues; ++i) { values[i] += __shfl_down_sync(kFullWarpMask, values[i], offset); }
     }
 }
 
@@ -232,9 +230,8 @@ template <int RowsPerBlock, typename T>
 __global__ void matmul_q4_0_q8_small_batch_soa_kernel(T* __restrict__ out, const int32_t* __restrict__ weight_q,
                                                       const T* __restrict__ weight_scales,
                                                       const int8_t* __restrict__ act_q,
-                                                      const T* __restrict__ act_scales,
-                                                      const T* __restrict__ bias, size_t M, size_t N, size_t K,
-                                                      int group_size) {
+                                                      const T* __restrict__ act_scales, const T* __restrict__ bias,
+                                                      size_t M, size_t N, size_t K, int group_size) {
     static_assert(RowsPerBlock > 0 && RowsPerBlock <= detail::kMaxSmallBatchRows, "Invalid small-batch tile size.");
 
     const size_t row_idx = blockIdx.x;
@@ -299,8 +296,8 @@ __global__ void matmul_q4_0_q8_small_batch_soa_kernel(T* __restrict__ out, const
         float block_sums[RowsPerBlock] = {0.0f};
 #pragma unroll
         for (int r = 0; r < RowsPerBlock; ++r) {
-            block_sums[r] = (lane_id < num_warps) ? shared_sum[r * (detail::kBlockSize / detail::kWarpSize) + lane_id]
-                                                  : 0.0f;
+            block_sums[r]
+                = (lane_id < num_warps) ? shared_sum[r * (detail::kBlockSize / detail::kWarpSize) + lane_id] : 0.0f;
         }
         detail::warp_reduce_sum_array(block_sums);
 
@@ -321,9 +318,8 @@ template <int RowsPerBlock, bool SingleGroup, typename T>
 __global__ void matmul_q8_0_q8_small_batch_soa_kernel(T* __restrict__ out, const int8_t* __restrict__ weight_q,
                                                       const T* __restrict__ weight_scales,
                                                       const int8_t* __restrict__ act_q,
-                                                      const T* __restrict__ act_scales,
-                                                      const T* __restrict__ bias, size_t M, size_t N, size_t K,
-                                                      int group_size) {
+                                                      const T* __restrict__ act_scales, const T* __restrict__ bias,
+                                                      size_t M, size_t N, size_t K, int group_size) {
     static_assert(RowsPerBlock > 0 && RowsPerBlock <= detail::kMaxSmallBatchRows, "Invalid small-batch tile size.");
 
     const size_t row_idx = blockIdx.x;
@@ -372,8 +368,8 @@ __global__ void matmul_q8_0_q8_small_batch_soa_kernel(T* __restrict__ out, const
             }
 
             const int8_t* a_row = act_q + batch_row * K;
-            const float d_a = SingleGroup ? row_act_scales[r]
-                                          : to_float(__ldg(&act_scales[batch_row * num_groups + group_idx]));
+            const float d_a
+                = SingleGroup ? row_act_scales[r] : to_float(__ldg(&act_scales[batch_row * num_groups + group_idx]));
             const int4 a0 = __ldg(reinterpret_cast<const int4*>(a_row + b * 32));
             const int4 a1 = __ldg(reinterpret_cast<const int4*>(a_row + b * 32 + 16));
 
@@ -406,8 +402,8 @@ __global__ void matmul_q8_0_q8_small_batch_soa_kernel(T* __restrict__ out, const
         float block_sums[RowsPerBlock] = {0.0f};
 #pragma unroll
         for (int r = 0; r < RowsPerBlock; ++r) {
-            block_sums[r] = (lane_id < num_warps) ? shared_sum[r * (detail::kBlockSize / detail::kWarpSize) + lane_id]
-                                                  : 0.0f;
+            block_sums[r]
+                = (lane_id < num_warps) ? shared_sum[r * (detail::kBlockSize / detail::kWarpSize) + lane_id] : 0.0f;
         }
         detail::warp_reduce_sum_array(block_sums);
 

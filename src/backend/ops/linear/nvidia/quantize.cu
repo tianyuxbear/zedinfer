@@ -104,8 +104,9 @@ __global__ void quantize_q8_row_vectorized_kernel(const T* __restrict__ input, i
 }
 
 template <typename T>
-__global__ void quantize_q8_row_grouped_kernel(const T* __restrict__ input, int8_t* __restrict__ q_out,
-                                               T* __restrict__ scale_out, size_t K, int group_size, int num_groups) {
+__global__ void quantize_q8_row_grouped_serial_kernel(const T* __restrict__ input, int8_t* __restrict__ q_out,
+                                                      T* __restrict__ scale_out, size_t K, int group_size,
+                                                      int num_groups) {
     static_assert(sizeof(T) == 2, "Quantized CUDA fallback supports only BF16/FP16 activations.");
     constexpr int kValuesPerVector = sizeof(int4) / sizeof(T);
     const int row = blockIdx.x;
@@ -146,6 +147,81 @@ __global__ void quantize_q8_row_grouped_kernel(const T* __restrict__ input, int8
     }
 }
 
+template <typename T>
+__global__ void quantize_q8_row_grouped_warp_kernel(const T* __restrict__ input, int8_t* __restrict__ q_out,
+                                                    T* __restrict__ scale_out, size_t K, int group_size,
+                                                    int num_groups) {
+    static_assert(sizeof(T) == 2, "Quantized CUDA fallback supports only BF16/FP16 activations.");
+    constexpr int kValuesPerVector = sizeof(int4) / sizeof(T);
+    const int row = blockIdx.x;
+    const int group = blockIdx.y;
+    const int lane_id = threadIdx.x;
+
+    const int group_offset = group * group_size;
+    const int num_chunks = group_size / kValuesPerVector;
+    const T* input_group = input + row * K + group_offset;
+    int8_t* q_group = q_out + row * K + group_offset;
+
+    float local_max = 0.0f;
+    for (int chunk = lane_id; chunk < num_chunks; chunk += kWarpSize) {
+        const int4 packed_values = reinterpret_cast<const int4*>(input_group + chunk * kValuesPerVector)[0];
+        local_max = fmaxf(local_max, vector_abs_max<T>(packed_values));
+    }
+
+    float amax = warp_reduce_max(local_max);
+    amax = __shfl_sync(0xffffffffu, amax, 0);
+    const float scale = amax / kQ8Max;
+    const float inverse_scale = (amax == 0.0f) ? 0.0f : 1.0f / scale;
+
+    for (int chunk = lane_id; chunk < num_chunks; chunk += kWarpSize) {
+        const int4 packed_values = reinterpret_cast<const int4*>(input_group + chunk * kValuesPerVector)[0];
+        reinterpret_cast<int2*>(q_group + chunk * kValuesPerVector)[0]
+            = quantize_vector<T>(packed_values, inverse_scale);
+    }
+
+    if (lane_id == 0) {
+        scale_out[row * num_groups + group] = from_float<T>(scale);
+    }
+}
+
+template <typename T>
+__global__ void quantize_q8_row_grouped_block_kernel(const T* __restrict__ input, int8_t* __restrict__ q_out,
+                                                     T* __restrict__ scale_out, size_t K, int group_size,
+                                                     int num_groups) {
+    static_assert(sizeof(T) == 2, "Quantized CUDA fallback supports only BF16/FP16 activations.");
+    constexpr int kValuesPerVector = sizeof(int4) / sizeof(T);
+    const int row = blockIdx.x;
+    const int group = blockIdx.y;
+    const int tid = threadIdx.x;
+    const int num_threads = blockDim.x;
+
+    const int group_offset = group * group_size;
+    const int num_chunks = group_size / kValuesPerVector;
+    const T* input_group = input + row * K + group_offset;
+    int8_t* q_group = q_out + row * K + group_offset;
+
+    float local_max = 0.0f;
+    for (int chunk = tid; chunk < num_chunks; chunk += num_threads) {
+        const int4 packed_values = reinterpret_cast<const int4*>(input_group + chunk * kValuesPerVector)[0];
+        local_max = fmaxf(local_max, vector_abs_max<T>(packed_values));
+    }
+
+    __shared__ float shared_max[kBlockSize / kWarpSize];
+    const float amax = block_reduce_max(local_max, shared_max, tid, num_threads);
+    const float scale = amax / kQ8Max;
+    const float inverse_scale = (amax == 0.0f) ? 0.0f : 1.0f / scale;
+
+    for (int chunk = tid; chunk < num_chunks; chunk += num_threads) {
+        const int4 packed_values = reinterpret_cast<const int4*>(input_group + chunk * kValuesPerVector)[0];
+        reinterpret_cast<int2*>(q_group + chunk * kValuesPerVector)[0]
+            = quantize_vector<T>(packed_values, inverse_scale);
+    }
+
+    if (tid == 0) {
+        scale_out[row * num_groups + group] = from_float<T>(scale);
+    }
+}
+
 } // namespace zedinfer::ops::nvidia::detail
 
 namespace zedinfer::ops::nvidia {
@@ -172,9 +248,24 @@ void launch_quantize_q8_row_grouped(const T* input, int8_t* q_out, T* scale_out,
         = std::clamp(((chunks_per_group + detail::kWarpSize - 1) / detail::kWarpSize) * detail::kWarpSize,
                      detail::kWarpSize, detail::kBlockSize);
 
+    if (static_cast<int>(K) < 3072) {
+        dim3 block(num_threads);
+        dim3 grid(M);
+        detail::quantize_q8_row_grouped_serial_kernel<T>
+            <<<grid, block, 0, stream>>>(input, q_out, scale_out, K, group_size, num_groups);
+        return;
+    }
+
+    dim3 grid(M, static_cast<unsigned>(num_groups));
+    if (num_threads <= detail::kWarpSize) {
+        dim3 block(detail::kWarpSize);
+        detail::quantize_q8_row_grouped_warp_kernel<T>
+            <<<grid, block, 0, stream>>>(input, q_out, scale_out, K, group_size, num_groups);
+        return;
+    }
+
     dim3 block(num_threads);
-    dim3 grid(M);
-    detail::quantize_q8_row_grouped_kernel<T>
+    detail::quantize_q8_row_grouped_block_kernel<T>
         <<<grid, block, 0, stream>>>(input, q_out, scale_out, K, group_size, num_groups);
 }
 

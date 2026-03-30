@@ -133,16 +133,14 @@ static QuantizedLinearKernelConfig select_quantized_linear_kernel(size_t M, size
     const double occ_small = std::min(1.0, static_cast<double>(blocks_small) / std::max(1, num_sms));
     const double occ_large = std::min(1.0, static_cast<double>(blocks_large) / std::max(1, num_sms));
 
-    const double small_score
-        = tile_coverage(M, 64) * tile_coverage(N, 128) * (0.65 + 0.35 * occ_small);
+    const double small_score = tile_coverage(M, 64) * tile_coverage(N, 128) * (0.65 + 0.35 * occ_small);
 
     double large_arch_bonus = cc >= 90 ? 1.18 : (cc >= 89 ? 1.10 : 1.0);
     if (num_bits == 4 && cc < 89) {
         large_arch_bonus *= 0.93;
     }
 
-    double large_score
-        = tile_coverage(M, 128) * tile_coverage(N, 256) * (0.65 + 0.35 * occ_large) * large_arch_bonus;
+    double large_score = tile_coverage(M, 128) * tile_coverage(N, 256) * (0.65 + 0.35 * occ_large) * large_arch_bonus;
 
     if (M < 96) {
         large_score *= 0.88;
@@ -202,9 +200,9 @@ QuantizedLinearWorkspace<T> allocate_quantized_linear_workspace(zedinfer::core::
 }
 
 template <typename T>
-void launch_decode_matvec_quantized(T* output, const T* input, const void* weight_packed, const T* bias, const T* scales,
-                                    int num_bits, int group_size, size_t N, size_t K, zedinfer::core::Runtime& runtime,
-                                    cudaStream_t stream) {
+void launch_decode_matvec_quantized(T* output, const T* input, const void* weight_packed, const T* bias,
+                                    const T* scales, int num_bits, int group_size, size_t N, size_t K,
+                                    zedinfer::core::Runtime& runtime, cudaStream_t stream) {
     auto workspace = allocate_quantized_linear_workspace<T>(runtime, 1, K, 1, 1, 0, stream);
     launch_quantize_q8_row<T>(input, workspace.act_q, workspace.act_scales, 1, K, stream);
 
@@ -213,18 +211,18 @@ void launch_decode_matvec_quantized(T* output, const T* input, const void* weigh
     const dim3 block(static_cast<unsigned>(std::min(round_up_to_warp(chunks), BLOCK_SIZE)));
 
     if (num_bits == 4) {
-        matvec_q4_0_q8_row_soa_kernel<T><<<grid, block, 0, stream>>>(
-            output, reinterpret_cast<const int32_t*>(weight_packed), scales, workspace.act_q, workspace.act_scales,
-            bias, N, K, group_size);
+        matvec_q4_0_q8_row_soa_kernel<T>
+            <<<grid, block, 0, stream>>>(output, reinterpret_cast<const int32_t*>(weight_packed), scales,
+                                         workspace.act_q, workspace.act_scales, bias, N, K, group_size);
     } else {
         if (group_size >= static_cast<int>(K)) {
-            matvec_q8_0_q8_row_soa_kernel<true, T><<<grid, block, 0, stream>>>(
-                output, reinterpret_cast<const int8_t*>(weight_packed), scales, workspace.act_q, workspace.act_scales,
-                bias, N, K, group_size);
+            matvec_q8_0_q8_row_soa_kernel<true, T>
+                <<<grid, block, 0, stream>>>(output, reinterpret_cast<const int8_t*>(weight_packed), scales,
+                                             workspace.act_q, workspace.act_scales, bias, N, K, group_size);
         } else {
-            matvec_q8_0_q8_row_soa_kernel<false, T><<<grid, block, 0, stream>>>(
-                output, reinterpret_cast<const int8_t*>(weight_packed), scales, workspace.act_q, workspace.act_scales,
-                bias, N, K, group_size);
+            matvec_q8_0_q8_row_soa_kernel<false, T>
+                <<<grid, block, 0, stream>>>(output, reinterpret_cast<const int8_t*>(weight_packed), scales,
+                                             workspace.act_q, workspace.act_scales, bias, N, K, group_size);
         }
     }
 }
@@ -232,8 +230,8 @@ void launch_decode_matvec_quantized(T* output, const T* input, const void* weigh
 template <int RowsPerBlock, typename T>
 void launch_small_batch_quantized_linear_case(const dim3& grid, const dim3& block, T* output, const int8_t* act_q,
                                               const T* act_scales, const void* weight_packed, const T* scales,
-                                              const T* bias, size_t M, size_t N, size_t K, int num_bits,
-                                              int group_size, cudaStream_t stream) {
+                                              const T* bias, size_t M, size_t N, size_t K, int num_bits, int group_size,
+                                              cudaStream_t stream) {
     if (num_bits == 4) {
         matmul_q4_0_q8_small_batch_soa_kernel<RowsPerBlock, T>
             <<<grid, block, 0, stream>>>(output, reinterpret_cast<const int32_t*>(weight_packed), scales, act_q,
@@ -341,11 +339,10 @@ void launch_tensorop_quantized_linear(const QuantizedLinearKernelConfig& config,
 template <typename T>
 void launch_splitk_quantized_linear(const QuantizedLinearKernelConfig& config, T* output, const int8_t* act_q,
                                     const T* act_scales, const void* weight_packed, const T* scales, const T* bias,
-                                    float* splitk_workspace, size_t M, size_t N, size_t K, int num_bits,
-                                    int group_size, cudaStream_t stream) {
+                                    float* splitk_workspace, size_t M, size_t N, size_t K, int num_bits, int group_size,
+                                    cudaStream_t stream) {
     const dim3 grid(static_cast<unsigned>(div_ceil(N, static_cast<size_t>(128))),
-                    static_cast<unsigned>(div_ceil(M, static_cast<size_t>(64))),
-                    static_cast<unsigned>(config.split_k));
+                    static_cast<unsigned>(div_ceil(M, static_cast<size_t>(64))), static_cast<unsigned>(config.split_k));
 
     if (num_bits == 4) {
         CUDA_CHECK(cudaFuncSetAttribute(w4a8_gemm_soa_64x128_splitk_kernel<T>,
@@ -375,8 +372,8 @@ void launch_linear_quantized_autotuned(T* output, const T* input, const void* we
     auto stream = reinterpret_cast<cudaStream_t>(runtime.stream());
 
     if (M == 1) {
-        launch_decode_matvec_quantized(output, input, weight_packed, bias, scales, num_bits, group_size, N, K,
-                                       runtime, stream);
+        launch_decode_matvec_quantized(output, input, weight_packed, bias, scales, num_bits, group_size, N, K, runtime,
+                                       stream);
         return;
     }
 
@@ -385,16 +382,13 @@ void launch_linear_quantized_autotuned(T* output, const T* input, const void* we
 
     const int act_group_size
         = (num_bits == 4 || (group_size > 0 && group_size < static_cast<int>(K))) ? group_size : static_cast<int>(K);
-    const int num_act_groups = (act_group_size > 0 && act_group_size < static_cast<int>(K))
-                                   ? static_cast<int>(K) / act_group_size
-                                   : 1;
+    const int num_act_groups
+        = (act_group_size > 0 && act_group_size < static_cast<int>(K)) ? static_cast<int>(K) / act_group_size : 1;
 
     const auto config = select_quantized_linear_kernel(M, N, K, num_bits, act_group_size, cc, num_sms);
-    auto workspace = allocate_quantized_linear_workspace<T>(runtime, M, K, num_act_groups,
-                                                            config.family == QuantizedLinearKernelFamily::TensorOp64x128SplitK
-                                                                ? config.split_k
-                                                                : 1,
-                                                            N, stream);
+    auto workspace = allocate_quantized_linear_workspace<T>(
+        runtime, M, K, num_act_groups,
+        config.family == QuantizedLinearKernelFamily::TensorOp64x128SplitK ? config.split_k : 1, N, stream);
 
     launch_quantize_q8_row_grouped<T>(input, workspace.act_q, workspace.act_scales, M, K, act_group_size, stream);
 
@@ -411,8 +405,7 @@ void launch_linear_quantized_autotuned(T* output, const T* input, const void* we
             break;
         case QuantizedLinearKernelFamily::TensorOp64x128SplitK:
             launch_splitk_quantized_linear(config, output, workspace.act_q, workspace.act_scales, weight_packed, scales,
-                                           bias, workspace.splitk_workspace, M, N, K, num_bits, act_group_size,
-                                           stream);
+                                           bias, workspace.splitk_workspace, M, N, K, num_bits, act_group_size, stream);
             break;
     }
 }
