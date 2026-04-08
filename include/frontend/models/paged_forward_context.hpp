@@ -64,6 +64,7 @@ private:
     void copy_to_block(const void* src, size_t bytes, void* dst);
     void build_decode_cache(const ExecutorConfig& exec_config);
     void build_flashinfer_decode_cache(const ops::AttentionConfig& cfg);
+    void build_flashinfer_prefill_cache(const ops::AttentionConfig& cfg);
 
     // Cached GPU page tables for batched decode (built once, reused across layers).
     // Physical layout [num_reqs, max_pages] is shared across layers, but the
@@ -86,6 +87,16 @@ private:
     std::vector<int> flashinfer_decode_qo_indptr_host_;
     bool flashinfer_decode_cache_built_ = false;
     bool flashinfer_decode_uses_prefill_kernel_ = false;
+    std::vector<const Slot*> flashinfer_prefill_slots_;
+    tensor_t flashinfer_prefill_qo_indptr_gpu_;
+    tensor_t flashinfer_prefill_kv_indptr_gpu_;
+    tensor_t flashinfer_prefill_kv_last_page_len_gpu_;
+    std::vector<int> flashinfer_prefill_qo_indptr_host_;
+    std::vector<int> flashinfer_prefill_kv_indptr_host_;
+    std::vector<int> flashinfer_prefill_kv_last_page_len_host_;
+    int flashinfer_prefill_start_ = -1;
+    int flashinfer_prefill_total_tokens_ = 0;
+    bool flashinfer_prefill_cache_built_ = false;
     int cached_num_decode_ = 0;
     int cached_max_blocks_ = 0;
     int cached_decode_start_ = -1;

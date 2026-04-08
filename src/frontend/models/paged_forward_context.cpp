@@ -228,6 +228,71 @@ static void append_active_pages(std::vector<int>& dst, const std::vector<int>& p
     dst.insert(dst.end(), pages.begin(), pages.begin() + active_pages);
 }
 
+static void ensure_flashinfer_page_table_cache(kvcache::SequenceBlockTable& table, zedinferDeviceType_t dev,
+                                               int dev_id) {
+    if (dev == ZEDINFER_DEVICE_CPU || table.pages.empty()) {
+        return;
+    }
+
+    const size_t pages_per_layer = table.pages.front().size();
+    const bool cache_valid = table.flashinfer_cache_device_type == dev && table.flashinfer_cache_device_id == dev_id
+                          && table.flashinfer_cache_pages_per_layer == pages_per_layer
+                          && table.flashinfer_page_tables_gpu.size() == table.pages.size();
+    if (cache_valid) {
+        return;
+    }
+
+    table.clear_runtime_caches();
+    table.flashinfer_page_tables_gpu.resize(table.pages.size());
+    table.flashinfer_cache_device_type = dev;
+    table.flashinfer_cache_device_id = dev_id;
+    table.flashinfer_cache_pages_per_layer = pages_per_layer;
+
+    for (size_t layer = 0; layer < table.pages.size(); ++layer) {
+        table.flashinfer_page_tables_gpu[layer] = upload_to_gpu(table.pages[layer], dev, dev_id);
+    }
+}
+
+static void ensure_flashinfer_single_decode_metadata_cache(kvcache::SequenceBlockTable& table, int kv_len,
+                                                           int block_size, bool use_prefill_kernel,
+                                                           zedinferDeviceType_t dev, int dev_id) {
+    if (dev == ZEDINFER_DEVICE_CPU) {
+        return;
+    }
+
+    if (table.flashinfer_cache_device_type != dev || table.flashinfer_cache_device_id != dev_id) {
+        table.clear_runtime_caches();
+    }
+
+    if (!table.flashinfer_single_decode_kv_indptr_gpu) {
+        table.flashinfer_single_decode_kv_indptr_gpu = Tensor::create({2}, ZEDINFER_DTYPE_I32, dev, dev_id);
+    }
+    if (!table.flashinfer_single_decode_kv_last_page_len_gpu) {
+        table.flashinfer_single_decode_kv_last_page_len_gpu = Tensor::create({1}, ZEDINFER_DTYPE_I32, dev, dev_id);
+    }
+
+    const int active_pages = ceil_div_int(kv_len, block_size);
+    const int kv_indptr_host[2] = {0, active_pages};
+    const int kv_last_page_len_host[1] = {last_page_len_for(kv_len, block_size)};
+    table.flashinfer_single_decode_kv_indptr_gpu->load(kv_indptr_host);
+    table.flashinfer_single_decode_kv_last_page_len_gpu->load(kv_last_page_len_host);
+
+    table.flashinfer_cache_device_type = dev;
+    table.flashinfer_cache_device_id = dev_id;
+
+    if (use_prefill_kernel) {
+        if (!table.flashinfer_single_decode_qo_indptr_gpu) {
+            table.flashinfer_single_decode_qo_indptr_gpu = Tensor::create({2}, ZEDINFER_DTYPE_I32, dev, dev_id);
+        }
+        const int qo_indptr_host[2] = {0, 1};
+        table.flashinfer_single_decode_qo_indptr_gpu->load(qo_indptr_host);
+    } else if (!table.flashinfer_single_decode_descriptor_gpu) {
+        table.flashinfer_single_decode_descriptor_gpu = Tensor::create({5}, ZEDINFER_DTYPE_I32, dev, dev_id);
+        const int fi_descriptor_host[5] = {0, 0, 0, 1, 1};
+        table.flashinfer_single_decode_descriptor_gpu->load(fi_descriptor_host);
+    }
+}
+
 static bool supports_flashinfer(const ops::AttentionConfig& cfg) {
 #if defined(USE_FLASHINFER) && defined(ENABLE_NVIDIA_API)
     // Keep a runtime kill switch so baseline/bench comparisons do not require a rebuild.
@@ -295,6 +360,39 @@ void PagedForwardContext::build_flashinfer_decode_cache(const ops::AttentionConf
     }
 
     const int num_layers = decode_slots[0]->block_table->num_layers;
+    if (cached_num_decode_ == 1) {
+        auto* table = decode_slots[0]->block_table;
+        const int kv_len = decode_slots[0]->past_len + 1;
+        const int active_pages = ceil_div_int(kv_len, cfg.block_size);
+
+        flashinfer_decode_kv_indptr_host_ = {0, active_pages};
+        flashinfer_decode_kv_last_page_len_host_ = {last_page_len_for(kv_len, cfg.block_size)};
+        if (flashinfer_decode_uses_prefill_kernel_) {
+            flashinfer_decode_qo_indptr_host_ = {0, 1};
+        } else {
+            flashinfer_decode_qo_indptr_host_.clear();
+        }
+
+        ensure_flashinfer_page_table_cache(*table, cfg.device_type, cfg.device_id);
+        ensure_flashinfer_single_decode_metadata_cache(
+            *table, kv_len, cfg.block_size, flashinfer_decode_uses_prefill_kernel_, cfg.device_type, cfg.device_id);
+        flashinfer_decode_layer_cache_.resize(num_layers);
+        for (int layer = 0; layer < num_layers; ++layer) {
+            flashinfer_decode_layer_cache_[layer] = {table->flashinfer_page_tables_gpu[layer]};
+        }
+
+        flashinfer_decode_kv_indptr_gpu_ = table->flashinfer_single_decode_kv_indptr_gpu;
+        flashinfer_decode_kv_last_page_len_gpu_ = table->flashinfer_single_decode_kv_last_page_len_gpu;
+        if (flashinfer_decode_uses_prefill_kernel_) {
+            flashinfer_decode_qo_indptr_gpu_ = table->flashinfer_single_decode_qo_indptr_gpu;
+        } else {
+            flashinfer_decode_descriptor_gpu_ = table->flashinfer_single_decode_descriptor_gpu;
+        }
+
+        flashinfer_decode_cache_built_ = true;
+        return;
+    }
+
     std::vector<int> active_pages_per_slot(cached_num_decode_, 0);
     flashinfer_decode_kv_indptr_host_.assign(cached_num_decode_ + 1, 0);
     flashinfer_decode_kv_last_page_len_host_.assign(cached_num_decode_, 0);
@@ -338,6 +436,73 @@ void PagedForwardContext::build_flashinfer_decode_cache(const ops::AttentionConf
     }
 
     flashinfer_decode_cache_built_ = true;
+}
+
+void PagedForwardContext::build_flashinfer_prefill_cache(const ops::AttentionConfig& cfg) {
+    if (flashinfer_prefill_cache_built_) {
+        return;
+    }
+    flashinfer_prefill_cache_built_ = true;
+
+    if (!supports_flashinfer(cfg)) {
+        return;
+    }
+
+    int expected_prefill_offset = -1;
+    for (const auto& slot : slots_) {
+        if (slot.is_decode) {
+            continue;
+        }
+        if (expected_prefill_offset < 0) {
+            expected_prefill_offset = slot.token_offset;
+        }
+        if (slot.token_offset != expected_prefill_offset) {
+            flashinfer_prefill_slots_.clear();
+            return;
+        }
+        expected_prefill_offset += slot.num_tokens;
+    }
+
+    flashinfer_prefill_slots_.clear();
+    flashinfer_prefill_start_ = -1;
+    flashinfer_prefill_total_tokens_ = 0;
+    for (const auto& slot : slots_) {
+        if (slot.is_decode) {
+            continue;
+        }
+        if (flashinfer_prefill_start_ < 0) {
+            flashinfer_prefill_start_ = slot.token_offset;
+        }
+        flashinfer_prefill_slots_.push_back(&slot);
+        flashinfer_prefill_total_tokens_ += slot.num_tokens;
+    }
+    if (flashinfer_prefill_slots_.empty()) {
+        return;
+    }
+
+    flashinfer_prefill_qo_indptr_host_.assign(flashinfer_prefill_slots_.size() + 1, 0);
+    flashinfer_prefill_kv_indptr_host_.assign(flashinfer_prefill_slots_.size() + 1, 0);
+    flashinfer_prefill_kv_last_page_len_host_.assign(flashinfer_prefill_slots_.size(), 0);
+
+    for (size_t i = 0; i < flashinfer_prefill_slots_.size(); ++i) {
+        const auto* slot = flashinfer_prefill_slots_[i];
+        const int kv_len = slot->past_len + slot->num_tokens;
+        const int active_pages = ceil_div_int(kv_len, cfg.block_size);
+        flashinfer_prefill_qo_indptr_host_[i + 1] = flashinfer_prefill_qo_indptr_host_[i] + slot->num_tokens;
+        flashinfer_prefill_kv_indptr_host_[i + 1] = flashinfer_prefill_kv_indptr_host_[i] + active_pages;
+        flashinfer_prefill_kv_last_page_len_host_[i] = last_page_len_for(kv_len, cfg.block_size);
+    }
+
+    flashinfer_prefill_qo_indptr_gpu_
+        = upload_to_gpu(flashinfer_prefill_qo_indptr_host_, cfg.device_type, cfg.device_id);
+    flashinfer_prefill_kv_indptr_gpu_
+        = upload_to_gpu(flashinfer_prefill_kv_indptr_host_, cfg.device_type, cfg.device_id);
+    flashinfer_prefill_kv_last_page_len_gpu_
+        = upload_to_gpu(flashinfer_prefill_kv_last_page_len_host_, cfg.device_type, cfg.device_id);
+
+    if (flashinfer_prefill_slots_.size() == 1) {
+        ensure_flashinfer_page_table_cache(*flashinfer_prefill_slots_[0]->block_table, cfg.device_type, cfg.device_id);
+    }
 }
 
 void PagedForwardContext::attend_decode_single(int layer, tensor_t q_rope, tensor_t attn,
@@ -428,65 +593,13 @@ void PagedForwardContext::attend_decode_batched(int layer, tensor_t q_rope, tens
 }
 
 void PagedForwardContext::attend_prefill(int layer, tensor_t q_rope, tensor_t attn, const ops::AttentionConfig& cfg) {
-    bool prefill_contiguous = true;
-    int expected_prefill_offset = -1;
-    for (const auto& slot : slots_) {
-        if (slot.is_decode) {
-            continue;
-        }
-        if (expected_prefill_offset < 0) {
-            expected_prefill_offset = slot.token_offset;
-        }
-        if (slot.token_offset != expected_prefill_offset) {
-            prefill_contiguous = false;
-            break;
-        }
-        expected_prefill_offset += slot.num_tokens;
-    }
-    const bool use_flashinfer = supports_flashinfer(cfg) && prefill_contiguous;
+    const bool use_flashinfer = supports_flashinfer(cfg) && !flashinfer_prefill_slots_.empty();
 
     if (use_flashinfer) {
-        std::vector<const Slot*> prefill_slots;
-        int prefill_start = -1;
-        int total_prefill_tokens = 0;
-
-        for (const auto& slot : slots_) {
-            if (slot.is_decode) {
-                continue;
-            }
-            if (prefill_start < 0) {
-                prefill_start = slot.token_offset;
-            }
-            prefill_slots.push_back(&slot);
-            total_prefill_tokens += slot.num_tokens;
-        }
-
-        if (prefill_slots.empty()) {
-            return;
-        }
-
-        auto pf_q = q_rope->slice(0, prefill_start, prefill_start + total_prefill_tokens);
-        auto pf_out = attn->slice(0, prefill_start, prefill_start + total_prefill_tokens);
-
-        std::vector<int> qo_indptr_host(prefill_slots.size() + 1, 0);
-        std::vector<int> kv_indptr_host(prefill_slots.size() + 1, 0);
-        std::vector<int> kv_last_page_len_host(prefill_slots.size(), 0);
-        std::vector<int> kv_page_indices_host;
-
-        for (size_t i = 0; i < prefill_slots.size(); ++i) {
-            const auto* slot = prefill_slots[i];
-            const int kv_len = slot->past_len + slot->num_tokens;
-            const int active_pages = ceil_div_int(kv_len, cfg.block_size);
-            qo_indptr_host[i + 1] = qo_indptr_host[i] + slot->num_tokens;
-            kv_indptr_host[i + 1] = kv_indptr_host[i] + active_pages;
-            kv_last_page_len_host[i] = last_page_len_for(kv_len, cfg.block_size);
-            append_active_pages(kv_page_indices_host, slot->block_table->pages[layer], active_pages);
-        }
-
-        auto qo_indptr_gpu = upload_to_gpu(qo_indptr_host, cfg.device_type, cfg.device_id);
-        auto kv_indptr_gpu = upload_to_gpu(kv_indptr_host, cfg.device_type, cfg.device_id);
-        auto kv_last_page_len_gpu = upload_to_gpu(kv_last_page_len_host, cfg.device_type, cfg.device_id);
-        auto kv_page_indices_gpu = upload_to_gpu(kv_page_indices_host, cfg.device_type, cfg.device_id);
+        auto pf_q
+            = q_rope->slice(0, flashinfer_prefill_start_, flashinfer_prefill_start_ + flashinfer_prefill_total_tokens_);
+        auto pf_out
+            = attn->slice(0, flashinfer_prefill_start_, flashinfer_prefill_start_ + flashinfer_prefill_total_tokens_);
 
         ops::AttentionParams params{cfg};
         params.use_flashinfer = true;
@@ -494,13 +607,29 @@ void PagedForwardContext::attend_prefill(int layer, tensor_t q_rope, tensor_t at
         params.q = pf_q;
         params.k_pool_base = pool_.k_pool_base();
         params.v_pool_base = pool_.v_pool_base();
-        params.kv_indptr = reinterpret_cast<const int*>(kv_indptr_gpu->data());
+        params.kv_indptr = reinterpret_cast<const int*>(flashinfer_prefill_kv_indptr_gpu_->data());
+        params.kv_last_page_len = reinterpret_cast<const int*>(flashinfer_prefill_kv_last_page_len_gpu_->data());
+        params.qo_indptr = reinterpret_cast<const int*>(flashinfer_prefill_qo_indptr_gpu_->data());
+        params.kv_indptr_host = flashinfer_prefill_kv_indptr_host_.data();
+        params.qo_indptr_host = flashinfer_prefill_qo_indptr_host_.data();
+        params.kv_batch_size = static_cast<int>(flashinfer_prefill_slots_.size());
+
+        if (flashinfer_prefill_slots_.size() == 1) {
+            auto* table = flashinfer_prefill_slots_[0]->block_table;
+            params.kv_page_indices = reinterpret_cast<const int*>(table->flashinfer_page_tables_gpu[layer]->data());
+            ops::attention(params);
+            return;
+        }
+
+        std::vector<int> kv_page_indices_host;
+        kv_page_indices_host.reserve(flashinfer_prefill_kv_indptr_host_.back());
+        for (size_t i = 0; i < flashinfer_prefill_slots_.size(); ++i) {
+            const auto* slot = flashinfer_prefill_slots_[i];
+            const int active_pages = flashinfer_prefill_kv_indptr_host_[i + 1] - flashinfer_prefill_kv_indptr_host_[i];
+            append_active_pages(kv_page_indices_host, slot->block_table->pages[layer], active_pages);
+        }
+        auto kv_page_indices_gpu = upload_to_gpu(kv_page_indices_host, cfg.device_type, cfg.device_id);
         params.kv_page_indices = reinterpret_cast<const int*>(kv_page_indices_gpu->data());
-        params.kv_last_page_len = reinterpret_cast<const int*>(kv_last_page_len_gpu->data());
-        params.qo_indptr = reinterpret_cast<const int*>(qo_indptr_gpu->data());
-        params.kv_indptr_host = kv_indptr_host.data();
-        params.qo_indptr_host = qo_indptr_host.data();
-        params.kv_batch_size = static_cast<int>(prefill_slots.size());
         ops::attention(params);
         return;
     }
@@ -541,6 +670,7 @@ tensor_t PagedForwardContext::attend(int layer, tensor_t q_rope, float scale, co
     build_decode_cache(exec_config);
     if (supports_flashinfer(attn_cfg)) {
         build_flashinfer_decode_cache(attn_cfg);
+        build_flashinfer_prefill_cache(attn_cfg);
     }
 
     if (cached_num_decode_ == 1) {

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "backend/tensor/tensor.hpp"
 #include "zedinfer.h"
 
 #include <cstddef>
@@ -31,6 +32,43 @@ struct SequenceBlockTable {
     std::vector<std::vector<int>> pages; // [num_layers][pages_per_layer]
     int seq_len = 0;
     int num_layers = 0;
+
+    // Runtime-only GPU cache for full per-layer page tables used by FlashInfer.
+    // The cache is invalidated whenever the logical page table changes.
+    std::vector<tensor_t> flashinfer_page_tables_gpu;
+    tensor_t flashinfer_single_decode_kv_indptr_gpu;
+    tensor_t flashinfer_single_decode_kv_last_page_len_gpu;
+    tensor_t flashinfer_single_decode_qo_indptr_gpu;
+    tensor_t flashinfer_single_decode_descriptor_gpu;
+    zedinferDeviceType_t flashinfer_cache_device_type = ZEDINFER_DEVICE_CPU;
+    int flashinfer_cache_device_id = -1;
+    size_t flashinfer_cache_pages_per_layer = 0;
+
+    SequenceBlockTable() = default;
+    SequenceBlockTable(const SequenceBlockTable& other)
+        : pages(other.pages), seq_len(other.seq_len), num_layers(other.num_layers) {}
+    SequenceBlockTable& operator=(const SequenceBlockTable& other) {
+        if (this != &other) {
+            pages = other.pages;
+            seq_len = other.seq_len;
+            num_layers = other.num_layers;
+            clear_runtime_caches();
+        }
+        return *this;
+    }
+    SequenceBlockTable(SequenceBlockTable&&) noexcept = default;
+    SequenceBlockTable& operator=(SequenceBlockTable&&) noexcept = default;
+
+    void clear_runtime_caches() {
+        flashinfer_page_tables_gpu.clear();
+        flashinfer_single_decode_kv_indptr_gpu.reset();
+        flashinfer_single_decode_kv_last_page_len_gpu.reset();
+        flashinfer_single_decode_qo_indptr_gpu.reset();
+        flashinfer_single_decode_descriptor_gpu.reset();
+        flashinfer_cache_device_type = ZEDINFER_DEVICE_CPU;
+        flashinfer_cache_device_id = -1;
+        flashinfer_cache_pages_per_layer = 0;
+    }
 };
 
 /**

@@ -18,6 +18,7 @@ int PrefixCache::match_prefix(const std::vector<int>& token_ids, int block_size,
     int num_tokens = static_cast<int>(token_ids.size());
     int num_full_blocks = num_tokens / block_size; // only full blocks are cacheable
 
+    matched_table.clear_runtime_caches();
     matched_table.num_layers = num_layers_;
     matched_table.pages.resize(num_layers_);
     for (int l = 0; l < num_layers_; ++l) { matched_table.pages[l].clear(); }

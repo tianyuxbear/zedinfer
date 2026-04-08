@@ -291,6 +291,7 @@ int BlockAllocator::extend_sequence(SequenceBlockTable& table, int layer) {
         throw std::runtime_error("[BlockAllocator] Pool exhausted during extend");
     }
     table.pages[layer].push_back(page_id);
+    table.clear_runtime_caches();
     return page_id;
 }
 
@@ -308,6 +309,7 @@ void BlockAllocator::free_sequence(SequenceBlockTable& table) {
         layer_blocks.clear();
     }
     table.seq_len = 0;
+    table.clear_runtime_caches();
 }
 
 void BlockAllocator::release_sequence(SequenceBlockTable& table) {
@@ -316,6 +318,7 @@ void BlockAllocator::release_sequence(SequenceBlockTable& table) {
         layer_blocks.clear();
     }
     table.seq_len = 0;
+    table.clear_runtime_caches();
 }
 
 int BlockAllocator::available_blocks() const {
