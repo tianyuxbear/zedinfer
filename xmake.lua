@@ -56,10 +56,28 @@ option("flashinfer")
     set_description("Use local FlashInfer headers as the NVIDIA paged attention backend")
 option_end()
 
+local project_dir = os.projectdir()
+
+local function add_required_includedir(paths, hint)
+    local candidates = type(paths) == "table" and paths or {paths}
+    for _, relpath in ipairs(candidates) do
+        local abspath = path.absolute(relpath, project_dir)
+        if os.isdir(abspath) then
+            add_includedirs(abspath)
+            return
+        end
+    end
+    os.raise("required include directory not found: %s\n%s", table.concat(candidates, ", "), hint)
+end
+
 if has_config("flashinfer") then
     add_defines("USE_FLASHINFER")
-    add_includedirs("third_party/flashinfer/include")
-    add_includedirs("third_party/flashinfer/3rdparty/cutlass/include")
+    local flashinfer_hint = "Run `git submodule update --init --recursive` to fetch FlashInfer and its nested dependencies."
+    add_required_includedir("third_party/flashinfer/include", flashinfer_hint)
+    add_required_includedir({
+        "third_party/flashinfer/3rdparty/cutlass/include",
+        "third_party/cutlass/include",
+    }, flashinfer_hint)
 end
 
 -- Portable build: use x86-64-v3 (AVX2) baseline instead of -march=native
@@ -149,7 +167,8 @@ target("zedinfer")
     -- Propagated to all dependent binaries (serve, bench, etc.) via {public = true}.
     -- Priority: git command > ZEDINFER_GIT_HASH env var > "unknown" fallback in version.hpp.
     on_config(function (target)
-        local git_hash = try { function () return os.iorunv("git", {"rev-parse", "--short", "HEAD"}) end }
+        local git_hash = try {
+    function() return os.iorunv("git", {"rev-parse", "--short", "HEAD"}) end }
         if git_hash then
             target:add("defines", 'ZEDINFER_GIT_HASH="' .. git_hash:trim() .. '"', {public = true})
         elseif os.getenv("ZEDINFER_GIT_HASH") then
