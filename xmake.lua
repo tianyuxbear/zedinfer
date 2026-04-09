@@ -50,6 +50,18 @@ if has_config("nv-gpu") then
     includes("xmake/device/nvidia.lua")
 end
 
+option("flashinfer")
+    set_default(false)
+    set_showmenu(true)
+    set_description("Use local FlashInfer headers as the NVIDIA paged attention backend")
+option_end()
+
+if has_config("flashinfer") then
+    add_defines("USE_FLASHINFER")
+    add_includedirs("third_party/flashinfer/include")
+    add_includedirs("third_party/flashinfer/3rdparty/cutlass/include")
+end
+
 -- Portable build: use x86-64-v3 (AVX2) baseline instead of -march=native
 -- for Docker/distribution builds that must run on different CPU generations.
 -- oneDNN is unaffected (runtime ISA dispatch via JIT).

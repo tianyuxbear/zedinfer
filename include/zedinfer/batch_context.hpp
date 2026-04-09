@@ -31,15 +31,13 @@ struct BatchContext {
     std::vector<Slot> slots;
 
     // Paged attention metadata (indexed by slot index within decode/prefill groups)
-    // For decode slots: parallel arrays
-    std::vector<const int*> decode_k_block_tables;
-    std::vector<const int*> decode_v_block_tables;
+    // For decode slots: shared page tables
+    std::vector<const int*> decode_page_tables;
     std::vector<int> decode_seq_lens; // KV cache length per decode request (past_len + 1)
     int decode_token_offset = 0;      // start of decode tokens in token_ids
 
     // For prefill slots: processed sequentially
-    std::vector<const int*> prefill_k_block_tables;
-    std::vector<const int*> prefill_v_block_tables;
+    std::vector<const int*> prefill_page_tables;
     std::vector<int> prefill_past_lens;   // past_len per prefill request
     std::vector<int> prefill_chunk_sizes; // tokens per prefill request in this iteration
 

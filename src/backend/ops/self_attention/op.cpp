@@ -4,6 +4,9 @@
 #include "backend/ops/self_attention/cpu/paged_attention_cpu.hpp"
 #ifdef ENABLE_NVIDIA_API
 #include "backend/ops/self_attention/nvidia/paged_attention_nvidia.cuh"
+#ifdef USE_FLASHINFER
+#include "backend/ops/self_attention/nvidia/flashinfer_wrapper.cuh"
+#endif
 #endif
 #include "utils/check.hpp"
 
@@ -17,9 +20,10 @@ static void dispatch_paged_decode(const AttentionParams& p) {
     auto& c = p.config;
 
     if (c.device_type == ZEDINFER_DEVICE_CPU) {
-        return cpu::paged_attention_decode(p.out->data(), p.q->data(), reinterpret_cast<const std::byte*>(p.pool_base),
-                                           p.k_block_table, p.v_block_table, p.seq_len, c.scale, c.dtype, c.nhead,
-                                           c.nkvhead, c.head_dim, c.block_size);
+        return cpu::paged_attention_decode(p.out->data(), p.q->data(),
+                                           reinterpret_cast<const std::byte*>(p.k_pool_base),
+                                           reinterpret_cast<const std::byte*>(p.v_pool_base), p.page_table, p.seq_len,
+                                           c.scale, c.dtype, c.nhead, c.nkvhead, c.head_dim, c.block_size);
     }
 
     core::context().setDevice(c.device_type, c.device_id);
@@ -28,8 +32,9 @@ static void dispatch_paged_decode(const AttentionParams& p) {
 #ifdef ENABLE_NVIDIA_API
         case ZEDINFER_DEVICE_NVIDIA:
             return nvidia::paged_attention_decode(
-                p.out->data(), p.q->data(), reinterpret_cast<const std::byte*>(p.pool_base), p.k_block_table,
-                p.v_block_table, p.seq_len, c.scale, c.dtype, c.nhead, c.nkvhead, c.head_dim, c.block_size);
+                p.out->data(), p.q->data(), reinterpret_cast<const std::byte*>(p.k_pool_base),
+                reinterpret_cast<const std::byte*>(p.v_pool_base), p.page_table, p.seq_len, c.scale, c.dtype, c.nhead,
+                c.nkvhead, c.head_dim, c.block_size);
 #endif
         default:
             EXCEPTION_UNSUPPORTED_DEVICE;
@@ -45,9 +50,9 @@ static void dispatch_paged_decode_batched(const AttentionParams& p) {
 
     if (c.device_type == ZEDINFER_DEVICE_CPU) {
         return cpu::paged_attention_decode_batched(
-            p.out->data(), p.q->data(), reinterpret_cast<const std::byte*>(p.pool_base), p.batched_k_block_tables,
-            p.batched_v_block_tables, p.batched_seq_lens, p.num_requests, p.max_blocks_per_seq, c.scale, c.dtype,
-            c.nhead, c.nkvhead, c.head_dim, c.block_size);
+            p.out->data(), p.q->data(), reinterpret_cast<const std::byte*>(p.k_pool_base),
+            reinterpret_cast<const std::byte*>(p.v_pool_base), p.batched_page_tables, p.batched_seq_lens,
+            p.num_requests, p.max_blocks_per_seq, c.scale, c.dtype, c.nhead, c.nkvhead, c.head_dim, c.block_size);
     }
 
     core::context().setDevice(c.device_type, c.device_id);
@@ -56,9 +61,9 @@ static void dispatch_paged_decode_batched(const AttentionParams& p) {
 #ifdef ENABLE_NVIDIA_API
         case ZEDINFER_DEVICE_NVIDIA:
             return nvidia::paged_attention_decode_batched(
-                p.out->data(), p.q->data(), reinterpret_cast<const std::byte*>(p.pool_base), p.batched_k_block_tables,
-                p.batched_v_block_tables, p.batched_seq_lens, p.num_requests, p.max_blocks_per_seq, c.scale, c.dtype,
-                c.nhead, c.nkvhead, c.head_dim, c.block_size);
+                p.out->data(), p.q->data(), reinterpret_cast<const std::byte*>(p.k_pool_base),
+                reinterpret_cast<const std::byte*>(p.v_pool_base), p.batched_page_tables, p.batched_seq_lens,
+                p.num_requests, p.max_blocks_per_seq, c.scale, c.dtype, c.nhead, c.nkvhead, c.head_dim, c.block_size);
 #endif
         default:
             EXCEPTION_UNSUPPORTED_DEVICE;
@@ -73,9 +78,10 @@ static void dispatch_paged_prefill(const AttentionParams& p) {
     auto& c = p.config;
 
     if (c.device_type == ZEDINFER_DEVICE_CPU) {
-        return cpu::paged_attention_prefill(p.out->data(), p.q->data(), reinterpret_cast<const std::byte*>(p.pool_base),
-                                            p.k_block_table, p.v_block_table, p.seqlen_q, p.past_len, c.scale, c.dtype,
-                                            c.nhead, c.nkvhead, c.head_dim, c.block_size);
+        return cpu::paged_attention_prefill(p.out->data(), p.q->data(),
+                                            reinterpret_cast<const std::byte*>(p.k_pool_base),
+                                            reinterpret_cast<const std::byte*>(p.v_pool_base), p.page_table, p.seqlen_q,
+                                            p.past_len, c.scale, c.dtype, c.nhead, c.nkvhead, c.head_dim, c.block_size);
     }
 
     core::context().setDevice(c.device_type, c.device_id);
@@ -83,10 +89,10 @@ static void dispatch_paged_prefill(const AttentionParams& p) {
     switch (c.device_type) {
 #ifdef ENABLE_NVIDIA_API
         case ZEDINFER_DEVICE_NVIDIA:
-            return nvidia::paged_attention_prefill(p.out->data(), p.q->data(),
-                                                   reinterpret_cast<const std::byte*>(p.pool_base), p.k_block_table,
-                                                   p.v_block_table, p.seqlen_q, p.past_len, c.scale, c.dtype, c.nhead,
-                                                   c.nkvhead, c.head_dim, c.block_size);
+            return nvidia::paged_attention_prefill(
+                p.out->data(), p.q->data(), reinterpret_cast<const std::byte*>(p.k_pool_base),
+                reinterpret_cast<const std::byte*>(p.v_pool_base), p.page_table, p.seqlen_q, p.past_len, c.scale,
+                c.dtype, c.nhead, c.nkvhead, c.head_dim, c.block_size);
 #endif
         default:
             EXCEPTION_UNSUPPORTED_DEVICE;
@@ -98,6 +104,16 @@ static void dispatch_paged_prefill(const AttentionParams& p) {
 // ============================================================================
 
 void attention(const AttentionParams& params) {
+#if defined(ENABLE_NVIDIA_API) && defined(USE_FLASHINFER)
+    if (params.use_flashinfer && params.config.device_type == ZEDINFER_DEVICE_NVIDIA) {
+        auto& c = params.config;
+        core::context().setDevice(c.device_type, c.device_id);
+        if (params.qo_indptr != nullptr) {
+            return nvidia::flashinfer_attention_prefill(params);
+        }
+        return nvidia::flashinfer_attention_decode(params);
+    }
+#endif
     if (params.is_batched()) {
         return dispatch_paged_decode_batched(params);
     }

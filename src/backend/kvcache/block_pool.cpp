@@ -41,22 +41,37 @@ BlockPool::BlockPool(BlockConfig config, int num_blocks, zedinferDeviceType_t de
 
     core::context().setDevice(device_type, device_id);
     auto api = device::getRuntimeAPI(device_type);
-    pool_memory_ = api->malloc_device(total_bytes);
+    k_pool_memory_ = api->malloc_device(total_bytes);
+    v_pool_memory_ = api->malloc_device(total_bytes);
 
-    if (!pool_memory_) {
+    if (!k_pool_memory_ || !v_pool_memory_) {
+        if (k_pool_memory_) {
+            api->free_device(k_pool_memory_);
+            k_pool_memory_ = nullptr;
+        }
+        if (v_pool_memory_) {
+            api->free_device(v_pool_memory_);
+            v_pool_memory_ = nullptr;
+        }
         throw std::runtime_error("[BlockPool] Failed to allocate " + std::to_string(total_bytes / (1024 * 1024))
-                                 + " MB");
+                                 + " MB per KV pool");
     }
 
-    LOGI << "[BlockPool] Allocated " << num_blocks << " blocks (" << config.block_size << " tokens/block, "
-         << total_bytes / (1024 * 1024) << " MB) on " << (device_type == ZEDINFER_DEVICE_CPU ? "CPU" : "GPU");
+    LOGI << "[BlockPool] Allocated " << num_blocks << " shared pages (" << config.block_size << " tokens/page, "
+         << (2 * total_bytes) / (1024 * 1024) << " MB total across K/V pools) on "
+         << (device_type == ZEDINFER_DEVICE_CPU ? "CPU" : "GPU");
 }
 
 BlockPool::~BlockPool() {
-    if (pool_memory_) {
+    if (k_pool_memory_) {
         auto api = device::getRuntimeAPI(device_type_);
-        api->free_device(pool_memory_);
-        pool_memory_ = nullptr;
+        api->free_device(k_pool_memory_);
+        k_pool_memory_ = nullptr;
+    }
+    if (v_pool_memory_) {
+        auto api = device::getRuntimeAPI(device_type_);
+        api->free_device(v_pool_memory_);
+        v_pool_memory_ = nullptr;
     }
 }
 
@@ -205,11 +220,18 @@ int BlockPool::evictable_count() const {
     return evictable_count_;
 }
 
-void* BlockPool::block_data(int block_id) const {
+void* BlockPool::k_block_data(int block_id) const {
     if (block_id < 0 || block_id >= num_blocks_) {
         throw std::out_of_range("[BlockPool] Invalid block_id: " + std::to_string(block_id));
     }
-    return static_cast<std::byte*>(pool_memory_) + static_cast<size_t>(block_id) * block_bytes_;
+    return static_cast<std::byte*>(k_pool_memory_) + static_cast<size_t>(block_id) * block_bytes_;
+}
+
+void* BlockPool::v_block_data(int block_id) const {
+    if (block_id < 0 || block_id >= num_blocks_) {
+        throw std::out_of_range("[BlockPool] Invalid block_id: " + std::to_string(block_id));
+    }
+    return static_cast<std::byte*>(v_pool_memory_) + static_cast<size_t>(block_id) * block_bytes_;
 }
 
 int BlockPool::free_blocks() const {
@@ -223,7 +245,7 @@ int BlockPool::available_blocks() const {
 }
 
 size_t BlockPool::memory_usage() const {
-    return static_cast<size_t>(num_blocks_) * block_bytes_;
+    return 2 * static_cast<size_t>(num_blocks_) * block_bytes_;
 }
 
 // ============================================================================
@@ -235,8 +257,8 @@ BlockAllocator::BlockAllocator(BlockPool& pool, int num_layers) : pool_(pool), n
 SequenceBlockTable BlockAllocator::allocate_sequence(int estimated_tokens) {
     int blocks_per_layer = (estimated_tokens + pool_.config().block_size - 1) / pool_.config().block_size;
 
-    // Total blocks needed: blocks_per_layer * num_layers * 2 (K + V)
-    int total_needed = blocks_per_layer * num_layers_ * 2;
+    // Total shared pages needed across all layers.
+    int total_needed = blocks_per_layer * num_layers_;
     if (total_needed > pool_.available_blocks()) {
         throw std::runtime_error("[BlockAllocator] Not enough blocks: need " + std::to_string(total_needed)
                                  + ", available " + std::to_string(pool_.free_blocks()));
@@ -245,56 +267,43 @@ SequenceBlockTable BlockAllocator::allocate_sequence(int estimated_tokens) {
     SequenceBlockTable table;
     table.num_layers = num_layers_;
     table.seq_len = 0;
-    table.k_blocks.resize(num_layers_);
-    table.v_blocks.resize(num_layers_);
+    table.pages.resize(num_layers_);
 
     for (int layer = 0; layer < num_layers_; ++layer) {
-        table.k_blocks[layer].reserve(blocks_per_layer);
-        table.v_blocks[layer].reserve(blocks_per_layer);
+        table.pages[layer].reserve(blocks_per_layer);
         for (int b = 0; b < blocks_per_layer; ++b) {
-            int kid = pool_.allocate();
-            int vid = pool_.allocate();
-            if (kid < 0 || vid < 0) {
+            int page_id = pool_.allocate();
+            if (page_id < 0) {
                 // Rollback on failure
                 free_sequence(table);
                 throw std::runtime_error("[BlockAllocator] Pool exhausted during allocation");
             }
-            table.k_blocks[layer].push_back(kid);
-            table.v_blocks[layer].push_back(vid);
+            table.pages[layer].push_back(page_id);
         }
     }
 
     return table;
 }
 
-int BlockAllocator::extend_sequence(SequenceBlockTable& table, int layer, bool is_k) {
-    int block_id = pool_.allocate();
-    if (block_id < 0) {
+int BlockAllocator::extend_sequence(SequenceBlockTable& table, int layer) {
+    int page_id = pool_.allocate();
+    if (page_id < 0) {
         throw std::runtime_error("[BlockAllocator] Pool exhausted during extend");
     }
-    if (is_k) {
-        table.k_blocks[layer].push_back(block_id);
-    } else {
-        table.v_blocks[layer].push_back(block_id);
-    }
-    return block_id;
+    table.pages[layer].push_back(page_id);
+    return page_id;
 }
 
 void BlockAllocator::ensure_blocks(SequenceBlockTable& table, int needed_len) {
     int bs = pool_.config().block_size;
     int blocks_needed = (needed_len + bs - 1) / bs;
     for (int layer = 0; layer < table.num_layers; ++layer) {
-        while (static_cast<int>(table.k_blocks[layer].size()) < blocks_needed) { extend_sequence(table, layer, true); }
-        while (static_cast<int>(table.v_blocks[layer].size()) < blocks_needed) { extend_sequence(table, layer, false); }
+        while (static_cast<int>(table.pages[layer].size()) < blocks_needed) { extend_sequence(table, layer); }
     }
 }
 
 void BlockAllocator::free_sequence(SequenceBlockTable& table) {
-    for (auto& layer_blocks : table.k_blocks) {
-        for (int bid : layer_blocks) { pool_.free(bid); }
-        layer_blocks.clear();
-    }
-    for (auto& layer_blocks : table.v_blocks) {
+    for (auto& layer_blocks : table.pages) {
         for (int bid : layer_blocks) { pool_.free(bid); }
         layer_blocks.clear();
     }
@@ -302,11 +311,7 @@ void BlockAllocator::free_sequence(SequenceBlockTable& table) {
 }
 
 void BlockAllocator::release_sequence(SequenceBlockTable& table) {
-    for (auto& layer_blocks : table.k_blocks) {
-        for (int bid : layer_blocks) { pool_.release(bid); }
-        layer_blocks.clear();
-    }
-    for (auto& layer_blocks : table.v_blocks) {
+    for (auto& layer_blocks : table.pages) {
         for (int bid : layer_blocks) { pool_.release(bid); }
         layer_blocks.clear();
     }

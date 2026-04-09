@@ -63,18 +63,29 @@ private:
     void scatter_slot_kv(const Slot& slot, int layer, tensor_t k, tensor_t v);
     void copy_to_block(const void* src, size_t bytes, void* dst);
     void build_decode_cache(const ExecutorConfig& exec_config);
+    void build_flashinfer_decode_cache(const ops::AttentionConfig& cfg);
 
-    // Cached GPU block tables for batched decode (built once, reused across layers)
-    // Block tables are identical across layers since K/V block IDs are per-layer
-    // but the physical layout [num_reqs, max_blocks] doesn't change.
-    // However, the actual block IDs DO differ per layer, so we cache the
-    // host-side vectors and per-layer GPU tensors on first use.
+    // Cached GPU page tables for batched decode (built once, reused across layers).
+    // Physical layout [num_reqs, max_pages] is shared across layers, but the
+    // actual page ids still differ per layer, so we cache per-layer tensors.
     struct DecodeCacheEntry {
-        tensor_t k_bt_gpu;
-        tensor_t v_bt_gpu;
+        tensor_t page_bt_gpu;
+    };
+    struct FlashInferLayerCacheEntry {
+        tensor_t kv_page_indices_gpu;
     };
     tensor_t seq_lens_gpu_;
     std::vector<DecodeCacheEntry> decode_layer_cache_;
+    std::vector<FlashInferLayerCacheEntry> flashinfer_decode_layer_cache_;
+    tensor_t flashinfer_decode_kv_indptr_gpu_;
+    tensor_t flashinfer_decode_kv_last_page_len_gpu_;
+    tensor_t flashinfer_decode_qo_indptr_gpu_;
+    tensor_t flashinfer_decode_descriptor_gpu_;
+    std::vector<int> flashinfer_decode_kv_indptr_host_;
+    std::vector<int> flashinfer_decode_kv_last_page_len_host_;
+    std::vector<int> flashinfer_decode_qo_indptr_host_;
+    bool flashinfer_decode_cache_built_ = false;
+    bool flashinfer_decode_uses_prefill_kernel_ = false;
     int cached_num_decode_ = 0;
     int cached_max_blocks_ = 0;
     int cached_decode_start_ = -1;

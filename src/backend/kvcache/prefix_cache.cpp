@@ -19,12 +19,8 @@ int PrefixCache::match_prefix(const std::vector<int>& token_ids, int block_size,
     int num_full_blocks = num_tokens / block_size; // only full blocks are cacheable
 
     matched_table.num_layers = num_layers_;
-    matched_table.k_blocks.resize(num_layers_);
-    matched_table.v_blocks.resize(num_layers_);
-    for (int l = 0; l < num_layers_; ++l) {
-        matched_table.k_blocks[l].clear();
-        matched_table.v_blocks[l].clear();
-    }
+    matched_table.pages.resize(num_layers_);
+    for (int l = 0; l < num_layers_; ++l) { matched_table.pages[l].clear(); }
 
     uint64_t parent_hash = 0;
     int matched_tokens = 0;
@@ -43,16 +39,12 @@ int PrefixCache::match_prefix(const std::vector<int>& token_ids, int block_size,
         hits_++;
         const auto& entry = it->second;
 
-        // Share all blocks across all layers
+        // Share all pages across all layers
         for (int l = 0; l < num_layers_; ++l) {
-            int kid = entry.k_block_ids[l];
-            int vid = entry.v_block_ids[l];
-            pool_.share(kid);
-            pool_.share(vid);
-            pool_.touch(kid);
-            pool_.touch(vid);
-            matched_table.k_blocks[l].push_back(kid);
-            matched_table.v_blocks[l].push_back(vid);
+            int page_id = entry.page_ids[l];
+            pool_.share(page_id);
+            pool_.touch(page_id);
+            matched_table.pages[l].push_back(page_id);
         }
 
         matched_tokens += block_size;
@@ -66,7 +58,7 @@ int PrefixCache::match_prefix(const std::vector<int>& token_ids, int block_size,
 void PrefixCache::insert_blocks(const std::vector<int>& token_ids, int block_size, const SequenceBlockTable& table) {
     int num_tokens = static_cast<int>(token_ids.size());
     int num_full_blocks = num_tokens / block_size;
-    int blocks_in_table = table.k_blocks.empty() ? 0 : static_cast<int>(table.k_blocks[0].size());
+    int blocks_in_table = table.pages.empty() ? 0 : static_cast<int>(table.pages[0].size());
     int blocks_to_cache = std::min(num_full_blocks, blocks_in_table);
 
     uint64_t parent_hash = 0;
@@ -83,19 +75,14 @@ void PrefixCache::insert_blocks(const std::vector<int>& token_ids, int block_siz
         }
 
         CacheEntry entry;
-        entry.k_block_ids.resize(num_layers_);
-        entry.v_block_ids.resize(num_layers_);
+        entry.page_ids.resize(num_layers_);
 
         for (int l = 0; l < num_layers_; ++l) {
-            int kid = table.k_blocks[l][b];
-            int vid = table.v_blocks[l][b];
-            entry.k_block_ids[l] = kid;
-            entry.v_block_ids[l] = vid;
+            int page_id = table.pages[l][b];
+            entry.page_ids[l] = page_id;
 
-            pool_.set_content_hash(kid, block_hash);
-            pool_.set_content_hash(vid, block_hash);
-            pool_.set_immutable(kid, true);
-            pool_.set_immutable(vid, true);
+            pool_.set_content_hash(page_id, block_hash);
+            pool_.set_immutable(page_id, true);
         }
 
         cache_[block_hash] = std::move(entry);

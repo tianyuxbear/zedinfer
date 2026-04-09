@@ -99,6 +99,12 @@ Adding a new Qwen-family model requires only defining a `ModelForwardConfig` (bi
 - [XMake](https://xmake.io/) build system
 - CUDA Toolkit 12.0+ (for GPU support)
 
+If you build with `--flashinfer=y`, initialize submodules recursively first:
+
+```bash
+git submodule update --init --recursive
+```
+
 ### Build Commands
 
 ```bash

@@ -9,7 +9,7 @@
 namespace zedinfer::kvcache {
 
 /**
- * Configuration for KV cache blocks.
+ * Configuration for KV cache pages.
  */
 struct BlockConfig {
     int block_size = 16; // tokens per block
@@ -17,23 +17,24 @@ struct BlockConfig {
     int head_dim;
     zedinferDataType_t dtype = ZEDINFER_DTYPE_BF16;
 
+    // Bytes for one K page or one V page.
     size_t block_bytes() const;
     size_t token_bytes() const;
 };
 
 /**
- * Per-sequence block table mapping logical blocks to physical block IDs.
+ * Per-sequence page table mapping logical pages to shared physical page IDs.
+ * The same page ID indexes both the K pool and the V pool.
  */
 struct SequenceBlockTable {
-    // block_ids[layer] = list of physical block IDs for that layer
-    std::vector<std::vector<int>> k_blocks; // [num_layers][blocks_per_layer]
-    std::vector<std::vector<int>> v_blocks; // [num_layers][blocks_per_layer]
+    // page_ids[layer] = list of physical page IDs for that layer
+    std::vector<std::vector<int>> pages; // [num_layers][pages_per_layer]
     int seq_len = 0;
     int num_layers = 0;
 };
 
 /**
- * Per-block metadata for reference counting and prefix caching.
+ * Per-page metadata for reference counting and prefix caching.
  */
 struct BlockMeta {
     int ref_count = 0;         // 0 = free, 1 = exclusive, >1 = shared
@@ -43,7 +44,7 @@ struct BlockMeta {
 };
 
 /**
- * Pool of fixed-size KV cache blocks backed by a single contiguous allocation.
+ * Pool of fixed-size KV cache pages backed by paired K/V allocations.
  * Supports reference counting for prefix caching.
  */
 class BlockPool {
@@ -70,7 +71,10 @@ public:
     int evictable_count() const;
 
     // Access
-    void* block_data(int block_id) const;
+    void* k_block_data(int block_id) const;
+    void* v_block_data(int block_id) const;
+    void* k_pool_base() const { return k_pool_memory_; }
+    void* v_pool_base() const { return v_pool_memory_; }
     const BlockConfig& config() const { return config_; }
     zedinferDeviceType_t device_type() const { return device_type_; }
     int device_id() const { return device_id_; }
@@ -93,7 +97,8 @@ private:
     int num_blocks_;
     size_t block_bytes_;
 
-    void* pool_memory_ = nullptr;
+    void* k_pool_memory_ = nullptr;
+    void* v_pool_memory_ = nullptr;
     std::vector<BlockMeta> block_meta_;
     uint64_t access_counter_ = 0;
     int next_free_ = 0;       // hint for allocation scan
@@ -112,8 +117,8 @@ public:
     // Allocate blocks for a new sequence with estimated token count.
     SequenceBlockTable allocate_sequence(int estimated_tokens);
 
-    // Allocate one additional block for a layer+type when current blocks are full.
-    int extend_sequence(SequenceBlockTable& table, int layer, bool is_k);
+    // Allocate one additional page for a layer when current pages are full.
+    int extend_sequence(SequenceBlockTable& table, int layer);
 
     // Ensure the block table has enough blocks for needed_len tokens across all layers.
     void ensure_blocks(SequenceBlockTable& table, int needed_len);

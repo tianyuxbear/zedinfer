@@ -14,6 +14,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <iomanip>
 #include <limits>
 #include <plog/Log.h>
@@ -153,9 +154,16 @@ std::shared_ptr<InferenceEngine> InferenceEngine::create(const std::string& mode
 
     // Create profiler and run warmup (exercises paged attention kernels)
     engine->profiler_ = std::make_unique<Profiler>(engine);
-    LOG_VERBOSE_(utils::BOTH) << "[Engine] Performing warmup...";
-    engine->profiler_->warmup();
-    LOG_VERBOSE_(utils::BOTH) << "[Engine] Ready";
+    // Local debugging/profiling can skip engine warmup to isolate model correctness from the
+    // startup benchmark pass. Normal runs keep warmup enabled.
+    if (std::getenv("ZEDINFER_DISABLE_WARMUP") == nullptr) {
+        LOG_VERBOSE_(utils::BOTH) << "[Engine] Performing warmup...";
+        engine->profiler_->warmup();
+        LOG_VERBOSE_(utils::BOTH) << "[Engine] Ready";
+    } else {
+        LOG_VERBOSE_(utils::BOTH) << "[Engine] Warmup skipped by ZEDINFER_DISABLE_WARMUP";
+        LOG_VERBOSE_(utils::BOTH) << "[Engine] Ready";
+    }
 
     // Create serving loop (after block pool)
     engine->serving_loop_ = std::make_unique<ServingLoop>(engine, engine->scheduler_config_);
@@ -174,8 +182,8 @@ std::unique_ptr<InferenceSession> InferenceEngine::create_session(const Generati
 
     auto block_table = block_allocator_->allocate_sequence(256);
 
-    LOGI << "[Session] Created with " << block_table.k_blocks[0].size()
-         << " blocks/layer, pool_free=" << block_pool_->free_blocks() << "/" << block_pool_->total_blocks();
+    LOGI << "[Session] Created with " << block_table.pages[0].size()
+         << " pages/layer, pool_free=" << block_pool_->free_blocks() << "/" << block_pool_->total_blocks();
 
     return std::unique_ptr<InferenceSession>(new InferenceSession(shared_from_this(), std::move(block_table),
                                                                   block_allocator_.get(), config, chat_template_));
@@ -484,7 +492,7 @@ void InferenceEngine::init_block_pool() {
     block_config.dtype = dtype;
 
     size_t block_bytes = block_config.block_bytes();
-    int num_blocks = static_cast<int>(kv_budget / block_bytes);
+    int num_blocks = static_cast<int>(kv_budget / (2 * block_bytes));
 
     if (num_blocks <= 0) {
         LOGW << "[Engine] Not enough memory for block pool";
@@ -492,10 +500,34 @@ void InferenceEngine::init_block_pool() {
         return;
     }
 
-    LOGI << "[Engine] Creating block pool: " << num_blocks << " blocks x " << block_config.block_size << " tokens, "
-         << (num_blocks * block_bytes) / (1024 * 1024) << " MB";
+    LOGI << "[Engine] Creating KV page pool: " << num_blocks << " shared pages x " << block_config.block_size
+         << " tokens, " << (2 * num_blocks * block_bytes) / (1024 * 1024) << " MB";
 
-    block_pool_ = std::make_unique<kvcache::BlockPool>(block_config, num_blocks, device_.type(), device_.id());
+    int try_blocks = num_blocks;
+    while (try_blocks > 0) {
+        try {
+            block_pool_ = std::make_unique<kvcache::BlockPool>(block_config, try_blocks, device_.type(), device_.id());
+            break;
+        } catch (const std::exception& e) {
+            LOGW << "[Engine] KV pool allocation failed for " << try_blocks << " blocks: " << e.what();
+            int next_try = try_blocks * 3 / 4;
+            if (next_try >= try_blocks) {
+                next_try = try_blocks - 1;
+            }
+            try_blocks = next_try;
+        }
+    }
+
+    if (!block_pool_) {
+        LOGW << "[Engine] Unable to allocate any KV page pool";
+        scheduler_config_.use_paged_kvcache = false;
+        return;
+    }
+
+    if (try_blocks != num_blocks) {
+        LOGW << "[Engine] KV page pool reduced to " << try_blocks << " blocks after allocation retries";
+    }
+
     block_allocator_ = std::make_unique<kvcache::BlockAllocator>(*block_pool_, mc.num_hidden_layers);
 }
 

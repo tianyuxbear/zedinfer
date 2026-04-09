@@ -34,8 +34,7 @@ BatchContext ScheduledBatch::build_context() const {
         // Block tables for decode attention
         // Use layer 0's block table as representative — kernel receives per-layer tables
         // during the actual forward. Here we store the full block table pointer.
-        ctx.decode_k_block_tables.push_back(req->block_table().k_blocks[0].data());
-        ctx.decode_v_block_tables.push_back(req->block_table().v_blocks[0].data());
+        ctx.decode_page_tables.push_back(req->block_table().pages[0].data());
         ctx.decode_seq_lens.push_back(req->block_table().seq_len + 1); // past + current token
 
         offset++;
@@ -61,8 +60,7 @@ BatchContext ScheduledBatch::build_context() const {
         slot.is_prefill = true;
         ctx.slots.push_back(slot);
 
-        ctx.prefill_k_block_tables.push_back(req->block_table().k_blocks[0].data());
-        ctx.prefill_v_block_tables.push_back(req->block_table().v_blocks[0].data());
+        ctx.prefill_page_tables.push_back(req->block_table().pages[0].data());
         ctx.prefill_past_lens.push_back(req->block_table().seq_len);
         ctx.prefill_chunk_sizes.push_back(chunk_size);
 

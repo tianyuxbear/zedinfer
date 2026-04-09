@@ -99,6 +99,12 @@
 - [XMake](https://xmake.io/) 构建系统
 - CUDA Toolkit 12.0+（GPU 支持）
 
+如果要启用 `--flashinfer=y`，请先递归初始化子模块：
+
+```bash
+git submodule update --init --recursive
+```
+
 ### 构建命令
 
 ```bash

@@ -9,7 +9,7 @@
 namespace zedinfer::kvcache {
 
 /**
- * Prefix cache for sharing KV blocks across requests with identical token prefixes.
+ * Prefix cache for sharing KV pages across requests with identical token prefixes.
  *
  * Uses chain hashing: each block's hash incorporates its parent block's hash,
  * so the same tokens at different positions in a sequence will NOT match.
@@ -22,17 +22,17 @@ public:
     explicit PrefixCache(BlockPool& pool, int num_layers);
 
     /**
-     * Match a prompt's prefix against cached blocks.
+     * Match a prompt's prefix against cached pages.
      * Returns the number of tokens matched (always a multiple of block_size).
-     * Fills matched_table with shared block IDs for the matched prefix.
-     * Calls pool.share() and pool.touch() on matched blocks.
+     * Fills matched_table with shared page IDs for the matched prefix.
+     * Calls pool.share() and pool.touch() on matched pages.
      */
     int match_prefix(const std::vector<int>& token_ids, int block_size, SequenceBlockTable& matched_table);
 
     /**
-     * Insert completed full blocks from a request into the cache.
+     * Insert completed full pages from a request into the cache.
      * Only full blocks (block_size tokens) are cached; partial blocks are skipped.
-     * Sets content_hash and immutable on cached blocks.
+     * Sets content_hash and immutable on cached pages.
      */
     void insert_blocks(const std::vector<int>& token_ids, int block_size, const SequenceBlockTable& table);
 
@@ -47,14 +47,13 @@ public:
     size_t miss_count() const { return misses_; }
 
     /**
-     * Compute chain hash for a block of tokens.
+     * Compute chain hash for a page of tokens.
      */
     static uint64_t compute_block_hash(const std::vector<int>& tokens, int start, int end, uint64_t parent_hash);
 
 private:
     struct CacheEntry {
-        std::vector<int> k_block_ids; // [num_layers]
-        std::vector<int> v_block_ids; // [num_layers]
+        std::vector<int> page_ids; // [num_layers]
     };
 
     BlockPool& pool_;

@@ -70,7 +70,7 @@ TEST_F(PrefixCacheTest, InsertAndMatchFullPrefix) {
     int matched_tokens = cache_->match_prefix(tokens, 4, matched);
     EXPECT_EQ(matched_tokens, 8);
     EXPECT_EQ(matched.num_layers, num_layers_);
-    EXPECT_EQ(matched.k_blocks[0].size(), 2u); // 2 blocks matched per layer
+    EXPECT_EQ(matched.pages[0].size(), 2u); // 2 pages matched per layer
     EXPECT_EQ(matched.seq_len, 8);
 }
 
@@ -87,7 +87,7 @@ TEST_F(PrefixCacheTest, PartialPrefixMatch) {
 
     // Only first block matches (chain hash breaks at block 1)
     EXPECT_EQ(matched_tokens, 4);
-    EXPECT_EQ(matched.k_blocks[0].size(), 1u);
+    EXPECT_EQ(matched.pages[0].size(), 1u);
 }
 
 TEST_F(PrefixCacheTest, NoMatch) {
@@ -119,22 +119,20 @@ TEST_F(PrefixCacheTest, PartialBlockNotCached) {
 TEST_F(PrefixCacheTest, MatchIncrementsRefCount) {
     std::vector<int> tokens = {1, 2, 3, 4};
     auto table = allocator_->allocate_sequence(4);
-    int k_block = table.k_blocks[0][0];
-    int v_block = table.v_blocks[0][0];
+    int page = table.pages[0][0];
 
     cache_->insert_blocks(tokens, 4, table);
 
     // Release original owner's reference
     allocator_->release_sequence(table);
 
-    // Block should be evictable (ref_count==0, hash set)
-    EXPECT_EQ(pool_->ref_count(k_block), 0);
+    // Page should be evictable (ref_count==0, hash set)
+    EXPECT_EQ(pool_->ref_count(page), 0);
 
     // Match should share (ref_count → 1)
     SequenceBlockTable matched;
     cache_->match_prefix(tokens, 4, matched);
-    EXPECT_EQ(pool_->ref_count(k_block), 1);
-    EXPECT_EQ(pool_->ref_count(v_block), 1);
+    EXPECT_EQ(pool_->ref_count(page), 1);
 }
 
 // ============================================================================

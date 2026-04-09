@@ -76,17 +76,17 @@ bool Scheduler::can_admit(const InferenceRequest& req) const {
 
     // Multi-turn with existing blocks: only count ADDITIONAL blocks needed
     if (req.has_block_table() && req.block_table().num_layers > 0) {
-        int current_blocks = static_cast<int>(req.block_table().k_blocks[0].size());
+        int current_blocks = static_cast<int>(req.block_table().pages[0].size());
         int total_after = req.block_table().seq_len + prompt_len + std::min(req.config.max_new_tokens, 256);
         int needed_per_layer = (total_after + bs - 1) / bs;
         int additional = std::max(0, needed_per_layer - current_blocks);
-        return block_allocator_->available_blocks() >= additional * num_layers * 2;
+        return block_allocator_->available_blocks() >= additional * num_layers;
     }
 
     // New request: estimate full allocation
     int est_tokens = prompt_len + std::min(req.config.max_new_tokens, 256);
     int blocks_per_layer = (est_tokens + bs - 1) / bs;
-    int blocks_needed = blocks_per_layer * num_layers * 2;
+    int blocks_needed = blocks_per_layer * num_layers;
     return block_allocator_->available_blocks() >= blocks_needed;
 }
 

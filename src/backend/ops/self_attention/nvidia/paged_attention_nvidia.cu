@@ -72,10 +72,9 @@ constexpr int PA_TILE_KV = 256;
 
 template <typename T>
 __global__ void paged_attention_decode_kernel(T* __restrict__ attn_out, const T* __restrict__ Q,
-                                              const T* __restrict__ pool_base, const int* __restrict__ k_block_table,
-                                              const int* __restrict__ v_block_table, const int seq_len,
-                                              const float scale, const int nhead, const int nkvhead, const int d,
-                                              const int block_size) {
+                                              const T* __restrict__ k_pool_base, const T* __restrict__ v_pool_base,
+                                              const int* __restrict__ page_table, const int seq_len, const float scale,
+                                              const int nhead, const int nkvhead, const int d, const int block_size) {
     const int h = blockIdx.x;
     const int tid = threadIdx.x;
     const int warp_id = tid / WARP_SIZE;
@@ -95,8 +94,7 @@ __global__ void paged_attention_decode_kernel(T* __restrict__ attn_out, const T*
     float* s_q = smem;
     float* s_scores = s_q + d;
     float* s_reduce = s_scores + PA_TILE_KV;
-    int* s_k_phys = reinterpret_cast<int*>(s_reduce + NUM_WARPS);
-    int* s_v_phys = s_k_phys + PA_TILE_KV;
+    int* s_phys = reinterpret_cast<int*>(s_reduce + NUM_WARPS);
 
     // Load Q into shared memory
     const T* q_ptr = Q + h * d;
@@ -118,8 +116,7 @@ __global__ void paged_attention_decode_kernel(T* __restrict__ attn_out, const T*
             const int j_global = kv_start + j;
             const int blk = j_global / block_size;
             const int off = j_global % block_size;
-            s_k_phys[j] = k_block_table[blk] * block_size + off;
-            s_v_phys[j] = v_block_table[blk] * block_size + off;
+            s_phys[j] = page_table[blk] * block_size + off;
         }
         __syncthreads();
 
@@ -129,7 +126,7 @@ __global__ void paged_attention_decode_kernel(T* __restrict__ attn_out, const T*
             const int j_local = j_base + warp_id;
             float score = -FLT_MAX;
             if (j_local < tile_len) {
-                const T* k_ptr = pool_base + s_k_phys[j_local] * nkvhead * d + kvh * d;
+                const T* k_ptr = k_pool_base + s_phys[j_local] * nkvhead * d + kvh * d;
                 float dot = 0.0f;
                 for (int dim = lane_id; dim < d; dim += WARP_SIZE) { dot += s_q[dim] * to_float(k_ptr[dim]); }
                 dot = pa_warp_reduce_sum(dot);
@@ -164,7 +161,7 @@ __global__ void paged_attention_decode_kernel(T* __restrict__ attn_out, const T*
             float weighted_v = 0.0f;
 #pragma unroll 4
             for (int j = dv_rank; j < tile_len; j += dv_group) {
-                weighted_v += s_scores[j] * to_float(pool_base[s_v_phys[j] * nkvhead * dv + kvh * dv + dv_idx]);
+                weighted_v += s_scores[j] * to_float(v_pool_base[s_phys[j] * nkvhead * dv + kvh * dv + dv_idx]);
             }
             acc_out += beta * weighted_v;
         }
@@ -197,12 +194,11 @@ __global__ void paged_attention_decode_kernel(T* __restrict__ attn_out, const T*
 
 template <typename T>
 __global__ void
-paged_attention_decode_batched_kernel(T* __restrict__ attn_out,               // [num_reqs, nhead, head_dim]
-                                      const T* __restrict__ Q,                // [num_reqs, nhead, head_dim]
-                                      const T* __restrict__ pool_base,
-                                      const int* __restrict__ k_block_tables, // [num_reqs, max_blocks_per_seq]
-                                      const int* __restrict__ v_block_tables,
-                                      const int* __restrict__ seq_lens,       // [num_reqs]
+paged_attention_decode_batched_kernel(T* __restrict__ attn_out,            // [num_reqs, nhead, head_dim]
+                                      const T* __restrict__ Q,             // [num_reqs, nhead, head_dim]
+                                      const T* __restrict__ k_pool_base, const T* __restrict__ v_pool_base,
+                                      const int* __restrict__ page_tables, // [num_reqs, max_blocks_per_seq]
+                                      const int* __restrict__ seq_lens,    // [num_reqs]
                                       const float scale, const int nhead, const int nkvhead, const int d,
                                       const int block_size, const int max_blocks_per_seq) {
     const int req_idx = blockIdx.x;
@@ -213,16 +209,14 @@ paged_attention_decode_batched_kernel(T* __restrict__ attn_out,               //
     const int kvh = h / (nhead / nkvhead);
     const int seq_len = seq_lens[req_idx];
 
-    // Per-request block tables
-    const int* k_bt = k_block_tables + req_idx * max_blocks_per_seq;
-    const int* v_bt = v_block_tables + req_idx * max_blocks_per_seq;
+    // Per-request page table
+    const int* page_table = page_tables + req_idx * max_blocks_per_seq;
 
     extern __shared__ float smem[];
     float* s_q = smem;
     float* s_scores = s_q + d;
     float* s_reduce = s_scores + PA_TILE_KV;
-    int* s_k_phys = reinterpret_cast<int*>(s_reduce + NUM_WARPS);
-    int* s_v_phys = s_k_phys + PA_TILE_KV;
+    int* s_phys = reinterpret_cast<int*>(s_reduce + NUM_WARPS);
 
     const T* q_ptr = Q + req_idx * nhead * d + h * d;
     for (int i = tid; i < d; i += blockDim.x) { s_q[i] = to_float(q_ptr[i]); }
@@ -243,8 +237,7 @@ paged_attention_decode_batched_kernel(T* __restrict__ attn_out,               //
             const int j_global = kv_start + j;
             const int blk = j_global / block_size;
             const int off = j_global % block_size;
-            s_k_phys[j] = k_bt[blk] * block_size + off;
-            s_v_phys[j] = v_bt[blk] * block_size + off;
+            s_phys[j] = page_table[blk] * block_size + off;
         }
         __syncthreads();
 
@@ -253,7 +246,7 @@ paged_attention_decode_batched_kernel(T* __restrict__ attn_out,               //
             const int j_local = j_base + warp_id;
             float score = -FLT_MAX;
             if (j_local < tile_len) {
-                const T* k_ptr = pool_base + s_k_phys[j_local] * nkvhead * d + kvh * d;
+                const T* k_ptr = k_pool_base + s_phys[j_local] * nkvhead * d + kvh * d;
                 float dot = 0.0f;
                 for (int dim = lane_id; dim < d; dim += WARP_SIZE) { dot += s_q[dim] * to_float(k_ptr[dim]); }
                 dot = pa_warp_reduce_sum(dot);
@@ -287,7 +280,7 @@ paged_attention_decode_batched_kernel(T* __restrict__ attn_out,               //
             float weighted_v = 0.0f;
 #pragma unroll 4
             for (int j = dv_rank; j < tile_len; j += dv_group) {
-                weighted_v += s_scores[j] * to_float(pool_base[s_v_phys[j] * nkvhead * dv + kvh * dv + dv_idx]);
+                weighted_v += s_scores[j] * to_float(v_pool_base[s_phys[j] * nkvhead * dv + kvh * dv + dv_idx]);
             }
             acc_out += beta * weighted_v;
         }
@@ -315,30 +308,31 @@ paged_attention_decode_batched_kernel(T* __restrict__ attn_out,               //
 // Dispatch
 // ============================================================================
 
-void paged_attention_decode(std::byte* attn_val, const std::byte* q, const std::byte* pool_base,
-                            const int* k_block_table, const int* v_block_table, int seq_len, float scale,
+void paged_attention_decode(std::byte* attn_val, const std::byte* q, const std::byte* k_pool_base,
+                            const std::byte* v_pool_base, const int* page_table, int seq_len, float scale,
                             zedinferDataType_t type, int nhead, int nkvhead, int head_dim, int block_size) {
     dim3 block(BLOCK_SIZE);
     dim3 grid(nhead);
-    // smem: s_q[d] + s_scores[PA_TILE_KV] + s_reduce[NUM_WARPS] + s_k_phys[PA_TILE_KV] + s_v_phys[PA_TILE_KV]
-    size_t smem_size = (head_dim + PA_TILE_KV + NUM_WARPS) * sizeof(float) + 2 * PA_TILE_KV * sizeof(int);
+    // smem: s_q[d] + s_scores[PA_TILE_KV] + s_reduce[NUM_WARPS] + s_phys[PA_TILE_KV]
+    size_t smem_size = (head_dim + PA_TILE_KV + NUM_WARPS) * sizeof(float) + PA_TILE_KV * sizeof(int);
 
     switch (type) {
         case ZEDINFER_DTYPE_F32:
             return paged_attention_decode_kernel<<<grid, block, smem_size>>>(
                 reinterpret_cast<float*>(attn_val), reinterpret_cast<const float*>(q),
-                reinterpret_cast<const float*>(pool_base), k_block_table, v_block_table, seq_len, scale, nhead, nkvhead,
-                head_dim, block_size);
+                reinterpret_cast<const float*>(k_pool_base), reinterpret_cast<const float*>(v_pool_base), page_table,
+                seq_len, scale, nhead, nkvhead, head_dim, block_size);
         case ZEDINFER_DTYPE_F16:
             return paged_attention_decode_kernel<<<grid, block, smem_size>>>(
                 reinterpret_cast<half*>(attn_val), reinterpret_cast<const half*>(q),
-                reinterpret_cast<const half*>(pool_base), k_block_table, v_block_table, seq_len, scale, nhead, nkvhead,
-                head_dim, block_size);
+                reinterpret_cast<const half*>(k_pool_base), reinterpret_cast<const half*>(v_pool_base), page_table,
+                seq_len, scale, nhead, nkvhead, head_dim, block_size);
         case ZEDINFER_DTYPE_BF16:
             return paged_attention_decode_kernel<<<grid, block, smem_size>>>(
                 reinterpret_cast<cuda_bfloat16*>(attn_val), reinterpret_cast<const cuda_bfloat16*>(q),
-                reinterpret_cast<const cuda_bfloat16*>(pool_base), k_block_table, v_block_table, seq_len, scale, nhead,
-                nkvhead, head_dim, block_size);
+                reinterpret_cast<const cuda_bfloat16*>(k_pool_base),
+                reinterpret_cast<const cuda_bfloat16*>(v_pool_base), page_table, seq_len, scale, nhead, nkvhead,
+                head_dim, block_size);
         default:
             EXCEPTION_UNSUPPORTED_DATATYPE(type);
     }
@@ -357,10 +351,10 @@ void paged_attention_decode(std::byte* attn_val, const std::byte* q, const std::
 
 template <typename T>
 __global__ void paged_attention_prefill_kernel(T* __restrict__ attn_out, const T* __restrict__ Q,
-                                               const T* __restrict__ pool_base, const int* __restrict__ k_block_table,
-                                               const int* __restrict__ v_block_table, const float scale,
-                                               const int nhead, const int nkvhead, const int d, const int past_len,
-                                               const int seqlen_q, const int block_size) {
+                                               const T* __restrict__ k_pool_base, const T* __restrict__ v_pool_base,
+                                               const int* __restrict__ page_table, const float scale, const int nhead,
+                                               const int nkvhead, const int d, const int past_len, const int seqlen_q,
+                                               const int block_size) {
     const int query_pos = blockIdx.x;
     const int h = blockIdx.y;
     const int tid = threadIdx.x;
@@ -394,9 +388,9 @@ __global__ void paged_attention_prefill_kernel(T* __restrict__ attn_out, const T
                 const int j_global = kv_start + j_local;
                 const int blk = j_global / block_size;
                 const int off = j_global % block_size;
-                const int k_phys = k_block_table[blk] * block_size + off;
+                const int k_phys = page_table[blk] * block_size + off;
 
-                const T* k_ptr = pool_base + k_phys * nkvhead * d + kvh * d;
+                const T* k_ptr = k_pool_base + k_phys * nkvhead * d + kvh * d;
                 float dot = 0.0f;
                 for (int dim = lane_id; dim < d; dim += WARP_SIZE) { dot += s_q[dim] * to_float(k_ptr[dim]); }
                 dot = pa_warp_reduce_sum(dot);
@@ -434,9 +428,9 @@ __global__ void paged_attention_prefill_kernel(T* __restrict__ attn_out, const T
                 const int j_global = kv_start + j;
                 const int blk = j_global / block_size;
                 const int off = j_global % block_size;
-                const int v_phys = v_block_table[blk] * block_size + off;
+                const int v_phys = page_table[blk] * block_size + off;
 
-                weighted_v += s_scores[j] * to_float(pool_base[v_phys * nkvhead * dv + kvh * dv + tid]);
+                weighted_v += s_scores[j] * to_float(v_pool_base[v_phys * nkvhead * dv + kvh * dv + tid]);
             }
             acc_out += beta * weighted_v;
         }
@@ -453,8 +447,8 @@ __global__ void paged_attention_prefill_kernel(T* __restrict__ attn_out, const T
 // Prefill Dispatch
 // ============================================================================
 
-void paged_attention_prefill(std::byte* attn_val, const std::byte* q, const std::byte* pool_base,
-                             const int* k_block_table, const int* v_block_table, int seqlen_q, int past_len,
+void paged_attention_prefill(std::byte* attn_val, const std::byte* q, const std::byte* k_pool_base,
+                             const std::byte* v_pool_base, const int* page_table, int seqlen_q, int past_len,
                              float scale, zedinferDataType_t type, int nhead, int nkvhead, int head_dim,
                              int block_size) {
     dim3 block(BLOCK_SIZE);
@@ -465,18 +459,19 @@ void paged_attention_prefill(std::byte* attn_val, const std::byte* q, const std:
         case ZEDINFER_DTYPE_F32:
             return paged_attention_prefill_kernel<<<grid, block, smem_size>>>(
                 reinterpret_cast<float*>(attn_val), reinterpret_cast<const float*>(q),
-                reinterpret_cast<const float*>(pool_base), k_block_table, v_block_table, scale, nhead, nkvhead,
-                head_dim, past_len, seqlen_q, block_size);
+                reinterpret_cast<const float*>(k_pool_base), reinterpret_cast<const float*>(v_pool_base), page_table,
+                scale, nhead, nkvhead, head_dim, past_len, seqlen_q, block_size);
         case ZEDINFER_DTYPE_F16:
             return paged_attention_prefill_kernel<<<grid, block, smem_size>>>(
                 reinterpret_cast<half*>(attn_val), reinterpret_cast<const half*>(q),
-                reinterpret_cast<const half*>(pool_base), k_block_table, v_block_table, scale, nhead, nkvhead, head_dim,
-                past_len, seqlen_q, block_size);
+                reinterpret_cast<const half*>(k_pool_base), reinterpret_cast<const half*>(v_pool_base), page_table,
+                scale, nhead, nkvhead, head_dim, past_len, seqlen_q, block_size);
         case ZEDINFER_DTYPE_BF16:
             return paged_attention_prefill_kernel<<<grid, block, smem_size>>>(
                 reinterpret_cast<cuda_bfloat16*>(attn_val), reinterpret_cast<const cuda_bfloat16*>(q),
-                reinterpret_cast<const cuda_bfloat16*>(pool_base), k_block_table, v_block_table, scale, nhead, nkvhead,
-                head_dim, past_len, seqlen_q, block_size);
+                reinterpret_cast<const cuda_bfloat16*>(k_pool_base),
+                reinterpret_cast<const cuda_bfloat16*>(v_pool_base), page_table, scale, nhead, nkvhead, head_dim,
+                past_len, seqlen_q, block_size);
         default:
             EXCEPTION_UNSUPPORTED_DATATYPE(type);
     }
@@ -486,30 +481,31 @@ void paged_attention_prefill(std::byte* attn_val, const std::byte* q, const std:
 // Batched Decode Dispatch
 // ============================================================================
 
-void paged_attention_decode_batched(std::byte* attn_val, const std::byte* q, const std::byte* pool_base,
-                                    const int* k_block_tables, const int* v_block_tables, const int* seq_lens,
+void paged_attention_decode_batched(std::byte* attn_val, const std::byte* q, const std::byte* k_pool_base,
+                                    const std::byte* v_pool_base, const int* page_tables, const int* seq_lens,
                                     int num_reqs, int max_blocks_per_seq, float scale, zedinferDataType_t type,
                                     int nhead, int nkvhead, int head_dim, int block_size) {
     dim3 block(BLOCK_SIZE);
     dim3 grid(num_reqs, nhead);
-    size_t smem_size = (head_dim + PA_TILE_KV + NUM_WARPS) * sizeof(float) + 2 * PA_TILE_KV * sizeof(int);
+    size_t smem_size = (head_dim + PA_TILE_KV + NUM_WARPS) * sizeof(float) + PA_TILE_KV * sizeof(int);
 
     switch (type) {
         case ZEDINFER_DTYPE_F32:
             return paged_attention_decode_batched_kernel<<<grid, block, smem_size>>>(
                 reinterpret_cast<float*>(attn_val), reinterpret_cast<const float*>(q),
-                reinterpret_cast<const float*>(pool_base), k_block_tables, v_block_tables, seq_lens, scale, nhead,
-                nkvhead, head_dim, block_size, max_blocks_per_seq);
+                reinterpret_cast<const float*>(k_pool_base), reinterpret_cast<const float*>(v_pool_base), page_tables,
+                seq_lens, scale, nhead, nkvhead, head_dim, block_size, max_blocks_per_seq);
         case ZEDINFER_DTYPE_F16:
             return paged_attention_decode_batched_kernel<<<grid, block, smem_size>>>(
                 reinterpret_cast<half*>(attn_val), reinterpret_cast<const half*>(q),
-                reinterpret_cast<const half*>(pool_base), k_block_tables, v_block_tables, seq_lens, scale, nhead,
-                nkvhead, head_dim, block_size, max_blocks_per_seq);
+                reinterpret_cast<const half*>(k_pool_base), reinterpret_cast<const half*>(v_pool_base), page_tables,
+                seq_lens, scale, nhead, nkvhead, head_dim, block_size, max_blocks_per_seq);
         case ZEDINFER_DTYPE_BF16:
             return paged_attention_decode_batched_kernel<<<grid, block, smem_size>>>(
                 reinterpret_cast<cuda_bfloat16*>(attn_val), reinterpret_cast<const cuda_bfloat16*>(q),
-                reinterpret_cast<const cuda_bfloat16*>(pool_base), k_block_tables, v_block_tables, seq_lens, scale,
-                nhead, nkvhead, head_dim, block_size, max_blocks_per_seq);
+                reinterpret_cast<const cuda_bfloat16*>(k_pool_base),
+                reinterpret_cast<const cuda_bfloat16*>(v_pool_base), page_tables, seq_lens, scale, nhead, nkvhead,
+                head_dim, block_size, max_blocks_per_seq);
         default:
             EXCEPTION_UNSUPPORTED_DATATYPE(type);
     }

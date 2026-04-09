@@ -4,6 +4,12 @@
 
 ## Build
 
+Initialize submodules before building FlashInfer-enabled targets:
+
+```bash
+git submodule update --init --recursive
+```
+
 ```bash
 # Development (full optimization for local CPU)
 xmake f -m release --nv-gpu=y --onednn=y
