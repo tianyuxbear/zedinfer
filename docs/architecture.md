@@ -29,7 +29,7 @@ HTTP Clients / CLI
        |
   Operators (ops::*)
     linear    : cuBLAS/cuBLASLt (GPU), oneDNN (CPU)
-    attention : custom paged kernels (decode/prefill/batched)
+    attention : FlashInfer on supported NVIDIA paged paths, legacy paged kernels as fallback
     rms_norm, rope, add, swiglu, embedding, argmax
        |
   PagedKVCache
@@ -61,6 +61,7 @@ Concrete execution context for `transformer_forward()`. No virtual dispatch (For
 - KV scatter to blocks (`write_kv`)
 - Paged attention dispatch: `attend_decode_single()`, `attend_decode_batched()`, `attend_prefill()`
 - GPU block table caching across layers
+- FlashInfer CSR metadata construction and cache reuse for decode/prefill
 
 ### transformer_forward (`src/frontend/models/transformer_forward.cpp`)
 Single shared forward loop parameterized by `ModelForwardConfig` (bias, Q/K norm flags). Takes `PagedForwardContext&` directly. When `DecodeScratch*` is provided and N=1, uses pre-allocated buffers (zero Tensor::create per decode step).
@@ -91,9 +92,9 @@ Warmup and benchmarking using the paged path (same kernels as actual serving). U
 | Operator | CPU | GPU |
 |----------|-----|-----|
 | linear | oneDNN GEMM (BF16/FP32 native) | cuBLAS/cuBLASLt (auto-tuned, fused bias) |
-| attention (decode) | Paged GQA, OMP parallel | Custom paged kernel, online softmax, smem address precompute |
-| attention (prefill) | Paged GQA, causal mask | Custom paged kernel (naive, no IO-aware tiling) |
-| attention (batched decode) | Loop over single decode | Grid=(num_reqs, nhead), per-request block table |
+| attention (decode) | Paged GQA, OMP parallel | FlashInfer when enabled and supported; otherwise custom paged kernel |
+| attention (prefill) | Paged GQA, causal mask | FlashInfer when enabled and supported; otherwise custom paged kernel |
+| attention (batched decode) | Loop over single decode | FlashInfer when enabled and supported; otherwise custom batched paged kernel |
 | rms_norm | AVX-512 vectorized | Vectorized 128-bit packed, warp+block reduction |
 | rope | CPU scalar + OMP | Per-token CUDA kernel |
 | add, swiglu | AVX-512 vectorized | Vectorized 128-bit packed |
@@ -107,6 +108,7 @@ Warmup and benchmarking using the paged path (same kernels as actual serving). U
 - **Tool:** XMake (`xmake.lua`)
 - **C++ Standard:** C++17
 - **GPU:** Optional (`--nv-gpu=y`), links cuBLAS/cuBLASLt
+- **FlashInfer:** Optional (`--flashinfer=y`), source tracked in `third_party/flashinfer`
 - **CPU GEMM:** Optional oneDNN (`--onednn=y`)
 - **Targets:** Static libraries (zedinfer, frontend, backend, ops, etc.) + example binaries (bench, chat, ping, serve, batch_bench)
 

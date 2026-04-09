@@ -17,10 +17,10 @@ Before doing anything, read these files to understand the project:
 2. `docs/architecture.md` — current system architecture (components, data flow, operator backends)
 3. `docs/roadmap.md` — what's completed, what's upcoming, known technical debt, performance data
 
-The project already has: direct model forward (no graph execution), cuBLAS/oneDNN for linear, paged KV cache with block pool, paged attention kernels (decode/prefill/batched), continuous batching scheduler, prefix caching (block ref counting + chain hash), DecodeScratch pre-allocation, HTTP API with Web UI and SSE streaming, stateful sessions.
+The project already has: direct model forward (no graph execution), cuBLAS/oneDNN for linear, paged KV cache with block pool, paged attention kernels with optional FlashInfer backend on NVIDIA, continuous batching scheduler, prefix caching (block ref counting + chain hash), DecodeScratch pre-allocation, HTTP API with Web UI and SSE streaming, stateful sessions.
 
-The main upcoming work items are documented in `docs/plan/`:
-- `flashinfer_integration.md` — replace custom paged attention with FlashInfer (highest priority, needs K/V block unification first)
+Key reference docs for current and upcoming acceleration work:
+- `docs/guide/flashinfer.md` — current FlashInfer integration status, dispatch rules, and known fallback boundaries
 - `cuda_graph.md` — CUDA graph capture for decode (Phase 1 DecodeScratch done, Phase 2 pending)
 - `quantization.md` — INT8/INT4 weight quantization
 - `heterogeneous_moe.md` — CPU/GPU mixed inference for MoE models
@@ -30,11 +30,13 @@ Key source files to understand the serving path:
 - `src/frontend/models/paged_forward_context.cpp` — KV scatter + attention dispatch
 - `src/zedinfer/scheduler.cpp` — batch scheduling + prefix cache integration
 - `src/zedinfer/serving_loop.cpp` — engine loop (submit → schedule → step → process_results)
-- `src/backend/ops/self_attention/nvidia/paged_attention_nvidia.cu` — CUDA paged attention kernels
+- `src/backend/ops/self_attention/nvidia/flashinfer_wrapper.cu` — FlashInfer bridge for decode/prefill
+- `src/backend/ops/self_attention/nvidia/paged_attention_nvidia.cu` — legacy CUDA paged attention fallback kernels
 
 Build and test:
-  xmake f -m release --nv-gpu=y --onednn=y && xmake build
-  xmake run test-blockpool && xmake run test-prefixcache && xmake run test-sampler
+  git submodule update --init --recursive
+  xmake f -m release --nv-gpu=y --onednn=y --flashinfer=y && xmake build
+  xmake run test-blockpool && xmake run test-prefixcache && xmake run test-sampler && xmake run test-models
   xmake run bench /path/to/model --nvidia -p 128 -d 128 -r 3 --gpu-memory-utilization 0.1
 ```
 

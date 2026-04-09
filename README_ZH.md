@@ -29,17 +29,17 @@
 
 - **多用户服务** — 连续批处理调度器，decode 优先策略，分块 prefill
 - **分页 KV 缓存** — 固定大小 block pool，静态 VRAM 预算，O(1) block 分配
-- **分页注意力** — 自定义 CUDA kernel，支持 decode（单请求/批量）和 prefill，block table 索引
+- **分页注意力** — NVIDIA 路径可切换到 FlashInfer 执行 decode/prefill，原有 CUDA kernel 继续保留为回退路径
 - **前缀缓存** — 跨请求 KV block 共享，基于链式哈希的内容匹配和引用计数
 - **HTTP API** — OpenAI 兼容的 `/v1/chat/completions` 接口，支持 SSE 流式输出和内嵌 Web 聊天界面
 - **有状态会话** — 服务端 KV 缓存跨轮次复用
 - **优化算子** — GPU 线性层使用 cuBLAS/cuBLASLt，CPU 线性层使用 oneDNN，decode 阶段预分配 scratch buffer
 - **直接模型前向** — 无图执行开销，单一共享的 `transformer_forward()` 循环
 - **零 Python 依赖** — 纯 C++ 服务路径，推理时无 Python 运行时
+- **FlashInfer 集成** — 通过 `--flashinfer=y` 启用可选的 NVIDIA 分页注意力后端
 
 ### 规划中（详见 `docs/plan/`）
 
-- 🔜 **FlashInfer 集成** — 优化分页注意力 kernel（预期 3-5x decode 加速）
 - 🔜 **CUDA Graph** — 捕获/重放 decode 前向（Phase 1 DecodeScratch 已完成）
 - 📋 **INT8/INT4 量化** — 权重量化，2-4x 内存压缩
 - 📋 **异构推理** — CPU/GPU 混合执行，MoE 模型 expert 卸载
@@ -86,6 +86,7 @@
 |----|------|----------|----------|
 | [CUDA Toolkit](https://developer.nvidia.com/cuda-toolkit) | GPU 运行时、kernel 编译 | NVIDIA EULA | 仅 GPU |
 | [cuBLAS / cuBLASLt](https://developer.nvidia.com/cublas) | GPU GEMM 优化（CUDA Toolkit 自带） | NVIDIA EULA | 仅 GPU |
+| [FlashInfer](https://github.com/flashinfer-ai/flashinfer) | 可选的 NVIDIA 分页注意力后端（git 子模块） | Apache-2.0 | 可选（`--flashinfer=y`） |
 | [oneDNN](https://github.com/oneapi-src/oneDNN) | CPU GEMM 优化（BF16/FP32 原生） | Apache-2.0 | 可选 |
 
 ---
@@ -105,6 +106,8 @@
 git submodule update --init --recursive
 ```
 
+FlashInfer 源码位于 `third_party/flashinfer` 子模块中。它的嵌套依赖（`cutlass`、`spdlog`）也会通过同一个递归命令初始化。
+
 ### 构建命令
 
 ```bash
@@ -119,7 +122,13 @@ xmake build
 # CPU + GPU + oneDNN
 xmake f -m release --nv-gpu=y --onednn=y
 xmake build
+
+# CPU + GPU + FlashInfer 分页注意力后端
+xmake f -m release --nv-gpu=y --flashinfer=y
+xmake build
 ```
+
+启用 `--flashinfer=y` 后，ZedInfer 只会在受支持的 NVIDIA 分页注意力场景下切到 FlashInfer；其余情况仍会回退到仓库内原有的 paged attention CUDA kernel。当前的 dispatch 规则和实现说明见 [docs/guide/flashinfer.md](docs/guide/flashinfer.md)。
 
 ---
 
@@ -152,7 +161,12 @@ xmake run bench /path/to/model --nvidia -p 128 -d 128 -r 3
 
 # 多请求批量基准测试
 xmake run batch_bench /path/to/model --nvidia -p 128 -d 128 --batch 4
+
+# 不重新编译，直接对比 FlashInfer 与原版 paged attention
+ZEDINFER_DISABLE_FLASHINFER=1 xmake run bench /path/to/model --nvidia -p 128 -d 128 -r 3
 ```
+
+`ZEDINFER_DISABLE_FLASHINFER=1` 会在运行时强制回退到原有 paged attention kernel。`ZEDINFER_FLASHINFER_DISABLE_FASTPATH=1` 会关闭 FlashInfer 包装层内部的单请求 decode fast path，便于调试 planner 路径。
 
 ---
 
@@ -167,6 +181,7 @@ xmake build -g test
 # 运行各测试套件
 xmake run test-blockpool       # KV 缓存 block pool + 引用计数
 xmake run test-prefixcache     # 前缀缓存哈希匹配
+xmake run test-models          # 使用 --flashinfer=y 构建时包含 FlashInfer decode/prefill 一致性测试
 xmake run test-sampler         # Argmax + 通用采样器
 xmake run test-chattemplate    # 对话模板格式化
 xmake run test-tensor          # Tensor 操作（形状、切片、转置、设备转移）
@@ -206,6 +221,8 @@ uv run python/tests/ops/argmax.py
 ## 📊 性能
 
 > WIP — 完整性能基准测试即将发布。
+
+当前 FlashInfer 后端的行为说明与推荐 benchmark 方法见 [docs/guide/flashinfer.md](docs/guide/flashinfer.md)。
 
 ---
 
@@ -264,8 +281,10 @@ zedinfer/
 │   ├── index.html                   # 单页聊天界面
 │   └── images/                      # 图标、Logo
 ├── third_party/include/             # 内置 header-only 库
+├── third_party/flashinfer/          # FlashInfer git 子模块及其嵌套依赖
 ├── docs/
 │   ├── architecture.md              # 当前系统架构
+│   ├── guide/flashinfer.md          # FlashInfer 后端接入说明
 │   ├── roadmap.md                   # 状态 + 未来规划
 │   └── plan/                        # 待实现特性的设计文档
 ├── xmake.lua                        # 构建配置

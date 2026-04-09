@@ -29,17 +29,17 @@
 
 - **Multi-user serving** — Continuous batching scheduler with decode-first policy and chunked prefill
 - **Paged KV cache** — Fixed-size block pool with static VRAM budget, O(1) block allocation
-- **Paged attention** — Custom CUDA kernels for decode (single/batched) and prefill with block-table indexing
+- **Paged attention** — NVIDIA path can dispatch to FlashInfer for decode/prefill with legacy CUDA kernels kept as fallback
 - **Prefix caching** — Cross-request KV block sharing via chain-hashed content matching and reference counting
 - **HTTP API** — OpenAI-compatible `/v1/chat/completions` with SSE streaming and embedded web chat UI
 - **Stateful sessions** — Server-side KV cache reuse across multi-turn conversations
 - **Optimized operators** — cuBLAS/cuBLASLt for GPU linear, oneDNN for CPU linear, pre-allocated decode scratch buffers
 - **Direct model forward** — No graph execution overhead; single shared `transformer_forward()` loop
 - **Zero Python runtime** — Pure C++ serving path, no Python dependency at inference time
+- **FlashInfer integration** — Optional NVIDIA paged-attention backend enabled with `--flashinfer=y`
 
 ### Planned (see `docs/plan/`)
 
-- 🔜 **FlashInfer integration** — Optimized paged attention kernels (3-5x decode speedup expected)
 - 🔜 **CUDA Graph** — Capture/replay decode forward pass (Phase 1 DecodeScratch done)
 - 📋 **INT8/INT4 quantization** — Weight-only quantization for 2-4x memory reduction
 - 📋 **Heterogeneous inference** — CPU/GPU mixed execution with expert offloading for MoE models
@@ -86,6 +86,7 @@ Adding a new Qwen-family model requires only defining a `ModelForwardConfig` (bi
 |---------|---------|---------|----------|
 | [CUDA Toolkit](https://developer.nvidia.com/cuda-toolkit) | GPU runtime, kernel compilation | NVIDIA EULA | GPU only |
 | [cuBLAS / cuBLASLt](https://developer.nvidia.com/cublas) | Optimized GPU GEMM (part of CUDA Toolkit) | NVIDIA EULA | GPU only |
+| [FlashInfer](https://github.com/flashinfer-ai/flashinfer) | Optional NVIDIA paged attention backend (git submodule) | Apache-2.0 | Optional (`--flashinfer=y`) |
 | [oneDNN](https://github.com/oneapi-src/oneDNN) | Optimized CPU GEMM (BF16/FP32 native) | Apache-2.0 | Optional |
 
 ---
@@ -105,6 +106,8 @@ If you build with `--flashinfer=y`, initialize submodules recursively first:
 git submodule update --init --recursive
 ```
 
+The FlashInfer source lives in `third_party/flashinfer` as a git submodule. Its nested dependencies (`cutlass`, `spdlog`) are initialized by the same recursive command.
+
 ### Build Commands
 
 ```bash
@@ -119,7 +122,13 @@ xmake build
 # CPU + GPU + oneDNN
 xmake f -m release --nv-gpu=y --onednn=y
 xmake build
+
+# CPU + GPU + FlashInfer paged attention backend
+xmake f -m release --nv-gpu=y --flashinfer=y
+xmake build
 ```
+
+With `--flashinfer=y`, ZedInfer enables FlashInfer only for supported NVIDIA paged-attention shapes. Unsupported cases still fall back to the in-tree paged CUDA kernels. For the current dispatch rules and implementation details, see [docs/guide/flashinfer.md](docs/guide/flashinfer.md).
 
 ---
 
@@ -152,7 +161,12 @@ xmake run bench /path/to/model --nvidia -p 128 -d 128 -r 3
 
 # Multi-request batch benchmark
 xmake run batch_bench /path/to/model --nvidia -p 128 -d 128 --batch 4
+
+# A/B compare FlashInfer vs legacy paged attention without rebuilding
+ZEDINFER_DISABLE_FLASHINFER=1 xmake run bench /path/to/model --nvidia -p 128 -d 128 -r 3
 ```
+
+`ZEDINFER_DISABLE_FLASHINFER=1` keeps the build unchanged but forces the runtime back to the legacy paged-attention kernels. `ZEDINFER_FLASHINFER_DISABLE_FASTPATH=1` disables the single-request decode fast path inside the FlashInfer wrapper for planner-path debugging.
 
 ---
 
@@ -167,6 +181,7 @@ xmake build -g test
 # Run individual test suites
 xmake run test-blockpool       # KV cache block pool + ref counting
 xmake run test-prefixcache     # Prefix caching hash match
+xmake run test-models          # Includes FlashInfer decode/prefill parity tests when built with --flashinfer=y
 xmake run test-sampler         # Argmax + general sampler
 xmake run test-chattemplate    # Chat template formatting
 xmake run test-tensor          # Tensor ops (shape, slice, permute, device transfer)
@@ -206,6 +221,8 @@ uv run python/tests/ops/argmax.py
 ## 📊 Performance
 
 > WIP — Comprehensive benchmarks coming soon.
+
+For the current FlashInfer backend behavior and recommended benchmark methodology, see [docs/guide/flashinfer.md](docs/guide/flashinfer.md).
 
 ---
 
@@ -264,8 +281,10 @@ zedinfer/
 │   ├── index.html                   # Single-page chat UI
 │   └── images/                      # Icons, logo
 ├── third_party/include/             # Vendored header-only libraries
+├── third_party/flashinfer/          # FlashInfer git submodule + nested deps
 ├── docs/
 │   ├── architecture.md              # Current system design
+│   ├── guide/flashinfer.md          # FlashInfer backend integration notes
 │   ├── roadmap.md                   # Status + future plans
 │   └── plan/                        # Design docs for upcoming features
 ├── xmake.lua                        # Build configuration

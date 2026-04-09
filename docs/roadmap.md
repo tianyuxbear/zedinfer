@@ -19,6 +19,7 @@
 | Paged attention kernels | PR-8 | `paged_attention_nvidia.cu` |
 | Continuous batching | PR-9 | `scheduler.cpp`, `batch_context.cpp` |
 | HTTP API + Web UI + SSE | PR-10 | `http_server.cpp`, `web/index.html` |
+| FlashInfer paged attention backend | post-PR-10 | `paged_forward_context.cpp`, `flashinfer_wrapper.cu` |
 
 ### Refactoring (R1-R6)
 | Refactor | Description |
@@ -38,6 +39,7 @@
 | Prefix caching | Skip redundant prefill for shared prefixes | Block ref counting + chain hash |
 | DecodeScratch pre-allocation | Eliminates ~500 Tensor::create/step | Fixed-address decode buffers |
 | BlockPool O(1) counters | Fast admission control | Incremental free/evictable counters |
+| FlashInfer paged attention path | NVIDIA decode/prefill can route to FlashInfer with legacy fallback | CSR metadata + wrapper dispatch |
 
 ### Code Health
 | Cleanup | Description |
@@ -57,21 +59,17 @@
 
 ## Upcoming Work
 
-### Priority 1: FlashInfer Integration
+### Priority 1: FlashInfer Optimization And Coverage
 
-**Goal:** Replace custom paged attention kernels with FlashInfer's optimized kernels. Expected 3-5x decode speedup, 2-4x prefill speedup.
+**Current status:** FlashInfer is already integrated as an optional NVIDIA paged-attention backend behind `--flashinfer=y`. The legacy paged CUDA kernels remain in-tree as the fallback path.
 
-**Prerequisite:** K/V block unification (currently separate `k_blocks`/`v_blocks` per layer; FlashInfer needs shared page indices).
+**Near-term focus:**
+- Reduce planner and workspace overhead on common decode shapes
+- Expand native decode-kernel coverage so fewer shapes fall back to the FlashInfer prefill kernel
+- Reuse more per-context metadata across repeated bench/serve iterations
+- Continue measuring against the legacy kernels with runtime A/B toggles
 
-**Approach:** AOT (Ahead-Of-Time) kernel generation — run Python codegen offline, compile generated .cu files as regular CUDA code. No Python at runtime.
-
-**Plan:** `docs/plan/flashinfer_integration.md`
-
-**Key changes:**
-1. `SequenceBlockTable`: k_blocks + v_blocks -> unified pages
-2. `AttentionParams`: k_block_table + v_block_table -> unified page_table
-3. `BlockPool`: single pool -> separate K/V pools with shared page IDs
-4. All consumers: scheduler, session, paged_forward_context, prefix_cache, batch_context
+**Reference:** `docs/guide/flashinfer.md`
 
 ### Priority 2: CUDA Graph (Phase 2)
 
@@ -124,12 +122,12 @@
 
 | Issue | Severity | Blocked by |
 |-------|----------|-----------|
-| K/V block separation | High | Blocks FlashInfer integration |
-| Paged prefill kernel naive (no IO tiling) | High | Needs FlashInfer |
-| Paged decode kernel 5x slower than contiguous | High | Needs FlashInfer |
-| No operator correctness tests | Medium | Tested via Python bindings externally |
+| Some NVIDIA shapes still fall back to legacy paged attention | Medium | Unsupported FlashInfer runtime shape |
+| Some decode shapes use FlashInfer prefill kernel fallback instead of native decode | Medium | Wider decode-kernel coverage |
+| Non-contiguous mixed prefill slices still fall back to legacy per-slot prefill | Medium | Better prefill packing / metadata reuse |
+| Operator correctness coverage is still incomplete | Medium | More parity tests across operators and serving flows |
 | No scheduler/serving integration tests | Medium | — |
-| build_decode_cache per-context rebuild | Low | FlashInfer will replace |
+| build_decode_cache per-context rebuild | Low | More metadata/cache reuse across iterations |
 
 ---
 
@@ -145,4 +143,4 @@
 | Batch=32 | Total throughput | ~1,820 tok/s |
 | Batch=128 | Total throughput | ~2,170 tok/s |
 
-**Bottleneck:** Paged attention decode kernel (64% of GPU time, avg 129us/call). FlashInfer integration is the primary optimization target.
+**Bottleneck:** NVIDIA paged attention remains the primary optimization target. FlashInfer is integrated, and further work is focused on planner overhead, coverage, and fallback reduction.

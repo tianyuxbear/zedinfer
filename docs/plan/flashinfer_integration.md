@@ -1,5 +1,8 @@
 # FlashInfer Integration Plan
 
+> Historical design document. FlashInfer is now integrated as an optional backend.
+> For the current implementation, dispatch rules, and fallback behavior, see `docs/guide/flashinfer.md`.
+>
 > Replace custom paged attention kernels (decode + prefill) with FlashInfer's optimized kernels.
 > Covers: single decode, batched decode, single prefill, batched prefill.
 
