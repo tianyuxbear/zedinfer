@@ -1,5 +1,6 @@
 #include "frontend/models/paged_forward_context.hpp"
 #include "backend/core/context/context.hpp"
+#include "backend/ops/kv_scatter/nvidia/paged_kv_scatter.cuh"
 #include "backend/ops/ops.hpp"
 #include "utils/types.hpp"
 
@@ -9,6 +10,10 @@
 #include <stdexcept>
 
 namespace zedinfer::model {
+
+static tensor_t upload_to_gpu(const std::vector<int>& host_data, zedinferDeviceType_t dev, int dev_id);
+static void ensure_flashinfer_page_table_cache(kvcache::SequenceBlockTable& table, zedinferDeviceType_t dev,
+                                               int dev_id);
 
 // ============================================================================
 // Constructors
@@ -91,7 +96,6 @@ void PagedForwardContext::scatter_slot_kv(const Slot& slot, int layer, tensor_t 
 }
 
 void PagedForwardContext::write_kv(int layer, tensor_t k, tensor_t v) {
-    const int bs = pool_.config().block_size;
     const size_t token_bytes = pool_.config().token_bytes();
 
     if (pool_.device_type() == ZEDINFER_DEVICE_CPU) {
@@ -100,40 +104,19 @@ void PagedForwardContext::write_kv(int layer, tensor_t k, tensor_t v) {
         return;
     }
 
-    // GPU: batch all scatter operations into arrays, then use cudaMemcpyAsync
-    // to avoid per-token cudaMemcpy launch overhead.
-    // Collect (src, dst, size) triplets for all tokens across all slots.
-    struct ScatterOp {
-        const void* src;
-        void* dst;
-    };
-    std::vector<ScatterOp> ops;
-    ops.reserve(total_tokens_ * 2); // K + V
-
-    for (const auto& slot : slots_) {
-        auto* k_src = static_cast<const std::byte*>(k->data()) + slot.token_offset * token_bytes;
-        auto* v_src = static_cast<const std::byte*>(v->data()) + slot.token_offset * token_bytes;
-        auto& pages = slot.block_table->pages[layer];
-
-        for (int t = 0; t < slot.num_tokens; ++t) {
-            int global_pos = slot.past_len + t;
-            int block_idx = global_pos / bs;
-            int offset = global_pos % bs;
-
-            void* k_dst = static_cast<std::byte*>(pool_.k_block_data(pages[block_idx])) + offset * token_bytes;
-            void* v_dst = static_cast<std::byte*>(pool_.v_block_data(pages[block_idx])) + offset * token_bytes;
-
-            ops.push_back({k_src + t * token_bytes, k_dst});
-            ops.push_back({v_src + t * token_bytes, v_dst});
-        }
-    }
-
-    // Execute all copies using async memcpy on the default stream
     core::context().setDevice(pool_.device_type(), pool_.device_id());
-    auto* api = core::context().runtime().api();
-    for (const auto& op : ops) { api->memcpy_async(op.dst, op.src, token_bytes, ZEDINFER_MEMCPY_D2D, nullptr); }
-    // No explicit sync needed — subsequent CUDA kernels (attention) on the same
-    // stream will wait for the async copies to complete.
+    for (const auto& slot : slots_) {
+        if (slot.num_tokens <= 0) {
+            continue;
+        }
+        ensure_flashinfer_page_table_cache(*slot.block_table, pool_.device_type(), pool_.device_id());
+        ops::nvidia::scatter_paged_kv(
+            static_cast<const std::byte*>(k->data()) + static_cast<size_t>(slot.token_offset) * token_bytes,
+            static_cast<const std::byte*>(v->data()) + static_cast<size_t>(slot.token_offset) * token_bytes,
+            pool_.k_pool_base(), pool_.v_pool_base(),
+            reinterpret_cast<const int*>(slot.block_table->flashinfer_page_tables_gpu[layer]->data()),
+            pool_.config().block_size, slot.past_len, slot.num_tokens, token_bytes);
+    }
 }
 
 // ============================================================================
