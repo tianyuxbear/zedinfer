@@ -37,6 +37,10 @@ template <typename T> T* ptr_from_offset(void* base, int64_t offset) {
     return flashinfer::GetPtrFromBaseOffset<T>(base, offset);
 }
 
+tensor_t allocate_byte_tensor(size_t bytes, zedinferDeviceType_t device_type, int device_id) {
+    return Tensor::create({std::max<size_t>(bytes, 16)}, ZEDINFER_DTYPE_BYTE, device_type, device_id);
+}
+
 int read_env_non_negative_int(const char* name, int default_value) {
     if (const char* value = std::getenv(name)) {
         char* end = nullptr;
@@ -96,6 +100,103 @@ template <typename DType> flashinfer::paged_kv_t<DType, int32_t> make_paged_kv(c
         const_cast<int32_t*>(reinterpret_cast<const int32_t*>(p.kv_last_page_len)));
 }
 
+template <typename Params, uint32_t HEAD_DIM>
+cudaError_t run_decode_work_estimation(const AttentionConfig& c, bool& split_kv, uint32_t& max_grid_size,
+                                       uint32_t& max_num_pages_per_batch, uint32_t& new_batch_size, uint32_t& gdy,
+                                       uint32_t batch_size, int32_t* kv_indptr_h, uint32_t num_qo_heads,
+                                       uint32_t page_size, bool enable_cuda_graph, cudaStream_t work_stream) {
+    cudaError_t status = cudaSuccess;
+    const int group_size = c.nhead / c.nkvhead;
+    DISPATCH_GQA_GROUP_SIZE(group_size, GROUP_SIZE, {
+        status = flashinfer::BatchDecodeWithPagedKVCacheWorkEstimationDispatched<
+            GROUP_SIZE, HEAD_DIM, flashinfer::PosEncodingMode::kNone, DefaultAttention, Params>(
+            split_kv, max_grid_size, max_num_pages_per_batch, new_batch_size, gdy, batch_size, kv_indptr_h,
+            num_qo_heads, page_size, enable_cuda_graph, work_stream);
+    });
+    return status;
+}
+
+template <typename DType, uint32_t HEAD_DIM>
+void prepare_single_decode_plan_head_dim(const AttentionConfig& c, int total_pages, FlashInferDecodePlan& plan,
+                                         cudaStream_t stream) {
+    using Params = flashinfer::BatchDecodeParams<DType, DType, DType, int32_t>;
+
+    plan.reset();
+
+    const int fastpath_probe_pages
+        = read_env_non_negative_int("ZEDINFER_FLASHINFER_FASTPATH_PROBE_PAGES", kDecodeFastpathProbePages);
+    if (std::getenv("ZEDINFER_FLASHINFER_DISABLE_FASTPATH") == nullptr && total_pages <= fastpath_probe_pages) {
+        return;
+    }
+
+    int32_t kv_indptr_host[2] = {0, total_pages};
+    bool split_kv = false;
+    uint32_t max_grid_size = 0;
+    uint32_t max_num_pages_per_batch = 0;
+    uint32_t new_batch_size = 0;
+    uint32_t gdy = 0;
+    check_cuda_status(run_decode_work_estimation<Params, HEAD_DIM>(
+                          c, split_kv, max_grid_size, max_num_pages_per_batch, new_batch_size, gdy, 1, kv_indptr_host,
+                          static_cast<uint32_t>(c.nhead), static_cast<uint32_t>(c.block_size), false, stream),
+                      "BatchDecodeWithPagedKVCacheWorkEstimationDispatched");
+    if (!split_kv) {
+        return;
+    }
+
+    const size_t float_bytes = std::max<size_t>(4096, static_cast<size_t>(c.nhead) * std::max(total_pages, 1)
+                                                          * (static_cast<size_t>(c.head_dim) + 1) * sizeof(float));
+    const size_t int_bytes = std::max<size_t>(4096, (static_cast<size_t>(total_pages) * 3 + 2 + 64) * sizeof(int)
+                                                        + static_cast<size_t>(total_pages + 1 + 64) * sizeof(bool));
+
+    auto& runtime = core::context().runtime();
+    size_t retry_float_bytes = float_bytes;
+    size_t retry_int_bytes = int_bytes;
+    for (int attempt = 0; attempt < 4; ++attempt) {
+        auto float_ws = allocate_byte_tensor(retry_float_bytes, c.device_type, c.device_id);
+        auto int_ws = allocate_byte_tensor(retry_int_bytes, c.device_type, c.device_id);
+        auto host_int_ws = runtime.allocateHostStorage(retry_int_bytes);
+
+        try {
+            flashinfer::DecodePlanInfo plan_info;
+            check_cuda_status(
+                flashinfer::DecodePlan<HEAD_DIM, flashinfer::PosEncodingMode::kNone, DefaultAttention, Params>(
+                    float_ws->data(), retry_float_bytes, int_ws->data(), host_int_ws->memory(), retry_int_bytes,
+                    plan_info, kv_indptr_host, 1, static_cast<uint32_t>(c.nhead), static_cast<uint32_t>(c.block_size),
+                    false, stream,
+                    [&](bool& split_kv_inner, uint32_t& max_grid_size_inner, uint32_t& max_num_pages_per_batch_inner,
+                        uint32_t& new_batch_size_inner, uint32_t& gdy_inner, uint32_t batch_size_inner,
+                        int32_t* kv_indptr_h_inner, uint32_t num_qo_heads_inner, uint32_t page_size_inner,
+                        bool enable_cuda_graph_inner, cudaStream_t work_stream_inner) -> cudaError_t {
+                        return run_decode_work_estimation<Params, HEAD_DIM>(
+                            c, split_kv_inner, max_grid_size_inner, max_num_pages_per_batch_inner, new_batch_size_inner,
+                            gdy_inner, batch_size_inner, kv_indptr_h_inner, num_qo_heads_inner, page_size_inner,
+                            enable_cuda_graph_inner, work_stream_inner);
+                    }),
+                "DecodePlan");
+
+            plan.float_workspace = std::move(float_ws);
+            plan.int_workspace = std::move(int_ws);
+            plan.padded_batch_size = static_cast<int>(plan_info.padded_batch_size);
+            plan.v_offset = plan_info.v_offset;
+            plan.s_offset = plan_info.s_offset;
+            plan.request_indices_offset = plan_info.request_indices_offset;
+            plan.kv_tile_indices_offset = plan_info.kv_tile_indices_offset;
+            plan.o_indptr_offset = plan_info.o_indptr_offset;
+            plan.block_valid_mask_offset = plan_info.block_valid_mask_offset;
+            plan.kv_chunk_size_ptr_offset = plan_info.kv_chunk_size_ptr_offset;
+            plan.split_kv = plan_info.split_kv;
+            plan.valid = true;
+            return;
+        } catch (const flashinfer::Error& err) {
+            if (!is_workspace_overflow(err) || attempt == 3) {
+                throw;
+            }
+            retry_float_bytes *= 2;
+            retry_int_bytes *= 2;
+        }
+    }
+}
+
 template <typename DType, uint32_t HEAD_DIM> void run_decode_head_dim(const AttentionParams& p, cudaStream_t stream) {
     using Params = flashinfer::BatchDecodeParams<DType, DType, DType, int32_t>;
 
@@ -109,16 +210,35 @@ template <typename DType, uint32_t HEAD_DIM> void run_decode_head_dim(const Atte
         = [&](bool& split_kv, uint32_t& max_grid_size, uint32_t& max_num_pages_per_batch, uint32_t& new_batch_size,
               uint32_t& gdy, uint32_t batch_size, int32_t* kv_indptr_h, uint32_t num_qo_heads, uint32_t page_size,
               bool enable_cuda_graph, cudaStream_t work_stream) -> cudaError_t {
-        cudaError_t status = cudaSuccess;
-        const int group_size = c.nhead / c.nkvhead;
-        DISPATCH_GQA_GROUP_SIZE(group_size, GROUP_SIZE, {
-            status = flashinfer::BatchDecodeWithPagedKVCacheWorkEstimationDispatched<
-                GROUP_SIZE, HEAD_DIM, flashinfer::PosEncodingMode::kNone, DefaultAttention, Params>(
-                split_kv, max_grid_size, max_num_pages_per_batch, new_batch_size, gdy, batch_size, kv_indptr_h,
-                num_qo_heads, page_size, enable_cuda_graph, work_stream);
-        });
-        return status;
+        return run_decode_work_estimation<Params, HEAD_DIM>(c, split_kv, max_grid_size, max_num_pages_per_batch,
+                                                            new_batch_size, gdy, batch_size, kv_indptr_h, num_qo_heads,
+                                                            page_size, enable_cuda_graph, work_stream);
     };
+
+    if (p.fi_decode_plan && p.fi_decode_plan->valid) {
+        auto* int_buf = p.fi_decode_plan->int_workspace->data();
+        auto* float_buf = p.fi_decode_plan->float_workspace ? p.fi_decode_plan->float_workspace->data() : nullptr;
+        params.padded_batch_size = static_cast<uint32_t>(p.fi_decode_plan->padded_batch_size);
+        params.request_indices = ptr_from_offset<int32_t>(int_buf, p.fi_decode_plan->request_indices_offset);
+        params.kv_tile_indices = ptr_from_offset<int32_t>(int_buf, p.fi_decode_plan->kv_tile_indices_offset);
+        params.o_indptr = ptr_from_offset<int32_t>(int_buf, p.fi_decode_plan->o_indptr_offset);
+        params.kv_chunk_size_ptr = ptr_from_offset<int32_t>(int_buf, p.fi_decode_plan->kv_chunk_size_ptr_offset);
+        params.block_valid_mask = p.fi_decode_plan->split_kv
+                                    ? ptr_from_offset<bool>(int_buf, p.fi_decode_plan->block_valid_mask_offset)
+                                    : nullptr;
+
+        auto* tmp_v
+            = p.fi_decode_plan->split_kv ? ptr_from_offset<DType>(float_buf, p.fi_decode_plan->v_offset) : nullptr;
+        auto* tmp_s
+            = p.fi_decode_plan->split_kv ? ptr_from_offset<float>(float_buf, p.fi_decode_plan->s_offset) : nullptr;
+
+        check_cuda_status(
+            flashinfer::BatchDecodeWithPagedKVCacheDispatched<HEAD_DIM, flashinfer::PosEncodingMode::kNone,
+                                                              DefaultAttention, Params>(params, tmp_v, tmp_s, false,
+                                                                                        stream),
+            "BatchDecodeWithPagedKVCacheDispatched");
+        return;
+    }
 
     const int total_pages = p.kv_indptr_host[p.kv_batch_size];
 
@@ -235,6 +355,45 @@ template <typename DType> void run_decode_impl(const AttentionParams& p) {
     }
 }
 
+bool prepare_single_decode_plan_impl(const AttentionConfig& config, int total_pages, FlashInferDecodePlan& plan) {
+    core::context().setDevice(config.device_type, config.device_id);
+    auto stream = reinterpret_cast<cudaStream_t>(core::context().runtime().stream());
+    switch (config.dtype) {
+        case ZEDINFER_DTYPE_F16:
+            switch (config.head_dim) {
+                case 64:
+                    prepare_single_decode_plan_head_dim<half, 64>(config, total_pages, plan, stream);
+                    return plan.valid;
+                case 128:
+                    prepare_single_decode_plan_head_dim<half, 128>(config, total_pages, plan, stream);
+                    return plan.valid;
+                case 256:
+                    prepare_single_decode_plan_head_dim<half, 256>(config, total_pages, plan, stream);
+                    return plan.valid;
+                default:
+                    throw std::runtime_error("[FlashInfer] Unsupported decode head_dim: "
+                                             + std::to_string(config.head_dim));
+            }
+        case ZEDINFER_DTYPE_BF16:
+            switch (config.head_dim) {
+                case 64:
+                    prepare_single_decode_plan_head_dim<nv_bfloat16, 64>(config, total_pages, plan, stream);
+                    return plan.valid;
+                case 128:
+                    prepare_single_decode_plan_head_dim<nv_bfloat16, 128>(config, total_pages, plan, stream);
+                    return plan.valid;
+                case 256:
+                    prepare_single_decode_plan_head_dim<nv_bfloat16, 256>(config, total_pages, plan, stream);
+                    return plan.valid;
+                default:
+                    throw std::runtime_error("[FlashInfer] Unsupported decode head_dim: "
+                                             + std::to_string(config.head_dim));
+            }
+        default:
+            throw std::runtime_error("[FlashInfer] Unsupported decode dtype");
+    }
+}
+
 template <typename DType, uint32_t HEAD_DIM> void run_prefill_head_dim(const AttentionParams& p, cudaStream_t stream) {
     using Params = flashinfer::BatchPrefillPagedParams<DType, DType, DType, int32_t>;
 
@@ -338,6 +497,10 @@ template <typename Func> void wrap_flashinfer_call(std::string_view name, Func&&
 }
 
 } // namespace
+
+bool flashinfer_prepare_single_decode_plan(const AttentionConfig& config, int total_pages, FlashInferDecodePlan& plan) {
+    return prepare_single_decode_plan_impl(config, total_pages, plan);
+}
 
 void flashinfer_attention_decode(const AttentionParams& params) {
     wrap_flashinfer_call("decode", [&] {

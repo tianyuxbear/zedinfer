@@ -1,5 +1,6 @@
 #pragma once
 
+#include "backend/ops/attention_params.hpp"
 #include "backend/tensor/tensor.hpp"
 #include "zedinfer.h"
 
@@ -40,6 +41,18 @@ struct SequenceBlockTable {
     tensor_t flashinfer_single_decode_kv_last_page_len_gpu;
     tensor_t flashinfer_single_decode_qo_indptr_gpu;
     tensor_t flashinfer_single_decode_descriptor_gpu;
+    ops::FlashInferDecodePlan flashinfer_single_decode_plan;
+    bool flashinfer_single_decode_plan_ready = false;
+    int flashinfer_single_decode_plan_total_pages = -1;
+    int flashinfer_single_decode_plan_nhead = 0;
+    int flashinfer_single_decode_plan_nkvhead = 0;
+    int flashinfer_single_decode_plan_head_dim = 0;
+    int flashinfer_single_decode_plan_block_size = 0;
+    zedinferDataType_t flashinfer_single_decode_plan_dtype = ZEDINFER_DTYPE_BF16;
+    zedinferDeviceType_t flashinfer_single_decode_plan_device_type = ZEDINFER_DEVICE_CPU;
+    int flashinfer_single_decode_plan_device_id = -1;
+    int flashinfer_single_decode_plan_fastpath_probe_pages = -1;
+    bool flashinfer_single_decode_plan_disable_fastpath = false;
     zedinferDeviceType_t flashinfer_cache_device_type = ZEDINFER_DEVICE_CPU;
     int flashinfer_cache_device_id = -1;
     size_t flashinfer_cache_pages_per_layer = 0;
@@ -65,6 +78,18 @@ struct SequenceBlockTable {
         flashinfer_single_decode_kv_last_page_len_gpu.reset();
         flashinfer_single_decode_qo_indptr_gpu.reset();
         flashinfer_single_decode_descriptor_gpu.reset();
+        flashinfer_single_decode_plan.reset();
+        flashinfer_single_decode_plan_ready = false;
+        flashinfer_single_decode_plan_total_pages = -1;
+        flashinfer_single_decode_plan_nhead = 0;
+        flashinfer_single_decode_plan_nkvhead = 0;
+        flashinfer_single_decode_plan_head_dim = 0;
+        flashinfer_single_decode_plan_block_size = 0;
+        flashinfer_single_decode_plan_dtype = ZEDINFER_DTYPE_BF16;
+        flashinfer_single_decode_plan_device_type = ZEDINFER_DEVICE_CPU;
+        flashinfer_single_decode_plan_device_id = -1;
+        flashinfer_single_decode_plan_fastpath_probe_pages = -1;
+        flashinfer_single_decode_plan_disable_fastpath = false;
         flashinfer_cache_device_type = ZEDINFER_DEVICE_CPU;
         flashinfer_cache_device_id = -1;
         flashinfer_cache_pages_per_layer = 0;

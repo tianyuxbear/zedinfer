@@ -82,6 +82,7 @@ private:
     tensor_t flashinfer_decode_kv_last_page_len_gpu_;
     tensor_t flashinfer_decode_qo_indptr_gpu_;
     tensor_t flashinfer_decode_descriptor_gpu_;
+    const ops::FlashInferDecodePlan* flashinfer_decode_plan_ = nullptr;
     std::vector<int> flashinfer_decode_kv_indptr_host_;
     std::vector<int> flashinfer_decode_kv_last_page_len_host_;
     std::vector<int> flashinfer_decode_qo_indptr_host_;

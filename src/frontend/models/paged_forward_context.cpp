@@ -2,6 +2,7 @@
 #include "backend/core/context/context.hpp"
 #include "backend/ops/kv_scatter/nvidia/paged_kv_scatter.cuh"
 #include "backend/ops/ops.hpp"
+#include "backend/ops/self_attention/nvidia/flashinfer_wrapper.cuh"
 #include "utils/types.hpp"
 
 #include <algorithm>
@@ -276,6 +277,63 @@ static void ensure_flashinfer_single_decode_metadata_cache(kvcache::SequenceBloc
     }
 }
 
+static int read_env_non_negative_int(const char* name, int default_value) {
+    if (const char* value = std::getenv(name)) {
+        char* end = nullptr;
+        const long parsed = std::strtol(value, &end, 10);
+        if (end != value && *end == '\0' && parsed >= 0) {
+            return static_cast<int>(parsed);
+        }
+    }
+    return default_value;
+}
+
+static const ops::FlashInferDecodePlan* ensure_flashinfer_single_decode_plan_cache(kvcache::SequenceBlockTable& table,
+                                                                                   const ops::AttentionConfig& cfg,
+                                                                                   int total_pages) {
+#if defined(USE_FLASHINFER) && defined(ENABLE_NVIDIA_API)
+    constexpr int kDefaultFastpathProbePages = 32;
+    const int fastpath_probe_pages
+        = read_env_non_negative_int("ZEDINFER_FLASHINFER_FASTPATH_PROBE_PAGES", kDefaultFastpathProbePages);
+    const bool disable_fastpath = std::getenv("ZEDINFER_FLASHINFER_DISABLE_FASTPATH") != nullptr;
+
+    const bool cache_hit = table.flashinfer_single_decode_plan_ready
+                        && table.flashinfer_single_decode_plan_total_pages == total_pages
+                        && table.flashinfer_single_decode_plan_nhead == cfg.nhead
+                        && table.flashinfer_single_decode_plan_nkvhead == cfg.nkvhead
+                        && table.flashinfer_single_decode_plan_head_dim == cfg.head_dim
+                        && table.flashinfer_single_decode_plan_block_size == cfg.block_size
+                        && table.flashinfer_single_decode_plan_dtype == cfg.dtype
+                        && table.flashinfer_single_decode_plan_device_type == cfg.device_type
+                        && table.flashinfer_single_decode_plan_device_id == cfg.device_id
+                        && table.flashinfer_single_decode_plan_fastpath_probe_pages == fastpath_probe_pages
+                        && table.flashinfer_single_decode_plan_disable_fastpath == disable_fastpath;
+    if (!cache_hit) {
+        table.flashinfer_single_decode_plan.reset();
+        table.flashinfer_single_decode_plan_ready = false;
+        table.flashinfer_single_decode_plan_total_pages = total_pages;
+        table.flashinfer_single_decode_plan_nhead = cfg.nhead;
+        table.flashinfer_single_decode_plan_nkvhead = cfg.nkvhead;
+        table.flashinfer_single_decode_plan_head_dim = cfg.head_dim;
+        table.flashinfer_single_decode_plan_block_size = cfg.block_size;
+        table.flashinfer_single_decode_plan_dtype = cfg.dtype;
+        table.flashinfer_single_decode_plan_device_type = cfg.device_type;
+        table.flashinfer_single_decode_plan_device_id = cfg.device_id;
+        table.flashinfer_single_decode_plan_fastpath_probe_pages = fastpath_probe_pages;
+        table.flashinfer_single_decode_plan_disable_fastpath = disable_fastpath;
+        ops::nvidia::flashinfer_prepare_single_decode_plan(cfg, total_pages, table.flashinfer_single_decode_plan);
+        table.flashinfer_single_decode_plan_ready = true;
+    }
+
+    return table.flashinfer_single_decode_plan.valid ? &table.flashinfer_single_decode_plan : nullptr;
+#else
+    (void)table;
+    (void)cfg;
+    (void)total_pages;
+    return nullptr;
+#endif
+}
+
 static bool supports_flashinfer(const ops::AttentionConfig& cfg) {
 #if defined(USE_FLASHINFER) && defined(ENABLE_NVIDIA_API)
     // Keep a runtime kill switch so baseline/bench comparisons do not require a rebuild.
@@ -324,6 +382,7 @@ void PagedForwardContext::build_flashinfer_decode_cache(const ops::AttentionConf
         return;
     }
 
+    flashinfer_decode_plan_ = nullptr;
     flashinfer_decode_uses_prefill_kernel_ = !supports_flashinfer_decode_kernel(cfg);
     if (!supports_flashinfer(cfg) || cached_num_decode_ <= 0) {
         flashinfer_decode_cache_built_ = true;
@@ -370,6 +429,7 @@ void PagedForwardContext::build_flashinfer_decode_cache(const ops::AttentionConf
             flashinfer_decode_qo_indptr_gpu_ = table->flashinfer_single_decode_qo_indptr_gpu;
         } else {
             flashinfer_decode_descriptor_gpu_ = table->flashinfer_single_decode_descriptor_gpu;
+            flashinfer_decode_plan_ = ensure_flashinfer_single_decode_plan_cache(*table, cfg, active_pages);
         }
 
         flashinfer_decode_cache_built_ = true;
@@ -524,6 +584,9 @@ void PagedForwardContext::attend_decode_single(int layer, tensor_t q_rope, tenso
             params.fi_kv_tile_indices = reinterpret_cast<const int*>(flashinfer_decode_descriptor_gpu_->data()) + 1;
             params.fi_o_indptr = reinterpret_cast<const int*>(flashinfer_decode_descriptor_gpu_->data()) + 2;
             params.fi_kv_chunk_size_ptr = reinterpret_cast<const int*>(flashinfer_decode_descriptor_gpu_->data()) + 4;
+            if (flashinfer_decode_plan_ != nullptr) {
+                params.fi_decode_plan = flashinfer_decode_plan_;
+            }
         }
     } else {
         // Upload block tables to GPU (host pointers are not accessible from GPU kernels
