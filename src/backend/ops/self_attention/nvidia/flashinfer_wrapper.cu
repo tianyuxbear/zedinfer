@@ -31,9 +31,21 @@ namespace zedinfer::ops::nvidia {
 namespace {
 
 using DefaultAttention = flashinfer::DefaultAttention<false, false, false, false>;
+constexpr int kDecodeFastpathProbePages = 32;
 
 template <typename T> T* ptr_from_offset(void* base, int64_t offset) {
     return flashinfer::GetPtrFromBaseOffset<T>(base, offset);
+}
+
+int read_env_non_negative_int(const char* name, int default_value) {
+    if (const char* value = std::getenv(name)) {
+        char* end = nullptr;
+        const long parsed = std::strtol(value, &end, 10);
+        if (end != value && *end == '\0' && parsed >= 0) {
+            return static_cast<int>(parsed);
+        }
+    }
+    return default_value;
 }
 
 void check_cuda_status(cudaError_t status, std::string_view op_name) {
@@ -93,8 +105,48 @@ template <typename DType, uint32_t HEAD_DIM> void run_decode_head_dim(const Atte
                   nullptr, nullptr, static_cast<uint32_t>(c.nhead), static_cast<int32_t>(c.nhead * c.head_dim),
                   static_cast<int32_t>(c.head_dim), -1, 0.0f, c.scale, 1.0f, 10000.0f);
 
+    auto work_estimation
+        = [&](bool& split_kv, uint32_t& max_grid_size, uint32_t& max_num_pages_per_batch, uint32_t& new_batch_size,
+              uint32_t& gdy, uint32_t batch_size, int32_t* kv_indptr_h, uint32_t num_qo_heads, uint32_t page_size,
+              bool enable_cuda_graph, cudaStream_t work_stream) -> cudaError_t {
+        cudaError_t status = cudaSuccess;
+        const int group_size = c.nhead / c.nkvhead;
+        DISPATCH_GQA_GROUP_SIZE(group_size, GROUP_SIZE, {
+            status = flashinfer::BatchDecodeWithPagedKVCacheWorkEstimationDispatched<
+                GROUP_SIZE, HEAD_DIM, flashinfer::PosEncodingMode::kNone, DefaultAttention, Params>(
+                split_kv, max_grid_size, max_num_pages_per_batch, new_batch_size, gdy, batch_size, kv_indptr_h,
+                num_qo_heads, page_size, enable_cuda_graph, work_stream);
+        });
+        return status;
+    };
+
+    const int total_pages = p.kv_indptr_host[p.kv_batch_size];
+
     // A runtime escape hatch is kept for validating the planner path without rebuilding.
-    if (p.kv_batch_size == 1 && std::getenv("ZEDINFER_FLASHINFER_DISABLE_FASTPATH") == nullptr) {
+    bool use_fastpath = p.kv_batch_size == 1 && std::getenv("ZEDINFER_FLASHINFER_DISABLE_FASTPATH") == nullptr;
+    if (use_fastpath) {
+        // Keep tiny decode contexts on the trivial descriptor path. Once the KV cache
+        // spans enough pages, consult FlashInfer's own work-estimation logic and fall
+        // back to the planner whenever partition-KV would help.
+        const int fastpath_probe_pages
+            = read_env_non_negative_int("ZEDINFER_FLASHINFER_FASTPATH_PROBE_PAGES", kDecodeFastpathProbePages);
+        if (total_pages > fastpath_probe_pages) {
+            bool split_kv = false;
+            uint32_t max_grid_size = 0;
+            uint32_t max_num_pages_per_batch = 0;
+            uint32_t new_batch_size = 0;
+            uint32_t gdy = 0;
+            check_cuda_status(work_estimation(split_kv, max_grid_size, max_num_pages_per_batch, new_batch_size, gdy,
+                                              static_cast<uint32_t>(p.kv_batch_size),
+                                              const_cast<int32_t*>(reinterpret_cast<const int32_t*>(p.kv_indptr_host)),
+                                              static_cast<uint32_t>(c.nhead), static_cast<uint32_t>(c.block_size),
+                                              false, stream),
+                              "BatchDecodeWithPagedKVCacheWorkEstimationDispatched");
+            use_fastpath = !split_kv;
+        }
+    }
+
+    if (use_fastpath) {
         // Single-request decode does not need FlashInfer's scheduling plan. Reuse the
         // trivial descriptor materialized by PagedForwardContext so its lifetime spans the
         // whole forward pass and cannot be recycled by the memory pool mid-kernel.
@@ -131,7 +183,6 @@ template <typename DType, uint32_t HEAD_DIM> void run_decode_head_dim(const Atte
         return;
     }
 
-    const int total_pages = p.kv_indptr_host[p.kv_batch_size];
     const size_t float_bytes
         = std::max<size_t>(4096, static_cast<size_t>(c.nhead) * std::max(total_pages, p.kv_batch_size)
                                      * (static_cast<size_t>(c.head_dim) + 1) * sizeof(float));
@@ -143,21 +194,6 @@ template <typename DType, uint32_t HEAD_DIM> void run_decode_head_dim(const Atte
         float_bytes, int_bytes,
         [&](void* float_buf, size_t float_size, void* int_buf, void* host_int_buf, size_t int_size) {
             flashinfer::DecodePlanInfo plan_info;
-            auto work_estimation = [&](bool& split_kv, uint32_t& max_grid_size, uint32_t& max_num_pages_per_batch,
-                                       uint32_t& new_batch_size, uint32_t& gdy, uint32_t batch_size,
-                                       int32_t* kv_indptr_h, uint32_t num_qo_heads, uint32_t page_size,
-                                       bool enable_cuda_graph, cudaStream_t work_stream) -> cudaError_t {
-                cudaError_t status = cudaSuccess;
-                const int group_size = c.nhead / c.nkvhead;
-                DISPATCH_GQA_GROUP_SIZE(group_size, GROUP_SIZE, {
-                    status = flashinfer::BatchDecodeWithPagedKVCacheWorkEstimationDispatched<
-                        GROUP_SIZE, HEAD_DIM, flashinfer::PosEncodingMode::kNone, DefaultAttention, Params>(
-                        split_kv, max_grid_size, max_num_pages_per_batch, new_batch_size, gdy, batch_size, kv_indptr_h,
-                        num_qo_heads, page_size, enable_cuda_graph, work_stream);
-                });
-                return status;
-            };
-
             check_cuda_status(
                 flashinfer::DecodePlan<HEAD_DIM, flashinfer::PosEncodingMode::kNone, DefaultAttention, Params>(
                     float_buf, float_size, int_buf, host_int_buf, int_size, plan_info,
