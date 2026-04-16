@@ -1,8 +1,63 @@
+#include "backend/core/context/context.hpp"
 #include "backend/ops/rope/nvidia/rope_nvidia.cuh"
 #include "utils/check.hpp"
 #include "utils/nvidia/types.cuh"
 
+#ifdef USE_FLASHINFER
+#include <flashinfer/pos_enc.cuh>
+#endif
+
+#include <cstdlib>
+
 namespace zedinfer::ops::nvidia {
+
+namespace {
+
+bool can_use_flashinfer_rope_qk(zedinferDataType_t type, size_t head_dim) {
+#if defined(USE_FLASHINFER)
+    if (std::getenv("ZEDINFER_DISABLE_FLASHINFER") != nullptr) {
+        return false;
+    }
+    if (type != ZEDINFER_DTYPE_F16 && type != ZEDINFER_DTYPE_BF16) {
+        return false;
+    }
+    switch (head_dim) {
+        case 64:
+        case 128:
+        case 256:
+        case 512:
+            return true;
+        default:
+            return false;
+    }
+#else
+    (void)type;
+    (void)head_dim;
+    return false;
+#endif
+}
+
+#ifdef USE_FLASHINFER
+template <typename DType>
+void flashinfer_rope_qk_impl(std::byte* q_output, std::byte* k_output, const std::byte* q_input,
+                             const std::byte* k_input, const std::byte* pos_ids, float theta, size_t seq_len,
+                             size_t num_q_heads, size_t num_kv_heads, size_t head_dim) {
+    auto stream = reinterpret_cast<cudaStream_t>(core::context().runtime().stream());
+    auto* q_in = reinterpret_cast<DType*>(const_cast<std::byte*>(q_input));
+    auto* k_in = reinterpret_cast<DType*>(const_cast<std::byte*>(k_input));
+    auto* q_out = reinterpret_cast<DType*>(q_output);
+    auto* k_out = reinterpret_cast<DType*>(k_output);
+    auto* pos = reinterpret_cast<int64_t*>(const_cast<std::byte*>(pos_ids));
+    auto status = flashinfer::BatchQKApplyRotaryPosIds<DType, int64_t>(
+        q_in, k_in, q_out, k_out, pos, static_cast<uint32_t>(seq_len), static_cast<uint32_t>(num_q_heads),
+        static_cast<uint32_t>(num_kv_heads), static_cast<uint32_t>(head_dim), static_cast<uint32_t>(head_dim),
+        num_q_heads * head_dim, head_dim, num_kv_heads * head_dim, head_dim, num_q_heads * head_dim, head_dim,
+        num_kv_heads * head_dim, head_dim, false, 1.0f, theta, stream);
+    CUDA_CHECK(status);
+}
+#endif
+
+} // namespace
 
 // ----------------------------------------------------------------------
 // Kernel: Apply Rotary Positional Embeddings (RoPE)
@@ -89,5 +144,27 @@ void rope(std::byte* output, const std::byte* input, const std::byte* pos_ids, f
         default:
             EXCEPTION_UNSUPPORTED_DATATYPE(type);
     }
+}
+
+void rope_qk(std::byte* q_output, std::byte* k_output, const std::byte* q_input, const std::byte* k_input,
+             const std::byte* pos_ids, float theta, zedinferDataType_t type, size_t seq_len, size_t num_q_heads,
+             size_t num_kv_heads, size_t head_dim) {
+    if (can_use_flashinfer_rope_qk(type, head_dim)) {
+#ifdef USE_FLASHINFER
+        switch (type) {
+            case ZEDINFER_DTYPE_F16:
+                return flashinfer_rope_qk_impl<half>(q_output, k_output, q_input, k_input, pos_ids, theta, seq_len,
+                                                     num_q_heads, num_kv_heads, head_dim);
+            case ZEDINFER_DTYPE_BF16:
+                return flashinfer_rope_qk_impl<cuda_bfloat16>(q_output, k_output, q_input, k_input, pos_ids, theta,
+                                                              seq_len, num_q_heads, num_kv_heads, head_dim);
+            default:
+                break;
+        }
+#endif
+    }
+
+    rope(q_output, q_input, pos_ids, theta, type, seq_len, num_q_heads, head_dim);
+    rope(k_output, k_input, pos_ids, theta, type, seq_len, num_kv_heads, head_dim);
 }
 } // namespace zedinfer::ops::nvidia

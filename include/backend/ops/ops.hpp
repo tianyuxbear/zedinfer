@@ -14,6 +14,7 @@ void linear_quantized(tensor_t out, tensor_t in, tensor_t weight, tensor_t bias,
 void rearrange(tensor_t out, tensor_t in);
 void rms_norm(tensor_t out, tensor_t in, tensor_t weight, float eps);
 void rope(tensor_t out, tensor_t in, tensor_t pos_ids, float theta);
+void rope_qk(tensor_t q_out, tensor_t k_out, tensor_t q_in, tensor_t k_in, tensor_t pos_ids, float theta);
 void swiglu(tensor_t out, tensor_t gate, tensor_t up);
 
 // Unified attention dispatch.

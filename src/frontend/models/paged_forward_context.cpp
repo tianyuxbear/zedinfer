@@ -15,6 +15,7 @@ namespace zedinfer::model {
 static tensor_t upload_to_gpu(const std::vector<int>& host_data, zedinferDeviceType_t dev, int dev_id);
 static void ensure_flashinfer_page_table_cache(kvcache::SequenceBlockTable& table, zedinferDeviceType_t dev,
                                                int dev_id);
+static bool supports_flashinfer_kv_write(const kvcache::BlockPool& pool);
 
 // ============================================================================
 // Constructors
@@ -106,6 +107,25 @@ void PagedForwardContext::write_kv(int layer, tensor_t k, tensor_t v) {
     }
 
     core::context().setDevice(pool_.device_type(), pool_.device_id());
+    if (supports_flashinfer_kv_write(pool_)) {
+        build_flashinfer_kv_write_cache();
+        if (flashinfer_kv_write_decode_only_ && flashinfer_kv_write_batch_size_ > 0
+            && !flashinfer_kv_write_layer_cache_.empty()) {
+            const auto& cfg = pool_.config();
+            const auto* kv_page_indices
+                = reinterpret_cast<const int*>(flashinfer_kv_write_layer_cache_[layer].kv_page_indices_gpu->data());
+            const auto* kv_indptr = reinterpret_cast<const int*>(flashinfer_kv_write_kv_indptr_gpu_->data());
+            const auto* kv_last_page_len
+                = reinterpret_cast<const int*>(flashinfer_kv_write_kv_last_page_len_gpu_->data());
+
+            ops::nvidia::append_paged_kv_decode(k->data(), v->data(), pool_.k_pool_base(), pool_.v_pool_base(),
+                                                kv_page_indices, kv_indptr, kv_last_page_len,
+                                                flashinfer_kv_write_batch_size_, cfg.num_kv_heads, cfg.head_dim,
+                                                cfg.block_size, cfg.dtype);
+            return;
+        }
+    }
+
     for (const auto& slot : slots_) {
         if (slot.num_tokens <= 0) {
             continue;
@@ -203,6 +223,47 @@ static int ceil_div_int(int x, int y) {
 
 static int last_page_len_for(int seq_len, int block_size) {
     return seq_len == 0 ? 0 : ((seq_len - 1) % block_size) + 1;
+}
+
+static int flashinfer_kv_vec_size(zedinferDataType_t dtype, int head_dim) {
+    const int dtype_bytes = (dtype == ZEDINFER_DTYPE_F16 || dtype == ZEDINFER_DTYPE_BF16) ? 2 : 0;
+    if (dtype_bytes == 0) {
+        return 0;
+    }
+    return std::max(16 / dtype_bytes, head_dim / 32);
+}
+
+static bool supports_flashinfer_kv_write(const kvcache::BlockPool& pool) {
+#if defined(USE_FLASHINFER) && defined(ENABLE_NVIDIA_API)
+    if (std::getenv("ZEDINFER_DISABLE_FLASHINFER") != nullptr) {
+        return false;
+    }
+    if (pool.device_type() != ZEDINFER_DEVICE_NVIDIA) {
+        return false;
+    }
+
+    const auto& cfg = pool.config();
+    if ((cfg.dtype != ZEDINFER_DTYPE_F16 && cfg.dtype != ZEDINFER_DTYPE_BF16) || cfg.block_size <= 0
+        || cfg.num_kv_heads <= 0) {
+        return false;
+    }
+
+    switch (cfg.head_dim) {
+        case 64:
+        case 128:
+        case 256:
+        case 512:
+            break;
+        default:
+            return false;
+    }
+
+    const int vec_size = flashinfer_kv_vec_size(cfg.dtype, cfg.head_dim);
+    return vec_size > 0 && (cfg.head_dim / vec_size) * cfg.num_kv_heads <= 1024;
+#else
+    (void)pool;
+    return false;
+#endif
 }
 
 static void append_active_pages(std::vector<int>& dst, const std::vector<int>& pages, int active_pages) {
@@ -545,6 +606,116 @@ void PagedForwardContext::build_flashinfer_prefill_cache(const ops::AttentionCon
 
     if (flashinfer_prefill_slots_.size() == 1) {
         ensure_flashinfer_page_table_cache(*flashinfer_prefill_slots_[0]->block_table, cfg.device_type, cfg.device_id);
+    }
+}
+
+void PagedForwardContext::build_flashinfer_kv_write_cache() {
+    if (flashinfer_kv_write_cache_built_) {
+        return;
+    }
+    flashinfer_kv_write_cache_built_ = true;
+
+    flashinfer_kv_write_layer_cache_.clear();
+    flashinfer_kv_write_kv_indptr_gpu_.reset();
+    flashinfer_kv_write_kv_last_page_len_gpu_.reset();
+    flashinfer_kv_write_batch_indices_gpu_.reset();
+    flashinfer_kv_write_positions_gpu_.reset();
+    flashinfer_kv_write_kv_indptr_host_.clear();
+    flashinfer_kv_write_kv_last_page_len_host_.clear();
+    flashinfer_kv_write_batch_size_ = 0;
+    flashinfer_kv_write_decode_only_ = false;
+
+    if (!supports_flashinfer_kv_write(pool_) || total_tokens_ <= 0 || slots_.empty()) {
+        return;
+    }
+
+    std::vector<const Slot*> active_slots;
+    active_slots.reserve(slots_.size());
+    for (const auto& slot : slots_) {
+        if (slot.num_tokens > 0) {
+            active_slots.push_back(&slot);
+        }
+    }
+    if (active_slots.empty()) {
+        return;
+    }
+
+    std::sort(active_slots.begin(), active_slots.end(),
+              [](const Slot* lhs, const Slot* rhs) { return lhs->token_offset < rhs->token_offset; });
+
+    flashinfer_kv_write_batch_size_ = static_cast<int>(active_slots.size());
+    flashinfer_kv_write_decode_only_ = true;
+    flashinfer_kv_write_kv_indptr_host_.assign(flashinfer_kv_write_batch_size_ + 1, 0);
+    flashinfer_kv_write_kv_last_page_len_host_.assign(flashinfer_kv_write_batch_size_, 0);
+
+    std::vector<int> batch_indices_host(total_tokens_, -1);
+    std::vector<int> positions_host(total_tokens_, -1);
+    const int block_size = pool_.config().block_size;
+
+    for (int i = 0; i < flashinfer_kv_write_batch_size_; ++i) {
+        const auto* slot = active_slots[i];
+        const int final_len = slot->past_len + slot->num_tokens;
+        const int active_pages = ceil_div_int(final_len, block_size);
+        flashinfer_kv_write_kv_indptr_host_[i + 1] = flashinfer_kv_write_kv_indptr_host_[i] + active_pages;
+        flashinfer_kv_write_kv_last_page_len_host_[i] = last_page_len_for(final_len, block_size);
+
+        if (slot->num_tokens != 1 || slot->token_offset != i) {
+            flashinfer_kv_write_decode_only_ = false;
+        }
+
+        if (slot->token_offset < 0 || slot->token_offset + slot->num_tokens > total_tokens_) {
+            flashinfer_kv_write_layer_cache_.clear();
+            flashinfer_kv_write_batch_size_ = 0;
+            return;
+        }
+
+        for (int t = 0; t < slot->num_tokens; ++t) {
+            const int flat_idx = slot->token_offset + t;
+            batch_indices_host[flat_idx] = i;
+            positions_host[flat_idx] = slot->past_len + t;
+        }
+    }
+
+    if (std::find(batch_indices_host.begin(), batch_indices_host.end(), -1) != batch_indices_host.end()) {
+        flashinfer_kv_write_layer_cache_.clear();
+        flashinfer_kv_write_batch_size_ = 0;
+        return;
+    }
+
+    if (!flashinfer_kv_write_decode_only_) {
+        return;
+    }
+
+    flashinfer_kv_write_kv_indptr_gpu_
+        = upload_to_gpu(flashinfer_kv_write_kv_indptr_host_, pool_.device_type(), pool_.device_id());
+    flashinfer_kv_write_kv_last_page_len_gpu_
+        = upload_to_gpu(flashinfer_kv_write_kv_last_page_len_host_, pool_.device_type(), pool_.device_id());
+
+    const int num_layers = active_slots.front()->block_table->num_layers;
+    flashinfer_kv_write_layer_cache_.resize(num_layers);
+
+    if (flashinfer_kv_write_batch_size_ == 1) {
+        ensure_flashinfer_page_table_cache(*active_slots.front()->block_table, pool_.device_type(), pool_.device_id());
+        for (int layer = 0; layer < num_layers; ++layer) {
+            flashinfer_kv_write_layer_cache_[layer]
+                = {active_slots.front()->block_table->flashinfer_page_tables_gpu[layer]};
+        }
+        return;
+    }
+
+    for (int layer = 0; layer < num_layers; ++layer) {
+        std::vector<int> kv_page_indices_host;
+        kv_page_indices_host.reserve(flashinfer_kv_write_kv_indptr_host_.back());
+
+        for (int i = 0; i < flashinfer_kv_write_batch_size_; ++i) {
+            const auto* slot = active_slots[i];
+            const int active_pages
+                = flashinfer_kv_write_kv_indptr_host_[i + 1] - flashinfer_kv_write_kv_indptr_host_[i];
+            append_active_pages(kv_page_indices_host, slot->block_table->pages[layer], active_pages);
+        }
+
+        flashinfer_kv_write_layer_cache_[layer]
+            = {upload_to_gpu(kv_page_indices_host, pool_.device_type(), pool_.device_id())};
     }
 }
 

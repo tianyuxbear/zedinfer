@@ -98,10 +98,8 @@ tensor_t transformer_forward(const ModelForwardConfig& model, PagedForwardContex
 
         // RoPE
         auto q_rope = use_scratch ? scratch->q_rope : make({N, nhead, head_dim});
-        ops::rope(q_rope, q_for_rope, pos_ids, cfg.rope_theta);
-
         auto k_rope = use_scratch ? scratch->k_rope : make({N, nkvhead, head_dim});
-        ops::rope(k_rope, k_for_rope, pos_ids, cfg.rope_theta);
+        ops::rope_qk(q_rope, k_rope, q_for_rope, k_for_rope, pos_ids, cfg.rope_theta);
 
         // KV write (context-specific)
         ctx.write_kv(L, k_rope, v);

@@ -65,6 +65,7 @@ private:
     void build_decode_cache(const ExecutorConfig& exec_config);
     void build_flashinfer_decode_cache(const ops::AttentionConfig& cfg);
     void build_flashinfer_prefill_cache(const ops::AttentionConfig& cfg);
+    void build_flashinfer_kv_write_cache();
 
     // Cached GPU page tables for batched decode (built once, reused across layers).
     // Physical layout [num_reqs, max_pages] is shared across layers, but the
@@ -78,6 +79,7 @@ private:
     tensor_t seq_lens_gpu_;
     std::vector<DecodeCacheEntry> decode_layer_cache_;
     std::vector<FlashInferLayerCacheEntry> flashinfer_decode_layer_cache_;
+    std::vector<FlashInferLayerCacheEntry> flashinfer_kv_write_layer_cache_;
     tensor_t flashinfer_decode_kv_indptr_gpu_;
     tensor_t flashinfer_decode_kv_last_page_len_gpu_;
     tensor_t flashinfer_decode_qo_indptr_gpu_;
@@ -95,6 +97,15 @@ private:
     std::vector<int> flashinfer_prefill_qo_indptr_host_;
     std::vector<int> flashinfer_prefill_kv_indptr_host_;
     std::vector<int> flashinfer_prefill_kv_last_page_len_host_;
+    tensor_t flashinfer_kv_write_kv_indptr_gpu_;
+    tensor_t flashinfer_kv_write_kv_last_page_len_gpu_;
+    tensor_t flashinfer_kv_write_batch_indices_gpu_;
+    tensor_t flashinfer_kv_write_positions_gpu_;
+    std::vector<int> flashinfer_kv_write_kv_indptr_host_;
+    std::vector<int> flashinfer_kv_write_kv_last_page_len_host_;
+    int flashinfer_kv_write_batch_size_ = 0;
+    bool flashinfer_kv_write_decode_only_ = false;
+    bool flashinfer_kv_write_cache_built_ = false;
     int flashinfer_prefill_start_ = -1;
     int flashinfer_prefill_total_tokens_ = 0;
     bool flashinfer_prefill_cache_built_ = false;
