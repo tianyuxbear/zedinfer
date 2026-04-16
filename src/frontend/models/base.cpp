@@ -1,6 +1,8 @@
 #include "frontend/loader/safetensors.hpp"
 #include "frontend/models/qwen2.hpp"
 #include "frontend/models/qwen3.hpp"
+#include "frontend/models/qwen3_moe.hpp"
+#include "utils/types.hpp"
 #include "zedinfer.h"
 #ifdef DEBUG
 #include "utils/system_info.hpp"
@@ -60,6 +62,12 @@ std::shared_ptr<Model> Model::parse(const std::string& model_path, zedinferDevic
             throw std::logic_error("Config is not Qwen3Config");
         }
         return std::make_shared<Qwen3Model>(*qwen3_config, std::move(weights));
+    } else if (config->model_type == "qwen3_moe") {
+        auto* moe_config = dynamic_cast<Qwen3MoEConfig*>(config.get());
+        if (!moe_config) {
+            throw std::logic_error("Config is not Qwen3MoEConfig");
+        }
+        return std::make_shared<Qwen3MoEModel>(*moe_config, std::move(weights));
     }
 
     throw std::runtime_error("Unsupported model type: " + config->model_type);
@@ -310,6 +318,11 @@ void Model::load_base_config(ModelConfig& config, const json& j) {
     config.num_hidden_layers = j["num_hidden_layers"];
     config.num_attention_heads = j["num_attention_heads"];
     config.num_key_value_heads = j.value("num_key_value_heads", config.num_attention_heads);
+    // Explicit head_dim from config takes priority; fallback to hidden_size/num_heads
+    config.head_dim = j.value("head_dim", static_cast<size_t>(0));
+    if (config.head_dim == 0) {
+        config.head_dim = config.hidden_size / config.num_attention_heads;
+    }
 
     config.rms_norm_eps = j.value("rms_norm_eps", 1e-6f);
     config.rope_theta = j.value("rope_theta", 10000.0f);
@@ -365,6 +378,19 @@ std::unique_ptr<ModelConfig> Model::load_config(const std::string& config_path) 
                 }
             }
         }
+
+        // Handle GPTQ flat format (bits/group_size/sym/desc_act)
+        if (base_config.quant_config.quant_method == "gptq" && !q_json.contains("config_groups")) {
+            auto& wp = base_config.quant_config.weights;
+            wp.num_bits = q_json.value("bits", 0);
+            wp.group_size = q_json.value("group_size", -1);
+            wp.symmetric = q_json.value("sym", false);
+            if (q_json.contains("desc_act")) {
+                wp.act_order = parse_json_bool(q_json["desc_act"], false);
+            }
+            LOGI.printf("[Model] GPTQ config: bits=%d, group_size=%d, sym=%s, desc_act=%s", wp.num_bits, wp.group_size,
+                        wp.symmetric ? "true" : "false", wp.act_order ? "true" : "false");
+        }
     }
 
     if (model_type == "qwen2") {
@@ -380,6 +406,21 @@ std::unique_ptr<ModelConfig> Model::load_config(const std::string& config_path) 
         qwen3_config->max_window_layers = j.value("max_window_layers", 36);
         qwen3_config->use_sliding_window = j.value("use_sliding_window", false);
         return qwen3_config;
+    } else if (model_type == "qwen3_moe") {
+        auto moe_config = std::make_unique<Qwen3MoEConfig>(base_config);
+        moe_config->num_experts = j.value("num_experts", 128);
+        moe_config->num_experts_per_tok = j.value("num_experts_per_tok", 8);
+        moe_config->moe_intermediate_size = j.value("moe_intermediate_size", 1536);
+        moe_config->shared_expert_intermediate_size = j.value("shared_expert_intermediate_size", 4096);
+        moe_config->decoder_sparse_step = j.value("decoder_sparse_step", 1);
+        moe_config->norm_topk_prob = j.value("norm_topk_prob", true);
+        moe_config->max_window_layers = j.value("max_window_layers", 94);
+        moe_config->use_sliding_window = j.value("use_sliding_window", false);
+
+        LOGI.printf("[Model] Qwen3MoE: %zu layers, %zu experts (top-%zu), moe_inter=%zu, shared_inter=%zu",
+                    moe_config->num_hidden_layers, moe_config->num_experts, moe_config->num_experts_per_tok,
+                    moe_config->moe_intermediate_size, moe_config->shared_expert_intermediate_size);
+        return moe_config;
     }
 
     throw std::runtime_error("Unsupported model type: " + model_type);
@@ -391,12 +432,14 @@ struct LayerGroup {
     std::string weight_name;
     std::string scale_name;
     std::string g_idx_name;
+    std::string zeros_name;
     std::string bias_name;
 
     tensor_t t_packed = nullptr;
     tensor_t t_weight = nullptr;
     tensor_t t_scale = nullptr;
     tensor_t t_g_idx = nullptr;
+    tensor_t t_zeros = nullptr;
     tensor_t t_bias = nullptr;
 };
 
@@ -480,6 +523,11 @@ std::unique_ptr<ModelWeights> Model::load_weights(const std::string& model_path,
             layer_groups[prefix].g_idx_name = mapped_name;
             layer_groups[prefix].t_g_idx = tensor;
             layer_groups[prefix].prefix = prefix;
+        } else if (mapped_name.size() > 13 && mapped_name.substr(mapped_name.size() - 13) == ".weight_zeros") {
+            prefix = mapped_name.substr(0, mapped_name.size() - 13);
+            layer_groups[prefix].zeros_name = mapped_name;
+            layer_groups[prefix].t_zeros = tensor;
+            layer_groups[prefix].prefix = prefix;
         } else if (mapped_name.size() > 5 && mapped_name.substr(mapped_name.size() - 5) == ".bias") {
             prefix = mapped_name.substr(0, mapped_name.size() - 5);
             layer_groups[prefix].bias_name = mapped_name;
@@ -506,6 +554,124 @@ std::unique_ptr<ModelWeights> Model::load_weights(const std::string& model_path,
 
     for (auto& [prefix, group] : layer_groups) {
         tensor_t current_weight = group.t_packed ? group.t_packed : group.t_weight;
+
+        // For GPTQ with desc_act=false, discard g_idx (no activation reordering needed).
+        // AutoGPTQ models may still ship g_idx tensors even when act_order is off.
+        if (current_weight && group.t_g_idx && config.quant_config.quant_method == "gptq"
+            && !config.quant_config.weights.act_order) {
+            group.t_g_idx = nullptr;
+        }
+
+        // GPTQ layout fix: AutoGPTQ stores qweight as [K/pack, N] and scales as
+        // [K/group, N], but our kernels expect [N, K/pack] and [N, K/group].
+        // Transpose both during loading.
+        // Also adjust zero-point: AutoGPTQ stores qzeros with a -1 offset (e.g., 7 for
+        // actual zero_point=8). Our kernel hardcodes zero_point=8. To handle models where
+        // qzeros != 8-1 (or the convention differs), we pre-adjust each nibble in qweight
+        // so that (adjusted_val - 8) gives the correct signed value.
+        if (config.quant_config.quant_method == "gptq" && group.t_packed && group.t_packed->shape().size() == 2) {
+            size_t rows = group.t_packed->shape()[0];
+            size_t cols = group.t_packed->shape()[1];
+
+            // Determine actual zero_point from qzeros (if present).
+            // AutoGPTQ stores qzeros with a -1 offset: stored = actual - 1.
+            // But some tools store qzeros = actual (no offset).
+            // Env var ZEDINFER_GPTQ_ZEROPOINT overrides auto-detection.
+            int actual_zero_point = 8; // default: symmetric 4-bit
+            if (group.t_zeros && config.quant_config.weights.num_bits == 4) {
+                int32_t first_qzero = *reinterpret_cast<const int32_t*>(group.t_zeros->data());
+                int stored_zp = first_qzero & 0xF;
+
+                const char* zp_env = std::getenv("ZEDINFER_GPTQ_ZEROPOINT");
+                if (zp_env) {
+                    actual_zero_point = std::atoi(zp_env);
+                } else {
+                    // AutoGPTQ convention: stored = actual - 1
+                    actual_zero_point = stored_zp + 1;
+                }
+            }
+            // Kernel hardcodes zero_point=8. To use actual_zero_point, we add (8 - actual)
+            // to each nibble so kernel's (adjusted - 8) = (original - actual_zero_point).
+            int zp_adjust = 8 - actual_zero_point;
+
+            auto transposed = Tensor::create({cols, rows}, group.t_packed->dtype(), ZEDINFER_DEVICE_CPU);
+            const int32_t* src = reinterpret_cast<const int32_t*>(group.t_packed->data());
+            int32_t* dst = reinterpret_cast<int32_t*>(transposed->data());
+
+            for (size_t r = 0; r < rows; ++r) {
+                for (size_t c = 0; c < cols; ++c) {
+                    int32_t val = src[r * cols + c];
+                    if (zp_adjust != 0) {
+                        // Adjust each nibble: add zp_adjust, clamp to [0, 15]
+                        int32_t adjusted = 0;
+                        for (int i = 0; i < 8; ++i) {
+                            int nibble = (val >> (i * 4)) & 0xF;
+                            nibble = std::max(0, std::min(15, nibble + zp_adjust));
+                            adjusted |= (nibble << (i * 4));
+                        }
+                        val = adjusted;
+                    }
+                    dst[c * rows + r] = val;
+                }
+            }
+            group.t_packed = transposed;
+            current_weight = transposed;
+
+            static bool zp_logged = false;
+            if (!zp_logged) {
+                zp_logged = true;
+                LOGI.printf("[GPTQ] Zero-point: actual_zp=%d, kernel_zp=8, nibble_adjust=%+d", actual_zero_point,
+                            zp_adjust);
+            }
+        }
+
+        if (config.quant_config.quant_method == "gptq" && group.t_scale && group.t_scale->shape().size() == 2) {
+            size_t rows = group.t_scale->shape()[0];
+            size_t cols = group.t_scale->shape()[1];
+
+            // Determine target dtype for scales (must match model activation dtype)
+            zedinferDataType_t model_dtype = utils::str_to_dtype(config.torch_dtype);
+            zedinferDataType_t scale_dtype = group.t_scale->dtype();
+            bool need_dtype_convert = (scale_dtype != model_dtype) && (model_dtype == ZEDINFER_DTYPE_BF16 || model_dtype == ZEDINFER_DTYPE_F16);
+
+            // Transpose [K/group, N] -> [N, K/group] and optionally convert dtype
+            auto transposed = Tensor::create({cols, rows}, need_dtype_convert ? model_dtype : scale_dtype, ZEDINFER_DEVICE_CPU);
+            const std::byte* src = group.t_scale->data();
+            std::byte* dst = transposed->data();
+            size_t src_elem = group.t_scale->elementSize();
+            size_t dst_elem = transposed->elementSize();
+
+            if (need_dtype_convert) {
+                // Transpose + convert (e.g., FP16 -> BF16 via FP32 intermediate)
+                for (size_t r = 0; r < rows; ++r) {
+                    for (size_t c = 0; c < cols; ++c) {
+                        // Read source element
+                        float val = 0.0f;
+                        const std::byte* s = src + (r * cols + c) * src_elem;
+                        if (scale_dtype == ZEDINFER_DTYPE_F16) {
+                            val = utils::fp16_to_fp32_f16c(*reinterpret_cast<const fp16_t*>(s));
+                        } else if (scale_dtype == ZEDINFER_DTYPE_BF16) {
+                            val = utils::_bf16_to_f32(*reinterpret_cast<const bf16_t*>(s));
+                        }
+                        // Write to transposed destination
+                        std::byte* d = dst + (c * rows + r) * dst_elem;
+                        if (model_dtype == ZEDINFER_DTYPE_BF16) {
+                            *reinterpret_cast<bf16_t*>(d) = utils::_f32_to_bf16(val);
+                        } else if (model_dtype == ZEDINFER_DTYPE_F16) {
+                            *reinterpret_cast<fp16_t*>(d) = utils::fp32_to_fp16_f16c(val);
+                        }
+                    }
+                }
+            } else {
+                // Transpose only (same dtype)
+                for (size_t r = 0; r < rows; ++r) {
+                    for (size_t c = 0; c < cols; ++c) {
+                        std::memcpy(dst + (c * rows + r) * src_elem, src + (r * cols + c) * src_elem, src_elem);
+                    }
+                }
+            }
+            group.t_scale = transposed;
+        }
 
         if (current_weight && group.t_g_idx) {
             if (!group.t_packed) {
@@ -616,6 +782,9 @@ std::unique_ptr<ModelWeights> Model::load_weights(const std::string& model_path,
         if (group.t_g_idx) {
             process_and_add(group.t_g_idx, group.g_idx_name);
         }
+        if (group.t_zeros) {
+            process_and_add(group.t_zeros, group.zeros_name);
+        }
     }
     auto convert_end = std::chrono::high_resolution_clock::now();
     auto convert_time = std::chrono::duration<double>(convert_end - convert_start).count();
@@ -628,12 +797,28 @@ std::unique_ptr<ModelWeights> Model::load_weights(const std::string& model_path,
     return weights;
 }
 
-// Normalize weight names by stripping common prefixes (e.g., "model.").
+// Normalize weight names by stripping common prefixes (e.g., "model.")
+// and remapping GPTQ-specific suffixes to the internal naming convention.
 std::string Model::map_weight_name(const std::string& raw_name) {
-    if (raw_name.substr(0, 6) == "model.") {
-        return raw_name.substr(6);
+    std::string name = raw_name;
+
+    // Strip "model." prefix
+    if (name.size() > 6 && name.substr(0, 6) == "model.") {
+        name = name.substr(6);
     }
-    return raw_name;
+
+    // Map GPTQ suffixes to internal naming convention
+    if (name.size() > 8 && name.substr(name.size() - 8) == ".qweight") {
+        name = name.substr(0, name.size() - 8) + ".weight_packed";
+    } else if (name.size() > 7 && name.substr(name.size() - 7) == ".scales") {
+        name = name.substr(0, name.size() - 7) + ".weight_scale";
+    } else if (name.size() > 6 && name.substr(name.size() - 6) == ".g_idx") {
+        name = name.substr(0, name.size() - 6) + ".weight_g_idx";
+    } else if (name.size() > 7 && name.substr(name.size() - 7) == ".qzeros") {
+        name = name.substr(0, name.size() - 7) + ".weight_zeros";
+    }
+
+    return name;
 }
 
 } // namespace zedinfer::model

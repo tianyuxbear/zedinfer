@@ -21,4 +21,12 @@ void swiglu(tensor_t out, tensor_t gate, tensor_t up);
 // Mode determined by AttentionParams fields — see attention_params.hpp.
 void attention(const AttentionParams& params);
 
+// MoE utility ops
+
+// out[i] += alpha * a[i]  (in-place weighted accumulation)
+void add_scaled(tensor_t out, tensor_t a, float alpha);
+
+// Fill tensor with zeros
+void fill_zero(tensor_t t);
+
 } // namespace zedinfer::ops

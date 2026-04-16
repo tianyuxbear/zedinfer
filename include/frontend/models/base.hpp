@@ -79,6 +79,7 @@ struct ModelConfig {
     size_t num_hidden_layers;
     size_t num_attention_heads;
     size_t num_key_value_heads;
+    size_t head_dim = 0; // 0 = derive from hidden_size/num_attention_heads
 
     float rms_norm_eps;
     float rope_theta;

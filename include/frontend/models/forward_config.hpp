@@ -18,7 +18,7 @@ struct QuantizedLinearRef {
 
 /**
  * Static configuration for a model's forward pass.
- * Captures per-model-family differences (bias, Q/K norm, etc.)
+ * Captures per-model-family differences (bias, Q/K norm, MoE, etc.)
  * so the shared transformer loop can be parameterized without virtual dispatch.
  */
 struct ModelForwardConfig {
@@ -28,6 +28,14 @@ struct ModelForwardConfig {
     // Model-family features
     bool has_qkv_bias = false; // Qwen2: true, Qwen3/Llama: false
     bool has_qk_norm = false;  // Qwen3: true, Qwen2/Llama: false
+
+    // MoE configuration (all zero/false for dense models)
+    bool is_moe = false;
+    size_t num_experts = 0;
+    size_t num_experts_per_tok = 0;
+    size_t moe_intermediate_size = 0;
+    size_t shared_expert_intermediate_size = 0;
+    bool norm_topk_prob = false;
 
     // Weight accessor
     tensor_t W(const std::string& name) const { return weights.get_tensor(name); }
@@ -63,6 +71,19 @@ struct ModelForwardConfig {
 
     // Layer weight prefix
     std::string prefix(int layer) const { return "layers." + std::to_string(layer) + "."; }
+
+    // MoE weight prefixes
+    std::string expert_prefix(int layer, int expert_id) const {
+        return "layers." + std::to_string(layer) + ".mlp.experts." + std::to_string(expert_id) + ".";
+    }
+
+    std::string shared_expert_prefix(int layer) const {
+        return "layers." + std::to_string(layer) + ".mlp.shared_expert.";
+    }
+
+    std::string router_weight_name(int layer) const {
+        return "layers." + std::to_string(layer) + ".mlp.gate.weight";
+    }
 
     // QKV bias (nullptr if !has_qkv_bias)
     tensor_t q_bias(const std::string& p) const { return has_qkv_bias ? W(p + "self_attn.q_proj.bias") : nullptr; }

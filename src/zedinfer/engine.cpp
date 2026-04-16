@@ -149,7 +149,7 @@ std::shared_ptr<InferenceEngine> InferenceEngine::create(const std::string& mode
     {
         auto fwd_cfg = engine->model_->forward_config();
         engine->decode_scratch_
-            = model::DecodeScratch::create(engine->model_->config(), fwd_cfg.has_qk_norm, engine->exec_config_);
+            = model::DecodeScratch::create(engine->model_->config(), fwd_cfg.has_qk_norm, engine->exec_config_, &fwd_cfg);
     }
 
     // Create profiler and run warmup (exercises paged attention kernels)
@@ -488,7 +488,9 @@ void InferenceEngine::init_block_pool() {
     kvcache::BlockConfig block_config;
     block_config.block_size = scheduler_config_.kv_block_size;
     block_config.num_kv_heads = mc.num_key_value_heads;
-    block_config.head_dim = mc.hidden_size / mc.num_attention_heads;
+    // Use explicit head_dim from config when available (Qwen3-MoE has head_dim=128
+    // while hidden_size/num_attention_heads=64). Fallback to computed value.
+    block_config.head_dim = mc.head_dim > 0 ? mc.head_dim : (mc.hidden_size / mc.num_attention_heads);
     block_config.dtype = dtype;
 
     size_t block_bytes = block_config.block_bytes();

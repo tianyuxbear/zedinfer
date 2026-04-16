@@ -1,6 +1,7 @@
 #include "backend/ops/ops.hpp"
 #include "frontend/models/decode_scratch.hpp"
 #include "frontend/models/forward_config.hpp"
+#include "frontend/models/moe_forward.hpp"
 #include "frontend/models/paged_forward_context.hpp"
 
 #include <cmath>
@@ -35,7 +36,10 @@ tensor_t transformer_forward(const ModelForwardConfig& model, PagedForwardContex
     const size_t hidden_size = cfg.hidden_size;
     const size_t nhead = cfg.num_attention_heads;
     const size_t nkvhead = cfg.num_key_value_heads;
-    const size_t head_dim = hidden_size / nhead;
+    // Use head_dim from config (may differ from hidden_size/nhead, e.g. Qwen3-30B-A3B has
+    // head_dim=128 with hidden_size=2048 and 32 heads, so q_dim = 32*128 = 4096 != hidden_size)
+    const size_t head_dim = cfg.head_dim > 0 ? cfg.head_dim : hidden_size / nhead;
+    const size_t q_dim = nhead * head_dim;
     const size_t kv_dim = nkvhead * head_dim;
     const size_t inter = cfg.intermediate_size;
     const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
@@ -68,8 +72,8 @@ tensor_t transformer_forward(const ModelForwardConfig& model, PagedForwardContex
         auto normed = use_scratch ? scratch->normed : make({N, hidden_size});
         ops::rms_norm(normed, hidden, model.W(p + "input_layernorm.weight"), cfg.rms_norm_eps);
 
-        // Q/K/V projections
-        auto q = use_scratch ? scratch->q : make({N, hidden_size});
+        // Q/K/V projections (q_dim may differ from hidden_size when head_dim != hidden_size/nhead)
+        auto q = use_scratch ? scratch->q : make({N, q_dim});
         dispatch_linear(model, q, normed, p + "self_attn.q_proj", model.q_bias(p));
 
         auto k = use_scratch ? scratch->k : make({N, kv_dim});
@@ -108,27 +112,35 @@ tensor_t transformer_forward(const ModelForwardConfig& model, PagedForwardContex
         tensor_t attn_pre = use_scratch ? scratch->attn_out : nullptr;
         auto attn = ctx.attend(L, q_rope, scale, exec_config, nhead, nkvhead, head_dim, attn_pre);
 
-        // O projection + residual
+        // O projection: input is [N, q_dim], output is [N, hidden_size]
         auto o = use_scratch ? scratch->o : make({N, hidden_size});
-        dispatch_linear(model, o, attn->view({N, hidden_size}), p + "self_attn.o_proj", nullptr);
+        dispatch_linear(model, o, attn->view({N, q_dim}), p + "self_attn.o_proj", nullptr);
 
         auto h1 = use_scratch ? scratch->h1 : make({N, hidden_size});
         ops::add(h1, hidden, o);
 
-        // MLP: norm -> gate/up -> swiglu -> down -> residual
+        // MLP / MoE: norm -> [dense MLP or MoE dispatch] -> residual
         auto normed_post = use_scratch ? scratch->normed_post : make({N, hidden_size});
         ops::rms_norm(normed_post, h1, model.W(p + "post_attention_layernorm.weight"), cfg.rms_norm_eps);
 
-        auto gate = use_scratch ? scratch->gate : make({N, inter});
-        auto up = use_scratch ? scratch->up : make({N, inter});
-        dispatch_linear(model, gate, normed_post, p + "mlp.gate_proj", nullptr);
-        dispatch_linear(model, up, normed_post, p + "mlp.up_proj", nullptr);
+        tensor_t down;
+        if (model.is_moe) {
+            // MoE layer: router + expert dispatch + shared expert
+            down = use_scratch ? scratch->down : make({N, hidden_size});
+            moe_layer_forward(model, down, normed_post, static_cast<int>(L), exec_config, scratch);
+        } else {
+            // Dense MLP: gate/up -> swiglu -> down
+            auto gate = use_scratch ? scratch->gate : make({N, inter});
+            auto up = use_scratch ? scratch->up : make({N, inter});
+            dispatch_linear(model, gate, normed_post, p + "mlp.gate_proj", nullptr);
+            dispatch_linear(model, up, normed_post, p + "mlp.up_proj", nullptr);
 
-        auto act = use_scratch ? scratch->act : make({N, inter});
-        ops::swiglu(act, gate, up);
+            auto act = use_scratch ? scratch->act : make({N, inter});
+            ops::swiglu(act, gate, up);
 
-        auto down = use_scratch ? scratch->down : make({N, hidden_size});
-        dispatch_linear(model, down, act, p + "mlp.down_proj", nullptr);
+            down = use_scratch ? scratch->down : make({N, hidden_size});
+            dispatch_linear(model, down, act, p + "mlp.down_proj", nullptr);
+        }
 
         if (use_scratch) {
             // Ping-pong: write result to hidden_out, then swap for next layer

@@ -21,6 +21,8 @@ target("ops-nvidia")
     add_culdflags("-Xcompiler=-fPIC", {force = true})
 
     add_files("../../src/backend/ops/*/nvidia/*.cu")
+    -- MoE ops CUDA files (flat layout alongside op.cpp)
+    add_files("../../src/backend/ops/moe/*.cu")
 
     -- cuBLAS for optimized linear (GEMM/GEMV)
     add_links("cublas", "cublasLt")
