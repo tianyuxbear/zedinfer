@@ -27,7 +27,10 @@ public:
     size_t num_parameters() const override { return num_params_; }
 
     ModelForwardConfig forward_config() const override {
-        return {config_, *weights_, /*has_qkv_bias=*/false, /*has_qk_norm=*/true};
+        ModelForwardConfig cfg{config_, *weights_};
+        cfg.has_qkv_bias = false;
+        cfg.has_qk_norm = true;
+        return cfg;
     }
 
 private:

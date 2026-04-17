@@ -104,6 +104,9 @@ public:
 
     bool has_tensor(const std::string& name) const { return weights_.find(name) != weights_.end(); }
 
+    // Remove a tensor from the map (used when extracting experts into ExpertWeights).
+    void remove_tensor(const std::string& name) { weights_.erase(name); }
+
     const auto& get_all_weights() const { return weights_; }
 
     void retain_resource(std::shared_ptr<void> resource) { resources_.push_back(std::move(resource)); }

@@ -149,7 +149,7 @@ std::shared_ptr<InferenceEngine> InferenceEngine::create(const std::string& mode
     {
         auto fwd_cfg = engine->model_->forward_config();
         engine->decode_scratch_
-            = model::DecodeScratch::create(engine->model_->config(), fwd_cfg.has_qk_norm, engine->exec_config_, &fwd_cfg);
+            = model::DecodeScratch::create(engine->model_->config(), fwd_cfg, engine->exec_config_);
     }
 
     // Create profiler and run warmup (exercises paged attention kernels)

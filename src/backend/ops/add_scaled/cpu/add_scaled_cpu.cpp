@@ -1,8 +1,6 @@
-#include "backend/ops/moe/moe_ops_cpu.hpp"
+#include "backend/ops/add_scaled/cpu/add_scaled_cpu.hpp"
 #include "utils/check.hpp"
 #include "utils/types.hpp"
-
-#include <cstring>
 
 namespace zedinfer::ops::cpu {
 
@@ -28,7 +26,5 @@ void add_scaled(std::byte* out, const std::byte* a, float alpha, zedinferDataTyp
             EXCEPTION_UNSUPPORTED_DATATYPE(type);
     }
 }
-
-void fill_zero(std::byte* data, size_t size_bytes) { std::memset(data, 0, size_bytes); }
 
 } // namespace zedinfer::ops::cpu

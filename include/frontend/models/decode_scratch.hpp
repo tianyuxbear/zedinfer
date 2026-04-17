@@ -56,9 +56,8 @@ struct DecodeScratch {
     tensor_t shared_act;    // {1, shared_expert_intermediate_size}
     tensor_t shared_down;   // {1, H}
 
-    static std::unique_ptr<DecodeScratch> create(const ModelConfig& cfg, bool has_qk_norm,
-                                                 const ExecutorConfig& exec_config,
-                                                 const struct ModelForwardConfig* fwd_cfg = nullptr);
+    static std::unique_ptr<DecodeScratch> create(const ModelConfig& cfg, const struct ModelForwardConfig& fwd_cfg,
+                                                 const ExecutorConfig& exec_config);
 };
 
 } // namespace zedinfer::model

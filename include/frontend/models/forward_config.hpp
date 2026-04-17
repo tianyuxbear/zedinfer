@@ -1,9 +1,12 @@
 #pragma once
 
+#include "backend/ops/ops.hpp"
 #include "frontend/models/base.hpp"
+#include "frontend/models/expert_weights.hpp"
 
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace zedinfer::model {
 
@@ -22,6 +25,10 @@ struct QuantizedLinearRef {
  * so the shared transformer loop can be parameterized without virtual dispatch.
  */
 struct ModelForwardConfig {
+    // Explicit constructor (prevents -Wmissing-field-initializers warnings from
+    // aggregate brace-init when only config+weights are specified).
+    ModelForwardConfig(const ModelConfig& cfg, const ModelWeights& w) : config(cfg), weights(w) {}
+
     const ModelConfig& config;
     const ModelWeights& weights;
 
@@ -29,13 +36,32 @@ struct ModelForwardConfig {
     bool has_qkv_bias = false; // Qwen2: true, Qwen3/Llama: false
     bool has_qk_norm = false;  // Qwen3: true, Qwen2/Llama: false
 
-    // MoE configuration (all zero/false for dense models)
+    // MoE configuration (all zero/false for dense models).
+    // `is_moe` indicates the model has MoE layers; `is_moe_layer(L)` tells whether
+    // a specific layer L is sparse — some models (decoder_sparse_step > 1, or explicit
+    // mlp_only_layers) mix dense and sparse layers.
     bool is_moe = false;
     size_t num_experts = 0;
     size_t num_experts_per_tok = 0;
     size_t moe_intermediate_size = 0;
     size_t shared_expert_intermediate_size = 0;
     bool norm_topk_prob = false;
+    size_t decoder_sparse_step = 1;
+    std::vector<int> mlp_only_layers;
+    const ExpertWeights* experts = nullptr; // indexed expert storage, set by MoE models
+
+    bool is_moe_layer(size_t layer_idx) const {
+        if (!is_moe) {
+            return false;
+        }
+        // Dense-override list takes precedence.
+        for (int l : mlp_only_layers) {
+            if (static_cast<size_t>(l) == layer_idx) {
+                return false;
+            }
+        }
+        return decoder_sparse_step > 0 && (layer_idx % decoder_sparse_step == 0);
+    }
 
     // Weight accessor
     tensor_t W(const std::string& name) const { return weights.get_tensor(name); }
@@ -67,6 +93,56 @@ struct ModelForwardConfig {
         }
 
         return ref;
+    }
+
+    // Dispatch a linear op: selects quantized path when packed weights exist, else dense.
+    // Used by both transformer_forward.cpp (dense path) and moe_forward.cpp (expert FFN).
+    void dispatch_linear(tensor_t out, tensor_t in, const std::string& prefix, tensor_t bias = nullptr) const {
+        if (has_quantized_linear(prefix)) {
+            auto q = quant_linear(prefix);
+            if (!bias) {
+                bias = q.bias;
+            }
+            ops::linear_quantized(out, in, q.weight, bias, q.scale, q.g_idx, q.num_bits, q.group_size);
+            return;
+        }
+        ops::linear(out, in, W(prefix + ".weight"), bias);
+    }
+
+    // Dispatch an expert FFN projection via indexed ExpertWeights (fast path) or fall back
+    // to string-based weight lookup. Phase 2 (expert offloading) will hook into the
+    // indexed path to check/trigger GPU residency before dispatch.
+    void dispatch_expert_linear(tensor_t out, tensor_t in, int layer, int expert_id, ExpertProj proj) const {
+        if (experts) {
+            const auto& ffn = experts->at(layer, expert_id);
+            tensor_t packed = nullptr, scale = nullptr, g_idx = nullptr, weight = nullptr;
+            switch (proj) {
+                case ExpertProj::Gate:
+                    packed = ffn.gate_packed; scale = ffn.gate_scale; g_idx = ffn.gate_g_idx;
+                    weight = ffn.gate_weight; break;
+                case ExpertProj::Up:
+                    packed = ffn.up_packed; scale = ffn.up_scale; g_idx = ffn.up_g_idx;
+                    weight = ffn.up_weight; break;
+                case ExpertProj::Down:
+                    packed = ffn.down_packed; scale = ffn.down_scale; g_idx = ffn.down_g_idx;
+                    weight = ffn.down_weight; break;
+            }
+            if (packed) {
+                ops::linear_quantized(out, in, packed, nullptr, scale, g_idx, config.quant_config.weights.num_bits,
+                                      config.quant_config.weights.group_size);
+            } else if (weight) {
+                ops::linear(out, in, weight, nullptr);
+            } else {
+                throw std::runtime_error("Expert FFN weights missing for layer " + std::to_string(layer)
+                                         + " expert " + std::to_string(expert_id));
+            }
+            return;
+        }
+        // Fallback: string-based lookup.
+        const char* proj_name = (proj == ExpertProj::Gate) ? "gate_proj"
+                              : (proj == ExpertProj::Up)   ? "up_proj"
+                                                            : "down_proj";
+        dispatch_linear(out, in, expert_prefix(layer, expert_id) + proj_name, nullptr);
     }
 
     // Layer weight prefix

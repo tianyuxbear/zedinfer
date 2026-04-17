@@ -9,20 +9,6 @@
 
 namespace zedinfer::model {
 
-static void dispatch_linear(const ModelForwardConfig& model, tensor_t out, tensor_t in, const std::string& prefix,
-                            tensor_t bias) {
-    if (model.has_quantized_linear(prefix)) {
-        auto quant = model.quant_linear(prefix);
-        if (!bias) {
-            bias = quant.bias;
-        }
-        ops::linear_quantized(out, in, quant.weight, bias, quant.scale, quant.g_idx, quant.num_bits, quant.group_size);
-        return;
-    }
-
-    ops::linear(out, in, model.W(prefix + ".weight"), bias);
-}
-
 /**
  * Shared transformer forward loop.
  * When scratch != nullptr and N == 1, uses pre-allocated decode buffers
@@ -74,13 +60,13 @@ tensor_t transformer_forward(const ModelForwardConfig& model, PagedForwardContex
 
         // Q/K/V projections (q_dim may differ from hidden_size when head_dim != hidden_size/nhead)
         auto q = use_scratch ? scratch->q : make({N, q_dim});
-        dispatch_linear(model, q, normed, p + "self_attn.q_proj", model.q_bias(p));
+        model.dispatch_linear(q, normed, p + "self_attn.q_proj", model.q_bias(p));
 
         auto k = use_scratch ? scratch->k : make({N, kv_dim});
-        dispatch_linear(model, k, normed, p + "self_attn.k_proj", model.k_bias(p));
+        model.dispatch_linear(k, normed, p + "self_attn.k_proj", model.k_bias(p));
 
         auto v = use_scratch ? scratch->v : make({N, kv_dim});
-        dispatch_linear(model, v, normed, p + "self_attn.v_proj", model.v_bias(p));
+        model.dispatch_linear(v, normed, p + "self_attn.v_proj", model.v_bias(p));
 
         // Optional per-head Q/K norm (Qwen3)
         tensor_t q_for_rope, k_for_rope;
@@ -114,7 +100,7 @@ tensor_t transformer_forward(const ModelForwardConfig& model, PagedForwardContex
 
         // O projection: input is [N, q_dim], output is [N, hidden_size]
         auto o = use_scratch ? scratch->o : make({N, hidden_size});
-        dispatch_linear(model, o, attn->view({N, q_dim}), p + "self_attn.o_proj", nullptr);
+        model.dispatch_linear(o, attn->view({N, q_dim}), p + "self_attn.o_proj", nullptr);
 
         auto h1 = use_scratch ? scratch->h1 : make({N, hidden_size});
         ops::add(h1, hidden, o);
@@ -124,7 +110,7 @@ tensor_t transformer_forward(const ModelForwardConfig& model, PagedForwardContex
         ops::rms_norm(normed_post, h1, model.W(p + "post_attention_layernorm.weight"), cfg.rms_norm_eps);
 
         tensor_t down;
-        if (model.is_moe) {
+        if (model.is_moe_layer(L)) {
             // MoE layer: router + expert dispatch + shared expert
             down = use_scratch ? scratch->down : make({N, hidden_size});
             moe_layer_forward(model, down, normed_post, static_cast<int>(L), exec_config, scratch);
@@ -132,14 +118,14 @@ tensor_t transformer_forward(const ModelForwardConfig& model, PagedForwardContex
             // Dense MLP: gate/up -> swiglu -> down
             auto gate = use_scratch ? scratch->gate : make({N, inter});
             auto up = use_scratch ? scratch->up : make({N, inter});
-            dispatch_linear(model, gate, normed_post, p + "mlp.gate_proj", nullptr);
-            dispatch_linear(model, up, normed_post, p + "mlp.up_proj", nullptr);
+            model.dispatch_linear(gate, normed_post, p + "mlp.gate_proj", nullptr);
+            model.dispatch_linear(up, normed_post, p + "mlp.up_proj", nullptr);
 
             auto act = use_scratch ? scratch->act : make({N, inter});
             ops::swiglu(act, gate, up);
 
             down = use_scratch ? scratch->down : make({N, hidden_size});
-            dispatch_linear(model, down, act, p + "mlp.down_proj", nullptr);
+            model.dispatch_linear(down, act, p + "mlp.down_proj", nullptr);
         }
 
         if (use_scratch) {
@@ -158,7 +144,7 @@ tensor_t transformer_forward(const ModelForwardConfig& model, PagedForwardContex
     ops::rms_norm(final_normed, hidden, model.W("norm.weight"), cfg.rms_norm_eps);
 
     auto logits = use_scratch ? scratch->logits : make({N, cfg.vocab_size});
-    dispatch_linear(model, logits, final_normed, "lm_head", nullptr);
+    model.dispatch_linear(logits, final_normed, "lm_head", nullptr);
 
     ctx.finalize();
     return logits;

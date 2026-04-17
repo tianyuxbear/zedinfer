@@ -196,7 +196,9 @@ TEST(QuantizedWeightsTest, LoadWeightsPacksInt8WeightsAndExposesForwardMetadata)
     EXPECT_EQ(packed->shape()[0], 2u);
     EXPECT_EQ(packed->shape()[1], 2u);
 
-    ModelForwardConfig forward{*config, *weights, false, true};
+    ModelForwardConfig forward{*config, *weights};
+    forward.has_qkv_bias = false;
+    forward.has_qk_norm = true;
     EXPECT_TRUE(forward.has_quantized_linear("layers.0.self_attn.q_proj"));
 
     auto quant = forward.quant_linear("layers.0.self_attn.q_proj");

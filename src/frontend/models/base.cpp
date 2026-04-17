@@ -413,6 +413,9 @@ std::unique_ptr<ModelConfig> Model::load_config(const std::string& config_path) 
         moe_config->moe_intermediate_size = j.value("moe_intermediate_size", 1536);
         moe_config->shared_expert_intermediate_size = j.value("shared_expert_intermediate_size", 4096);
         moe_config->decoder_sparse_step = j.value("decoder_sparse_step", 1);
+        if (j.contains("mlp_only_layers") && j["mlp_only_layers"].is_array()) {
+            moe_config->mlp_only_layers = j["mlp_only_layers"].get<std::vector<int>>();
+        }
         moe_config->norm_topk_prob = j.value("norm_topk_prob", true);
         moe_config->max_window_layers = j.value("max_window_layers", 94);
         moe_config->use_sliding_window = j.value("use_sliding_window", false);
@@ -442,6 +445,126 @@ struct LayerGroup {
     tensor_t t_zeros = nullptr;
     tensor_t t_bias = nullptr;
 };
+
+// Detect the actual GPTQ zero-point from qzeros.
+// AutoGPTQ stores qzeros with a -1 offset (e.g. 7 for actual zp=8); other tools store it directly.
+// Env var ZEDINFER_GPTQ_ZEROPOINT overrides auto-detection.
+static int detect_gptq_zero_point(const LayerGroup& group, int num_bits) {
+    int actual_zero_point = 1 << (num_bits - 1); // symmetric default (8 for INT4)
+    if (!group.t_zeros || num_bits != 4) {
+        return actual_zero_point;
+    }
+
+    int32_t first_qzero = *reinterpret_cast<const int32_t*>(group.t_zeros->data());
+    int stored_zp = first_qzero & 0xF;
+
+    const char* zp_env = std::getenv("ZEDINFER_GPTQ_ZEROPOINT");
+    if (zp_env) {
+        return std::atoi(zp_env);
+    }
+    // AutoGPTQ convention: stored = actual - 1
+    return stored_zp + 1;
+}
+
+// Transpose GPTQ qweight from [K/pack, N] to [N, K/pack] and pre-adjust packed nibbles
+// so that (adjusted - 8) matches the actual dequant (kernel hardcodes zero_point=8).
+static tensor_t transpose_gptq_qweight(tensor_t packed, int zp_adjust) {
+    size_t rows = packed->shape()[0];
+    size_t cols = packed->shape()[1];
+    auto transposed = Tensor::create({cols, rows}, packed->dtype(), ZEDINFER_DEVICE_CPU);
+    const int32_t* src = reinterpret_cast<const int32_t*>(packed->data());
+    int32_t* dst = reinterpret_cast<int32_t*>(transposed->data());
+
+    for (size_t r = 0; r < rows; ++r) {
+        for (size_t c = 0; c < cols; ++c) {
+            int32_t val = src[r * cols + c];
+            if (zp_adjust != 0) {
+                int32_t adjusted = 0;
+                for (int i = 0; i < 8; ++i) {
+                    int nibble = (val >> (i * 4)) & 0xF;
+                    nibble = std::max(0, std::min(15, nibble + zp_adjust));
+                    adjusted |= (nibble << (i * 4));
+                }
+                val = adjusted;
+            }
+            dst[c * rows + r] = val;
+        }
+    }
+    return transposed;
+}
+
+// Transpose GPTQ scales from [K/group, N] to [N, K/group] and convert dtype if it doesn't
+// match the model activation dtype (kernel checks scale/activation dtype equality).
+static tensor_t transpose_gptq_scale(tensor_t scale, zedinferDataType_t model_dtype) {
+    size_t rows = scale->shape()[0];
+    size_t cols = scale->shape()[1];
+    zedinferDataType_t scale_dtype = scale->dtype();
+    bool need_convert = (scale_dtype != model_dtype)
+                     && (model_dtype == ZEDINFER_DTYPE_BF16 || model_dtype == ZEDINFER_DTYPE_F16);
+
+    auto transposed = Tensor::create({cols, rows}, need_convert ? model_dtype : scale_dtype, ZEDINFER_DEVICE_CPU);
+    const std::byte* src = scale->data();
+    std::byte* dst = transposed->data();
+    size_t src_elem = scale->elementSize();
+    size_t dst_elem = transposed->elementSize();
+
+    if (!need_convert) {
+        for (size_t r = 0; r < rows; ++r) {
+            for (size_t c = 0; c < cols; ++c) {
+                std::memcpy(dst + (c * rows + r) * src_elem, src + (r * cols + c) * src_elem, src_elem);
+            }
+        }
+        return transposed;
+    }
+
+    // Transpose + convert (FP16 ↔ BF16 via FP32 intermediate).
+    for (size_t r = 0; r < rows; ++r) {
+        for (size_t c = 0; c < cols; ++c) {
+            const std::byte* s = src + (r * cols + c) * src_elem;
+            float val = 0.0f;
+            if (scale_dtype == ZEDINFER_DTYPE_F16) {
+                val = utils::fp16_to_fp32_f16c(*reinterpret_cast<const fp16_t*>(s));
+            } else if (scale_dtype == ZEDINFER_DTYPE_BF16) {
+                val = utils::_bf16_to_f32(*reinterpret_cast<const bf16_t*>(s));
+            }
+            std::byte* d = dst + (c * rows + r) * dst_elem;
+            if (model_dtype == ZEDINFER_DTYPE_BF16) {
+                *reinterpret_cast<bf16_t*>(d) = utils::_f32_to_bf16(val);
+            } else if (model_dtype == ZEDINFER_DTYPE_F16) {
+                *reinterpret_cast<fp16_t*>(d) = utils::fp32_to_fp16_f16c(val);
+            }
+        }
+    }
+    return transposed;
+}
+
+// Process a GPTQ quantized layer group in-place: discard unused g_idx, transpose qweight
+// with zero-point adjustment, and transpose/convert scales.
+static void process_gptq_group(LayerGroup& group, const ModelConfig& config, tensor_t& current_weight) {
+    // Discard g_idx when desc_act=false (AutoGPTQ may still ship it).
+    if (current_weight && group.t_g_idx && !config.quant_config.weights.act_order) {
+        group.t_g_idx = nullptr;
+    }
+
+    if (group.t_packed && group.t_packed->shape().size() == 2) {
+        int actual_zero_point = detect_gptq_zero_point(group, config.quant_config.weights.num_bits);
+        int zp_adjust = 8 - actual_zero_point;
+        group.t_packed = transpose_gptq_qweight(group.t_packed, zp_adjust);
+        current_weight = group.t_packed;
+
+        static bool zp_logged = false;
+        if (!zp_logged) {
+            zp_logged = true;
+            LOGI.printf("[GPTQ] Zero-point: actual_zp=%d, kernel_zp=8, nibble_adjust=%+d", actual_zero_point,
+                        zp_adjust);
+        }
+    }
+
+    if (group.t_scale && group.t_scale->shape().size() == 2) {
+        zedinferDataType_t model_dtype = utils::str_to_dtype(config.torch_dtype);
+        group.t_scale = transpose_gptq_scale(group.t_scale, model_dtype);
+    }
+}
 
 static void unpack_4bit_row(const int32_t* packed, int8_t* unpacked, size_t K) {
     for (size_t k_blk = 0; k_blk < K / 8; ++k_blk) {
@@ -555,122 +678,10 @@ std::unique_ptr<ModelWeights> Model::load_weights(const std::string& model_path,
     for (auto& [prefix, group] : layer_groups) {
         tensor_t current_weight = group.t_packed ? group.t_packed : group.t_weight;
 
-        // For GPTQ with desc_act=false, discard g_idx (no activation reordering needed).
-        // AutoGPTQ models may still ship g_idx tensors even when act_order is off.
-        if (current_weight && group.t_g_idx && config.quant_config.quant_method == "gptq"
-            && !config.quant_config.weights.act_order) {
-            group.t_g_idx = nullptr;
-        }
-
-        // GPTQ layout fix: AutoGPTQ stores qweight as [K/pack, N] and scales as
-        // [K/group, N], but our kernels expect [N, K/pack] and [N, K/group].
-        // Transpose both during loading.
-        // Also adjust zero-point: AutoGPTQ stores qzeros with a -1 offset (e.g., 7 for
-        // actual zero_point=8). Our kernel hardcodes zero_point=8. To handle models where
-        // qzeros != 8-1 (or the convention differs), we pre-adjust each nibble in qweight
-        // so that (adjusted_val - 8) gives the correct signed value.
-        if (config.quant_config.quant_method == "gptq" && group.t_packed && group.t_packed->shape().size() == 2) {
-            size_t rows = group.t_packed->shape()[0];
-            size_t cols = group.t_packed->shape()[1];
-
-            // Determine actual zero_point from qzeros (if present).
-            // AutoGPTQ stores qzeros with a -1 offset: stored = actual - 1.
-            // But some tools store qzeros = actual (no offset).
-            // Env var ZEDINFER_GPTQ_ZEROPOINT overrides auto-detection.
-            int actual_zero_point = 8; // default: symmetric 4-bit
-            if (group.t_zeros && config.quant_config.weights.num_bits == 4) {
-                int32_t first_qzero = *reinterpret_cast<const int32_t*>(group.t_zeros->data());
-                int stored_zp = first_qzero & 0xF;
-
-                const char* zp_env = std::getenv("ZEDINFER_GPTQ_ZEROPOINT");
-                if (zp_env) {
-                    actual_zero_point = std::atoi(zp_env);
-                } else {
-                    // AutoGPTQ convention: stored = actual - 1
-                    actual_zero_point = stored_zp + 1;
-                }
-            }
-            // Kernel hardcodes zero_point=8. To use actual_zero_point, we add (8 - actual)
-            // to each nibble so kernel's (adjusted - 8) = (original - actual_zero_point).
-            int zp_adjust = 8 - actual_zero_point;
-
-            auto transposed = Tensor::create({cols, rows}, group.t_packed->dtype(), ZEDINFER_DEVICE_CPU);
-            const int32_t* src = reinterpret_cast<const int32_t*>(group.t_packed->data());
-            int32_t* dst = reinterpret_cast<int32_t*>(transposed->data());
-
-            for (size_t r = 0; r < rows; ++r) {
-                for (size_t c = 0; c < cols; ++c) {
-                    int32_t val = src[r * cols + c];
-                    if (zp_adjust != 0) {
-                        // Adjust each nibble: add zp_adjust, clamp to [0, 15]
-                        int32_t adjusted = 0;
-                        for (int i = 0; i < 8; ++i) {
-                            int nibble = (val >> (i * 4)) & 0xF;
-                            nibble = std::max(0, std::min(15, nibble + zp_adjust));
-                            adjusted |= (nibble << (i * 4));
-                        }
-                        val = adjusted;
-                    }
-                    dst[c * rows + r] = val;
-                }
-            }
-            group.t_packed = transposed;
-            current_weight = transposed;
-
-            static bool zp_logged = false;
-            if (!zp_logged) {
-                zp_logged = true;
-                LOGI.printf("[GPTQ] Zero-point: actual_zp=%d, kernel_zp=8, nibble_adjust=%+d", actual_zero_point,
-                            zp_adjust);
-            }
-        }
-
-        if (config.quant_config.quant_method == "gptq" && group.t_scale && group.t_scale->shape().size() == 2) {
-            size_t rows = group.t_scale->shape()[0];
-            size_t cols = group.t_scale->shape()[1];
-
-            // Determine target dtype for scales (must match model activation dtype)
-            zedinferDataType_t model_dtype = utils::str_to_dtype(config.torch_dtype);
-            zedinferDataType_t scale_dtype = group.t_scale->dtype();
-            bool need_dtype_convert = (scale_dtype != model_dtype) && (model_dtype == ZEDINFER_DTYPE_BF16 || model_dtype == ZEDINFER_DTYPE_F16);
-
-            // Transpose [K/group, N] -> [N, K/group] and optionally convert dtype
-            auto transposed = Tensor::create({cols, rows}, need_dtype_convert ? model_dtype : scale_dtype, ZEDINFER_DEVICE_CPU);
-            const std::byte* src = group.t_scale->data();
-            std::byte* dst = transposed->data();
-            size_t src_elem = group.t_scale->elementSize();
-            size_t dst_elem = transposed->elementSize();
-
-            if (need_dtype_convert) {
-                // Transpose + convert (e.g., FP16 -> BF16 via FP32 intermediate)
-                for (size_t r = 0; r < rows; ++r) {
-                    for (size_t c = 0; c < cols; ++c) {
-                        // Read source element
-                        float val = 0.0f;
-                        const std::byte* s = src + (r * cols + c) * src_elem;
-                        if (scale_dtype == ZEDINFER_DTYPE_F16) {
-                            val = utils::fp16_to_fp32_f16c(*reinterpret_cast<const fp16_t*>(s));
-                        } else if (scale_dtype == ZEDINFER_DTYPE_BF16) {
-                            val = utils::_bf16_to_f32(*reinterpret_cast<const bf16_t*>(s));
-                        }
-                        // Write to transposed destination
-                        std::byte* d = dst + (c * rows + r) * dst_elem;
-                        if (model_dtype == ZEDINFER_DTYPE_BF16) {
-                            *reinterpret_cast<bf16_t*>(d) = utils::_f32_to_bf16(val);
-                        } else if (model_dtype == ZEDINFER_DTYPE_F16) {
-                            *reinterpret_cast<fp16_t*>(d) = utils::fp32_to_fp16_f16c(val);
-                        }
-                    }
-                }
-            } else {
-                // Transpose only (same dtype)
-                for (size_t r = 0; r < rows; ++r) {
-                    for (size_t c = 0; c < cols; ++c) {
-                        std::memcpy(dst + (c * rows + r) * src_elem, src + (r * cols + c) * src_elem, src_elem);
-                    }
-                }
-            }
-            group.t_scale = transposed;
+        // GPTQ format: transpose qweight/scales to our kernel's expected layout and
+        // adjust zero-points. Leaves other quant formats (SparseML INT8) unchanged.
+        if (current_weight && config.quant_config.quant_method == "gptq") {
+            process_gptq_group(group, config, current_weight);
         }
 
         if (current_weight && group.t_g_idx) {
