@@ -7,7 +7,12 @@ namespace zedinfer::model {
 namespace {
 
 // Detect the actual expert intermediate size from weight shapes for a given prefix.
-// Config fields may not match actual weights across HuggingFace versions.
+// Config fields may not match actual weights across HuggingFace versions
+// (e.g. Qwen3-30B-A3B has moe_intermediate_size=768 in config but some docs list 1536).
+//
+// Assumption: all experts across all layers share the same intermediate size. This holds
+// for current Qwen3 MoE models. If a future model uses per-layer sizes, this needs to
+// become a per-layer lookup (callers would index by layer_idx).
 size_t detect_intermediate_size(const ModelWeights& weights, const std::string& prefix) {
     // GPTQ: gate_proj.weight_packed shape [out_features, K/8]
     std::string packed = prefix + "gate_proj.weight_packed";
@@ -154,6 +159,11 @@ ModelForwardConfig Qwen3MoEModel::forward_config() const {
     cfg.moe_intermediate_size = (detected_moe > 0) ? detected_moe : config_.moe_intermediate_size;
     cfg.shared_expert_intermediate_size
         = (detected_shared > 0) ? detected_shared : config_.shared_expert_intermediate_size;
+
+    // Shared expert is uniform across layers: check layer 0 once.
+    cfg.has_shared_expert
+        = weights_->has_tensor("layers.0.mlp.shared_expert.gate_proj.weight")
+       || weights_->has_tensor("layers.0.mlp.shared_expert.gate_proj.weight_packed");
 
     if (detected_moe > 0 && detected_moe != config_.moe_intermediate_size) {
         LOGI.printf("[Qwen3MoE] Detected moe_intermediate_size=%zu from weights (config=%zu)", detected_moe,

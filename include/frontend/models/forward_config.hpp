@@ -48,6 +48,7 @@ struct ModelForwardConfig {
     bool norm_topk_prob = false;
     size_t decoder_sparse_step = 1;
     std::vector<int> mlp_only_layers;
+    bool has_shared_expert = false;         // uniform across all MoE layers (checked at init)
     const ExpertWeights* experts = nullptr; // indexed expert storage, set by MoE models
 
     bool is_moe_layer(size_t layer_idx) const {

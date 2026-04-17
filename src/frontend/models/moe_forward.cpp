@@ -32,6 +32,10 @@ static ops::moe::TopKResult compute_router_topk(const ModelForwardConfig& model,
     }
 
     // D2H + dtype-to-F32 for CPU top-k (N * num_experts is small enough).
+    //
+    // PERF-TODO: this D2H copy forces a cudaDeviceSynchronize per MoE layer. For 48 layers
+    // in decode this adds up. A GPU-side top-k kernel writing expert_ids/weights directly
+    // to a pinned host buffer would eliminate the serialization point.
     tensor_t cpu = router_logits_buf;
     if (cpu->deviceType() != ZEDINFER_DEVICE_CPU) {
         cpu = cpu->to(ZEDINFER_DEVICE_CPU, 0);
@@ -111,7 +115,9 @@ static void moe_prefill(const ModelForwardConfig& model, tensor_t moe_output, te
         auto g_act = g_act_full->slice(0, 0, static_cast<int64_t>(group_size));
         auto g_down = g_down_full->slice(0, 0, static_cast<int64_t>(group_size));
 
-        // Gather rows (TODO: replace with a single CUDA gather kernel for perf).
+        // PERF-TODO: replace per-row cudaMemcpy with a single CUDA gather kernel. Current
+        // implementation launches O(group_size) small copies per expert per layer; a gather
+        // kernel would batch them into one launch and use coalesced loads.
         for (size_t i = 0; i < group_size; ++i) {
             void* dst = gathered->data() + static_cast<ptrdiff_t>(i * row_bytes);
             const void* src = input->data() + static_cast<ptrdiff_t>(tokens[i] * row_bytes);
@@ -143,17 +149,14 @@ static void apply_shared_expert(const ModelForwardConfig& model, tensor_t output
     const size_t shared_inter = model.shared_expert_intermediate_size;
     const bool use_scratch = (scratch != nullptr && N == 1);
 
-    auto sp = model.shared_expert_prefix(layer_idx);
-    bool has_shared = model.weights.has_tensor(sp + "gate_proj.weight")
-                   || model.has_quantized_linear(sp + "gate_proj");
-
-    if (!has_shared) {
+    if (!model.has_shared_expert) {
         auto* api = zedinfer::core::context().runtime().api();
         auto kind = (output->deviceType() == ZEDINFER_DEVICE_CPU) ? ZEDINFER_MEMCPY_H2H : ZEDINFER_MEMCPY_D2D;
         api->memcpy_sync(output->data(), moe_output->data(), output->numel() * output->elementSize(), kind);
         return;
     }
 
+    auto sp = model.shared_expert_prefix(layer_idx);
     auto sh_gate = use_scratch ? scratch->shared_gate : make({N, shared_inter});
     auto sh_up = use_scratch ? scratch->shared_up : make({N, shared_inter});
     auto sh_act = use_scratch ? scratch->shared_act : make({N, shared_inter});
