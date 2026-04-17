@@ -7,7 +7,7 @@
 #include "zedinfer/scheduler.hpp"
 
 #include "zedinfer/version.hpp"
-#include <argparse.hpp>
+#include <argparse/argparse.hpp>
 #include <csignal>
 #include <cstdio>
 #include <iostream>

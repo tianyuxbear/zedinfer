@@ -15,7 +15,6 @@ add_rules("plugin.compile_commands.autoupdate", {outputdir = "build"})
 
 -- Include directories
 add_includedirs("include")
-add_includedirs("third_party/include")
 
 -- Platform-specific flags
 if not is_plat("windows") then
@@ -57,6 +56,7 @@ option("flashinfer")
 option_end()
 
 local project_dir = os.projectdir()
+local third_party_hint = "Run `git submodule update --init --recursive` to fetch third-party dependencies."
 
 local function add_required_includedir(paths, hint)
     local candidates = type(paths) == "table" and paths or {paths}
@@ -69,6 +69,12 @@ local function add_required_includedir(paths, hint)
     end
     os.raise("required include directory not found: %s\n%s", table.concat(candidates, ", "), hint)
 end
+
+add_required_includedir("third_party/nlohmann_json/single_include", third_party_hint)
+add_required_includedir("third_party/plog/include", third_party_hint)
+add_required_includedir("third_party/argparse/include", third_party_hint)
+add_required_includedir("third_party/cpp-httplib", third_party_hint)
+add_required_includedir("third_party/dbg-macro", third_party_hint)
 
 if has_config("flashinfer") then
     add_defines("USE_FLASHINFER")

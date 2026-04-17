@@ -3,7 +3,7 @@
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 #pragma GCC diagnostic ignored "-Wmissing-field-initializers"
-#include "httplib.h"
+#include <httplib.h>
 #pragma GCC diagnostic pop
 
 #include "zedinfer/session.hpp"

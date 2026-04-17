@@ -8,7 +8,7 @@
 
 #include "zedinfer/version.hpp"
 #include <algorithm>
-#include <argparse.hpp>
+#include <argparse/argparse.hpp>
 #include <cstdlib>
 #include <iostream>
 #include <linenoise.h>

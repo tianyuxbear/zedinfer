@@ -6,7 +6,7 @@
 #include "zedinfer/engine.hpp"
 #include "zedinfer/scheduler.hpp"
 
-#include <argparse.hpp>
+#include <argparse/argparse.hpp>
 #include <nlohmann/json.hpp>
 
 #include <chrono>

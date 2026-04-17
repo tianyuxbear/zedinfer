@@ -8,7 +8,7 @@
 #include "zedinfer/scheduler.hpp"
 
 #include "zedinfer/version.hpp"
-#include <argparse.hpp>
+#include <argparse/argparse.hpp>
 #include <chrono>
 #include <cstdio>
 #include <future>
