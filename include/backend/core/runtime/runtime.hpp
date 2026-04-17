@@ -14,7 +14,8 @@ private:
     bool is_active_;
     const ZedinferRuntimeAPI* api_;
     allocator_t allocator_;
-    zedinferStream_t stream_;
+    zedinferStream_t stream_;          // compute stream: kernel launches, activation memcpys
+    zedinferStream_t stream_transfer_; // transfer stream: H2D/D2H weight movement (Phase 2 expert offloading)
 
     Runtime(zedinferDeviceType_t device_type, int device_id);
 
@@ -49,7 +50,10 @@ public:
 
     // Stream management.
     zedinferStream_t stream() const { return stream_; }
+    zedinferStream_t transfer_stream() const { return stream_transfer_; }
     void synchronize() const;
+    // Synchronize a specific stream (does nothing on CPU).
+    void synchronize_stream(zedinferStream_t s) const;
 
     friend class Context;
 };

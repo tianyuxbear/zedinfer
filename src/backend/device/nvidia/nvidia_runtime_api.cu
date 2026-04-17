@@ -110,13 +110,24 @@ void memcpyAsync(void* dst, const void* src, size_t size, zedinferMemcpyKind_t k
     cudaMemcpyAsync(dst, src, size, cuda_kind, reinterpret_cast<cudaStream_t>(stream));
 }
 
+void registerPinned(void* ptr, size_t size) {
+    // cudaHostRegisterDefault: pageable→pinned. Subsequent cudaMemcpyAsync on this region
+    // uses DMA for full PCIe bandwidth (~20+ GB/s vs ~6 GB/s pageable).
+    cudaHostRegister(ptr, size, cudaHostRegisterDefault);
+}
+
+void unregisterPinned(void* ptr) {
+    cudaHostUnregister(ptr);
+}
+
 void getMemoryInfo(size_t* free, size_t* total) {
     cudaMemGetInfo(free, total);
 }
 
 static const ZedinferRuntimeAPI RUNTIME_API = {
-    &getDeviceCount, &setDevice,  &deviceSynchronize, &createStream, &destroyStream, &streamSynchronize, &mallocDevice,
-    &freeDevice,     &mallocHost, &freeHost,          &memcpySync,   &memcpyAsync,   &getMemoryInfo};
+    &getDeviceCount,    &setDevice,       &deviceSynchronize, &createStream,      &destroyStream,
+    &streamSynchronize, &mallocDevice,    &freeDevice,        &mallocHost,        &freeHost,
+    &memcpySync,        &memcpyAsync,     &registerPinned,    &unregisterPinned,  &getMemoryInfo};
 
 } // namespace runtime_api
 

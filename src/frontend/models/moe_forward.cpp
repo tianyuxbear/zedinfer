@@ -62,6 +62,9 @@ static void moe_decode(const ModelForwardConfig& model, tensor_t moe_output, ten
 }
 
 // Execute the N>1 prefill path: permute tokens by expert, run FFN per expert group, scatter back.
+// Buffers (gathered, g_gate, g_up, g_act, g_down) are allocated ONCE at max group size = N
+// and reused via slice views for each expert. Phase 2's ExpertPool will manage these at a
+// higher level.
 static void moe_prefill(const ModelForwardConfig& model, tensor_t moe_output, tensor_t input, int layer_idx,
                         const ops::moe::TopKResult& topk, const MakeTensor& make) {
     const size_t N = input->shape()[0];
@@ -70,7 +73,8 @@ static void moe_prefill(const ModelForwardConfig& model, tensor_t moe_output, te
     const size_t top_k = model.num_experts_per_tok;
     const size_t moe_inter = model.moe_intermediate_size;
 
-    // Bucket token indices by selected expert.
+    // Bucket token indices by selected expert. Each expert receives at most N tokens
+    // (since top-k picks are distinct per token), so max group size is N.
     std::vector<std::vector<size_t>> expert_tokens(num_experts);
     std::vector<std::vector<float>> expert_weights(num_experts);
     for (size_t n = 0; n < N; ++n) {
@@ -80,6 +84,13 @@ static void moe_prefill(const ModelForwardConfig& model, tensor_t moe_output, te
             expert_weights[static_cast<size_t>(eid)].push_back(topk.expert_weights[n * top_k + k]);
         }
     }
+
+    // Pre-allocate buffers at max group size (N) and reuse across experts via slice views.
+    auto gathered_full = make({N, hidden_size});
+    auto g_gate_full = make({N, moe_inter});
+    auto g_up_full = make({N, moe_inter});
+    auto g_act_full = make({N, moe_inter});
+    auto g_down_full = make({N, hidden_size});
 
     auto* api = zedinfer::core::context().runtime().api();
     auto kind = (input->deviceType() == ZEDINFER_DEVICE_CPU) ? ZEDINFER_MEMCPY_H2H : ZEDINFER_MEMCPY_D2D;
@@ -93,18 +104,19 @@ static void moe_prefill(const ModelForwardConfig& model, tensor_t moe_output, te
 
         size_t group_size = tokens.size();
 
+        // Views for this expert's group size (contiguous: slicing dim 0 from 0).
+        auto gathered = gathered_full->slice(0, 0, static_cast<int64_t>(group_size));
+        auto g_gate = g_gate_full->slice(0, 0, static_cast<int64_t>(group_size));
+        auto g_up = g_up_full->slice(0, 0, static_cast<int64_t>(group_size));
+        auto g_act = g_act_full->slice(0, 0, static_cast<int64_t>(group_size));
+        auto g_down = g_down_full->slice(0, 0, static_cast<int64_t>(group_size));
+
         // Gather rows (TODO: replace with a single CUDA gather kernel for perf).
-        auto gathered = make({group_size, hidden_size});
         for (size_t i = 0; i < group_size; ++i) {
             void* dst = gathered->data() + static_cast<ptrdiff_t>(i * row_bytes);
             const void* src = input->data() + static_cast<ptrdiff_t>(tokens[i] * row_bytes);
             api->memcpy_sync(dst, src, row_bytes, kind);
         }
-
-        auto g_gate = make({group_size, moe_inter});
-        auto g_up = make({group_size, moe_inter});
-        auto g_act = make({group_size, moe_inter});
-        auto g_down = make({group_size, hidden_size});
 
         model.dispatch_expert_linear(g_gate, gathered, layer_idx, static_cast<int>(eid), ExpertProj::Gate);
         model.dispatch_expert_linear(g_up, gathered, layer_idx, static_cast<int>(eid), ExpertProj::Up);

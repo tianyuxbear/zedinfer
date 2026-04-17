@@ -22,7 +22,14 @@ Runtime::Runtime(zedinferDeviceType_t device_type, int device_id)
 
     stream_ = api_->create_stream();
     if (device_type_ != ZEDINFER_DEVICE_CPU && stream_ == nullptr) {
-        throw std::runtime_error("Failed to create stream");
+        throw std::runtime_error("Failed to create compute stream");
+    }
+
+    // Separate transfer stream allows H2D/D2H weight movement to overlap with compute
+    // on the main stream. Used by Phase 2 expert offloading for async prefetch.
+    stream_transfer_ = api_->create_stream();
+    if (device_type_ != ZEDINFER_DEVICE_CPU && stream_transfer_ == nullptr) {
+        throw std::runtime_error("Failed to create transfer stream");
     }
 
     allocator_ = std::make_unique<memory::PooledAllocator>(api_, device_type, device_id);
@@ -39,6 +46,7 @@ Runtime::~Runtime() {
         LOG_ERROR_(utils::BOTH) << "Mallicious destruction of inactive runtime." << std::endl;
     }
     api_->destroy_stream(stream_);
+    api_->destroy_stream(stream_transfer_);
     api_ = nullptr;
     // api_ is a borrowed pointer; do not delete.
 }
@@ -77,6 +85,12 @@ void Runtime::freeStorage(Storage* storage) {
 
 void Runtime::synchronize() const {
     api_->stream_synchronize(stream_);
+}
+
+void Runtime::synchronize_stream(zedinferStream_t s) const {
+    if (s != nullptr) {
+        api_->stream_synchronize(s);
+    }
 }
 
 } // namespace zedinfer::core

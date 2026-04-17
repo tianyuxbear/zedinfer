@@ -58,6 +58,14 @@ void memcpyAsync(void* dst, const void* src, size_t size, zedinferMemcpyKind_t k
     memcpySync(dst, src, size, kind);
 }
 
+void registerPinned(void* /*ptr*/, size_t /*size*/) {
+    // No-op on CPU: all host memory is directly accessible.
+}
+
+void unregisterPinned(void* /*ptr*/) {
+    // No-op on CPU.
+}
+
 void getMemoryInfo(size_t* free, size_t* total) {
     // CPU: report a large default (8 GB). Actual system RAM query is platform-specific.
     constexpr size_t default_total = 8ULL * 1024 * 1024 * 1024;
@@ -70,8 +78,9 @@ void getMemoryInfo(size_t* free, size_t* total) {
 }
 
 static const ZedinferRuntimeAPI RUNTIME_API = {
-    &getDeviceCount, &setDevice,  &deviceSynchronize, &createStream, &destroyStream, &streamSynchronize, &mallocDevice,
-    &freeDevice,     &mallocHost, &freeHost,          &memcpySync,   &memcpyAsync,   &getMemoryInfo};
+    &getDeviceCount,    &setDevice,       &deviceSynchronize, &createStream,      &destroyStream,
+    &streamSynchronize, &mallocDevice,    &freeDevice,        &mallocHost,        &freeHost,
+    &memcpySync,        &memcpyAsync,     &registerPinned,    &unregisterPinned,  &getMemoryInfo};
 
 } // namespace runtime_api
 

@@ -24,6 +24,12 @@ typedef void (*free_host_api)(void*);
 typedef void (*memcpy_sync_api)(void*, const void*, size_t, zedinferMemcpyKind_t);
 typedef void (*memcpy_async_api)(void*, const void*, size_t, zedinferMemcpyKind_t, zedinferStream_t);
 
+// Pin/unpin existing host memory region for fast PCIe transfers.
+// Used by Phase 2 expert offloading to pin CPU-resident expert weights.
+// No-op on CPU runtime; cudaHostRegister/cudaHostUnregister on NVIDIA.
+typedef void (*register_pinned_api)(void*, size_t);
+typedef void (*unregister_pinned_api)(void*);
+
 // Memory info query
 typedef void (*get_memory_info_api)(size_t* free, size_t* total);
 
@@ -48,6 +54,10 @@ typedef struct ZedinferRuntimeAPI {
     // Memory copy
     memcpy_sync_api memcpy_sync;
     memcpy_async_api memcpy_async;
+
+    // Pinned memory (may be nullptr on backends that don't support pinning, e.g. CPU)
+    register_pinned_api register_pinned;
+    unregister_pinned_api unregister_pinned;
 
     // Memory info
     get_memory_info_api get_memory_info;
