@@ -10,8 +10,8 @@
 
 namespace zedinfer {
 
-ServingLoop::ServingLoop(std::shared_ptr<InferenceEngine> engine, SchedulerConfig sched_config)
-    : engine_(std::move(engine)), scheduler_(std::move(sched_config)) {
+ServingLoop::ServingLoop(InferenceEngine& engine, SchedulerConfig sched_config)
+    : engine_(&engine), scheduler_(std::move(sched_config)) {
     if (engine_->block_allocator()) {
         scheduler_.set_block_allocator(engine_->block_allocator());
     }

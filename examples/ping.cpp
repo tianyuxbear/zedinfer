@@ -69,10 +69,5 @@ int main(int argc, char* argv[]) {
     auto session = engine->create_session(gen_config);
     session->chat(prompt);
 
-    // Emit model-level runtime summaries (e.g. MoE ExpertPool hit/miss) before exit.
-    // Done explicitly because InferenceEngine's shared_ptr cycle currently keeps the
-    // Model alive past return, preventing destructor-based logging from running.
-    engine->model().log_runtime_stats();
-
     return 0;
 }

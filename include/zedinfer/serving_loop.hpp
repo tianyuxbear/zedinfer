@@ -23,9 +23,14 @@ class InferenceEngine;
  * For HTTP API: submit_async() from HTTP threads, run_serving() on engine thread.
  * run_serving() sleeps when idle, wakes on new submissions.
  */
+/**
+ * Holds a non-owning pointer to the engine that owns this loop (engine outlives
+ * its own unique_ptr members). Must not take a shared_ptr back, or InferenceEngine
+ * would form a cycle with itself and never destruct.
+ */
 class ServingLoop {
 public:
-    explicit ServingLoop(std::shared_ptr<InferenceEngine> engine, SchedulerConfig sched_config = {});
+    explicit ServingLoop(InferenceEngine& engine, SchedulerConfig sched_config = {});
 
     // Synchronous generation (session-based, used by chat/ping)
     std::string generate(kvcache::SequenceBlockTable& block_table, const std::string& prompt,
@@ -55,7 +60,7 @@ public:
     int active_count() const { return scheduler_.active_count(); }
 
 private:
-    std::shared_ptr<InferenceEngine> engine_;
+    InferenceEngine* engine_;
     Scheduler scheduler_;
 
     // Thread synchronization for serving mode

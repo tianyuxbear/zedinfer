@@ -13,7 +13,7 @@
 
 namespace zedinfer {
 
-Profiler::Profiler(std::shared_ptr<InferenceEngine> engine) : engine_(std::move(engine)) {}
+Profiler::Profiler(InferenceEngine& engine) : engine_(&engine) {}
 
 void Profiler::warmup(size_t prefill_len, size_t decode_steps) {
     LOGI << "[Profiler] Warming up with prefill_len=" << prefill_len << ", decode_steps=" << decode_steps;

@@ -151,8 +151,10 @@ std::shared_ptr<InferenceEngine> InferenceEngine::create(const std::string& mode
         engine->decode_scratch_ = model::DecodeScratch::create(engine->model_->config(), fwd_cfg, engine->exec_config_);
     }
 
-    // Create profiler and run warmup (exercises paged attention kernels)
-    engine->profiler_ = std::make_unique<Profiler>(engine);
+    // Create profiler and run warmup (exercises paged attention kernels).
+    // Profiler takes a non-owning reference — it must not co-own the engine, or we
+    // rebuild the shared_ptr cycle we just broke.
+    engine->profiler_ = std::make_unique<Profiler>(*engine);
     // Local debugging/profiling can skip engine warmup to isolate model correctness from the
     // startup benchmark pass. Normal runs keep warmup enabled.
     if (std::getenv("ZEDINFER_DISABLE_WARMUP") == nullptr) {
@@ -164,8 +166,8 @@ std::shared_ptr<InferenceEngine> InferenceEngine::create(const std::string& mode
         LOG_VERBOSE_(utils::BOTH) << "[Engine] Ready";
     }
 
-    // Create serving loop (after block pool)
-    engine->serving_loop_ = std::make_unique<ServingLoop>(engine, engine->scheduler_config_);
+    // Create serving loop (after block pool). Same non-owning contract as Profiler.
+    engine->serving_loop_ = std::make_unique<ServingLoop>(*engine, engine->scheduler_config_);
 
     return engine;
 }
