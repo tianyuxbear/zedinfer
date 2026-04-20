@@ -148,8 +148,7 @@ std::shared_ptr<InferenceEngine> InferenceEngine::create(const std::string& mode
     // Create decode scratch buffers (pre-allocated for N=1 decode)
     {
         auto fwd_cfg = engine->model_->forward_config();
-        engine->decode_scratch_
-            = model::DecodeScratch::create(engine->model_->config(), fwd_cfg, engine->exec_config_);
+        engine->decode_scratch_ = model::DecodeScratch::create(engine->model_->config(), fwd_cfg, engine->exec_config_);
     }
 
     // Create profiler and run warmup (exercises paged attention kernels)

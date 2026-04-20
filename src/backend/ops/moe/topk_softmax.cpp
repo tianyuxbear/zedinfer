@@ -34,9 +34,7 @@ TopKResult topk_softmax(const float* logits, size_t N, size_t num_experts, size_
             sum_exp += probs[e];
         }
         const float inv_sum = 1.0f / sum_exp;
-        for (size_t e = 0; e < num_experts; ++e) {
-            probs[e] *= inv_sum;
-        }
+        for (size_t e = 0; e < num_experts; ++e) { probs[e] *= inv_sum; }
 
         // Pick top-k by probability.
         std::iota(indices.begin(), indices.end(), 0);
@@ -53,14 +51,10 @@ TopKResult topk_softmax(const float* logits, size_t N, size_t num_experts, size_
 
         if (norm_topk_prob && topk_sum > 0.0f) {
             const float inv_topk = 1.0f / topk_sum;
-            for (size_t k = 0; k < top_k; ++k) {
-                result.expert_weights[n * top_k + k] *= inv_topk;
-            }
+            for (size_t k = 0; k < top_k; ++k) { result.expert_weights[n * top_k + k] *= inv_topk; }
         }
 
-        for (size_t k = 0; k < top_k; ++k) {
-            result.expert_ids[n * top_k + k] = indices[k];
-        }
+        for (size_t k = 0; k < top_k; ++k) { result.expert_ids[n * top_k + k] = indices[k]; }
     }
 
     return result;

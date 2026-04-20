@@ -119,14 +119,23 @@ struct ModelForwardConfig {
             tensor_t packed = nullptr, scale = nullptr, g_idx = nullptr, weight = nullptr;
             switch (proj) {
                 case ExpertProj::Gate:
-                    packed = ffn.gate_packed; scale = ffn.gate_scale; g_idx = ffn.gate_g_idx;
-                    weight = ffn.gate_weight; break;
+                    packed = ffn.gate_packed;
+                    scale = ffn.gate_scale;
+                    g_idx = ffn.gate_g_idx;
+                    weight = ffn.gate_weight;
+                    break;
                 case ExpertProj::Up:
-                    packed = ffn.up_packed; scale = ffn.up_scale; g_idx = ffn.up_g_idx;
-                    weight = ffn.up_weight; break;
+                    packed = ffn.up_packed;
+                    scale = ffn.up_scale;
+                    g_idx = ffn.up_g_idx;
+                    weight = ffn.up_weight;
+                    break;
                 case ExpertProj::Down:
-                    packed = ffn.down_packed; scale = ffn.down_scale; g_idx = ffn.down_g_idx;
-                    weight = ffn.down_weight; break;
+                    packed = ffn.down_packed;
+                    scale = ffn.down_scale;
+                    g_idx = ffn.down_g_idx;
+                    weight = ffn.down_weight;
+                    break;
             }
             if (packed) {
                 ops::linear_quantized(out, in, packed, nullptr, scale, g_idx, config.quant_config.weights.num_bits,
@@ -134,15 +143,15 @@ struct ModelForwardConfig {
             } else if (weight) {
                 ops::linear(out, in, weight, nullptr);
             } else {
-                throw std::runtime_error("Expert FFN weights missing for layer " + std::to_string(layer)
-                                         + " expert " + std::to_string(expert_id));
+                throw std::runtime_error("Expert FFN weights missing for layer " + std::to_string(layer) + " expert "
+                                         + std::to_string(expert_id));
             }
             return;
         }
         // Fallback: string-based lookup.
         const char* proj_name = (proj == ExpertProj::Gate) ? "gate_proj"
                               : (proj == ExpertProj::Up)   ? "up_proj"
-                                                            : "down_proj";
+                                                           : "down_proj";
         dispatch_linear(out, in, expert_prefix(layer, expert_id) + proj_name, nullptr);
     }
 
@@ -158,9 +167,7 @@ struct ModelForwardConfig {
         return "layers." + std::to_string(layer) + ".mlp.shared_expert.";
     }
 
-    std::string router_weight_name(int layer) const {
-        return "layers." + std::to_string(layer) + ".mlp.gate.weight";
-    }
+    std::string router_weight_name(int layer) const { return "layers." + std::to_string(layer) + ".mlp.gate.weight"; }
 
     // QKV bias (nullptr if !has_qkv_bias)
     tensor_t q_bias(const std::string& p) const { return has_qkv_bias ? W(p + "self_attn.q_proj.bias") : nullptr; }

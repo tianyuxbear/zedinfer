@@ -41,15 +41,15 @@ void add_scaled(std::byte* out, const std::byte* a, float alpha, zedinferDataTyp
     switch (type) {
         case ZEDINFER_DTYPE_F32:
             add_scaled_kernel_f32<<<grid, block, 0, stream>>>(reinterpret_cast<float*>(out),
-                                                               reinterpret_cast<const float*>(a), alpha, numel);
+                                                              reinterpret_cast<const float*>(a), alpha, numel);
             break;
         case ZEDINFER_DTYPE_F16:
             add_scaled_kernel_f16<<<grid, block, 0, stream>>>(reinterpret_cast<half*>(out),
-                                                               reinterpret_cast<const half*>(a), alpha, numel);
+                                                              reinterpret_cast<const half*>(a), alpha, numel);
             break;
         case ZEDINFER_DTYPE_BF16:
             add_scaled_kernel_bf16<<<grid, block, 0, stream>>>(reinterpret_cast<cuda_bfloat16*>(out),
-                                                                reinterpret_cast<const cuda_bfloat16*>(a), alpha, numel);
+                                                               reinterpret_cast<const cuda_bfloat16*>(a), alpha, numel);
             break;
         default:
             EXCEPTION_UNSUPPORTED_DATATYPE(type);

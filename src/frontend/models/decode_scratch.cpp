@@ -73,8 +73,7 @@ std::unique_ptr<DecodeScratch> DecodeScratch::create(const ModelConfig& cfg, con
 
     // Dense MLP buffers: always allocate when model is purely dense, or when model has
     // mixed dense+sparse layers (decoder_sparse_step > 1 or mlp_only_layers non-empty).
-    bool has_dense_layers = !fwd_cfg.is_moe || fwd_cfg.decoder_sparse_step > 1
-                         || !fwd_cfg.mlp_only_layers.empty();
+    bool has_dense_layers = !fwd_cfg.is_moe || fwd_cfg.decoder_sparse_step > 1 || !fwd_cfg.mlp_only_layers.empty();
     if (has_dense_layers && inter > 0) {
         s->gate = mkf({1, inter});
         s->up = mkf({1, inter});

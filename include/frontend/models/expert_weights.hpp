@@ -37,7 +37,8 @@ struct ExpertFFN {
 class ExpertWeights {
 public:
     ExpertWeights(size_t num_layers, size_t num_experts_per_layer)
-        : num_layers_(num_layers), num_experts_per_layer_(num_experts_per_layer),
+        : num_layers_(num_layers),
+          num_experts_per_layer_(num_experts_per_layer),
           slots_(num_layers * num_experts_per_layer) {}
 
     ExpertFFN& at(size_t layer, size_t expert_id) { return slots_[layer * num_experts_per_layer_ + expert_id]; }

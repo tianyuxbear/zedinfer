@@ -499,8 +499,8 @@ static tensor_t transpose_gptq_scale(tensor_t scale, zedinferDataType_t model_dt
     size_t rows = scale->shape()[0];
     size_t cols = scale->shape()[1];
     zedinferDataType_t scale_dtype = scale->dtype();
-    bool need_convert = (scale_dtype != model_dtype)
-                     && (model_dtype == ZEDINFER_DTYPE_BF16 || model_dtype == ZEDINFER_DTYPE_F16);
+    bool need_convert
+        = (scale_dtype != model_dtype) && (model_dtype == ZEDINFER_DTYPE_BF16 || model_dtype == ZEDINFER_DTYPE_F16);
 
     auto transposed = Tensor::create({cols, rows}, need_convert ? model_dtype : scale_dtype, ZEDINFER_DEVICE_CPU);
     const std::byte* src = scale->data();

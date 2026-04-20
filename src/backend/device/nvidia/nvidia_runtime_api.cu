@@ -124,10 +124,10 @@ void getMemoryInfo(size_t* free, size_t* total) {
     cudaMemGetInfo(free, total);
 }
 
-static const ZedinferRuntimeAPI RUNTIME_API = {
-    &getDeviceCount,    &setDevice,       &deviceSynchronize, &createStream,      &destroyStream,
-    &streamSynchronize, &mallocDevice,    &freeDevice,        &mallocHost,        &freeHost,
-    &memcpySync,        &memcpyAsync,     &registerPinned,    &unregisterPinned,  &getMemoryInfo};
+static const ZedinferRuntimeAPI RUNTIME_API
+    = {&getDeviceCount,    &setDevice,    &deviceSynchronize, &createStream,     &destroyStream,
+       &streamSynchronize, &mallocDevice, &freeDevice,        &mallocHost,       &freeHost,
+       &memcpySync,        &memcpyAsync,  &registerPinned,    &unregisterPinned, &getMemoryInfo};
 
 } // namespace runtime_api
 

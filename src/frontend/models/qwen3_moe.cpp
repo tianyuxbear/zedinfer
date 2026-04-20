@@ -30,7 +30,7 @@ size_t detect_intermediate_size(const ModelWeights& weights, const std::string& 
 // Try to parse "layers.{L}.mlp.experts.{E}.{proj}.{suffix}" into components.
 // Returns true on match. proj is one of: gate_proj, up_proj, down_proj.
 bool parse_expert_tensor_name(const std::string& name, size_t& layer, size_t& expert_id, std::string& proj,
-                               std::string& suffix) {
+                              std::string& suffix) {
     static const std::string kPrefix = "layers.";
     static const std::string kMid = ".mlp.experts.";
     if (name.compare(0, kPrefix.size(), kPrefix) != 0) {
@@ -43,9 +43,7 @@ bool parse_expert_tensor_name(const std::string& name, size_t& layer, size_t& ex
     }
     try {
         layer = std::stoul(name.substr(pos, dot - pos));
-    } catch (...) {
-        return false;
-    }
+    } catch (...) { return false; }
     if (name.compare(dot, kMid.size(), kMid) != 0) {
         return false;
     }
@@ -56,9 +54,7 @@ bool parse_expert_tensor_name(const std::string& name, size_t& layer, size_t& ex
     }
     try {
         expert_id = std::stoul(name.substr(pos, dot - pos));
-    } catch (...) {
-        return false;
-    }
+    } catch (...) { return false; }
     pos = dot + 1;
     dot = name.find('.', pos);
     if (dot == std::string::npos) {
@@ -76,20 +72,35 @@ bool parse_expert_tensor_name(const std::string& name, size_t& layer, size_t& ex
 void assign_expert_tensor(ExpertFFN& ffn, const std::string& proj, const std::string& suffix, tensor_t tensor) {
     tensor_t* target = nullptr;
     if (proj == "gate_proj") {
-        if (suffix == "weight_packed") target = &ffn.gate_packed;
-        else if (suffix == "weight_scale") target = &ffn.gate_scale;
-        else if (suffix == "weight_g_idx") target = &ffn.gate_g_idx;
-        else if (suffix == "weight") target = &ffn.gate_weight;
+        if (suffix == "weight_packed") {
+            target = &ffn.gate_packed;
+        } else if (suffix == "weight_scale") {
+            target = &ffn.gate_scale;
+        } else if (suffix == "weight_g_idx") {
+            target = &ffn.gate_g_idx;
+        } else if (suffix == "weight") {
+            target = &ffn.gate_weight;
+        }
     } else if (proj == "up_proj") {
-        if (suffix == "weight_packed") target = &ffn.up_packed;
-        else if (suffix == "weight_scale") target = &ffn.up_scale;
-        else if (suffix == "weight_g_idx") target = &ffn.up_g_idx;
-        else if (suffix == "weight") target = &ffn.up_weight;
+        if (suffix == "weight_packed") {
+            target = &ffn.up_packed;
+        } else if (suffix == "weight_scale") {
+            target = &ffn.up_scale;
+        } else if (suffix == "weight_g_idx") {
+            target = &ffn.up_g_idx;
+        } else if (suffix == "weight") {
+            target = &ffn.up_weight;
+        }
     } else if (proj == "down_proj") {
-        if (suffix == "weight_packed") target = &ffn.down_packed;
-        else if (suffix == "weight_scale") target = &ffn.down_scale;
-        else if (suffix == "weight_g_idx") target = &ffn.down_g_idx;
-        else if (suffix == "weight") target = &ffn.down_weight;
+        if (suffix == "weight_packed") {
+            target = &ffn.down_packed;
+        } else if (suffix == "weight_scale") {
+            target = &ffn.down_scale;
+        } else if (suffix == "weight_g_idx") {
+            target = &ffn.down_g_idx;
+        } else if (suffix == "weight") {
+            target = &ffn.down_weight;
+        }
     }
     if (target) {
         *target = std::move(tensor);
@@ -115,9 +126,7 @@ std::unique_ptr<ExpertWeights> extract_expert_weights(ModelWeights& weights, siz
         to_remove.push_back(name);
     }
 
-    for (const auto& name : to_remove) {
-        weights.remove_tensor(name);
-    }
+    for (const auto& name : to_remove) { weights.remove_tensor(name); }
 
     LOGI.printf("[Qwen3MoE] Extracted %zu expert tensors into ExpertWeights [%zu layers × %zu experts]",
                 to_remove.size(), num_layers, num_experts_per_layer);
@@ -161,9 +170,8 @@ ModelForwardConfig Qwen3MoEModel::forward_config() const {
         = (detected_shared > 0) ? detected_shared : config_.shared_expert_intermediate_size;
 
     // Shared expert is uniform across layers: check layer 0 once.
-    cfg.has_shared_expert
-        = weights_->has_tensor("layers.0.mlp.shared_expert.gate_proj.weight")
-       || weights_->has_tensor("layers.0.mlp.shared_expert.gate_proj.weight_packed");
+    cfg.has_shared_expert = weights_->has_tensor("layers.0.mlp.shared_expert.gate_proj.weight")
+                         || weights_->has_tensor("layers.0.mlp.shared_expert.gate_proj.weight_packed");
 
     if (detected_moe > 0 && detected_moe != config_.moe_intermediate_size) {
         LOGI.printf("[Qwen3MoE] Detected moe_intermediate_size=%zu from weights (config=%zu)", detected_moe,
@@ -185,10 +193,12 @@ size_t Qwen3MoEModel::calculate_num_parameters() const {
         for (size_t l = 0; l < expert_weights_->num_layers(); ++l) {
             for (size_t e = 0; e < expert_weights_->num_experts_per_layer(); ++e) {
                 const auto& ffn = expert_weights_->at(l, e);
-                for (auto t : {ffn.gate_packed, ffn.gate_scale, ffn.gate_g_idx, ffn.gate_weight, ffn.up_packed,
-                                ffn.up_scale, ffn.up_g_idx, ffn.up_weight, ffn.down_packed, ffn.down_scale,
-                                ffn.down_g_idx, ffn.down_weight}) {
-                    if (t) total += t->numel();
+                for (auto t :
+                     {ffn.gate_packed, ffn.gate_scale, ffn.gate_g_idx, ffn.gate_weight, ffn.up_packed, ffn.up_scale,
+                      ffn.up_g_idx, ffn.up_weight, ffn.down_packed, ffn.down_scale, ffn.down_g_idx, ffn.down_weight}) {
+                    if (t) {
+                        total += t->numel();
+                    }
                 }
             }
         }

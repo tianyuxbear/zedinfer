@@ -17,7 +17,7 @@ using MakeTensor = std::function<tensor_t(std::vector<size_t>)>;
 
 // Compute router logits on device, then bring them to host as F32 for top-k selection.
 static ops::moe::TopKResult compute_router_topk(const ModelForwardConfig& model, tensor_t input, int layer_idx,
-                                                 tensor_t router_logits_buf, size_t top_k) {
+                                                tensor_t router_logits_buf, size_t top_k) {
     const size_t N = input->shape()[0];
     const size_t num_experts = model.num_experts;
 
@@ -44,7 +44,7 @@ static ops::moe::TopKResult compute_router_topk(const ModelForwardConfig& model,
         cpu = cpu->to(ZEDINFER_DTYPE_F32);
     }
     return ops::moe::topk_softmax(reinterpret_cast<const float*>(cpu->data()), N, num_experts, top_k,
-                                   model.norm_topk_prob);
+                                  model.norm_topk_prob);
 }
 
 // Execute the N=1 decode path: loop over top-k experts, weighted accumulation into moe_output.
@@ -131,8 +131,7 @@ static void moe_prefill(const ModelForwardConfig& model, tensor_t moe_output, te
 
         // Scatter weighted rows back.
         for (size_t i = 0; i < group_size; ++i) {
-            auto out_row = moe_output->slice(0, static_cast<int64_t>(tokens[i]),
-                                              static_cast<int64_t>(tokens[i]) + 1);
+            auto out_row = moe_output->slice(0, static_cast<int64_t>(tokens[i]), static_cast<int64_t>(tokens[i]) + 1);
             auto down_row = g_down->slice(0, static_cast<int64_t>(i), static_cast<int64_t>(i) + 1);
             ops::add_scaled(out_row, down_row, expert_weights[eid][i]);
         }
@@ -143,7 +142,7 @@ static void moe_prefill(const ModelForwardConfig& model, tensor_t moe_output, te
 // Writes final result (moe_output + shared) into `output`.
 // If no shared expert exists for this layer, copies moe_output to output.
 static void apply_shared_expert(const ModelForwardConfig& model, tensor_t output, tensor_t moe_output, tensor_t input,
-                                 int layer_idx, DecodeScratch* scratch, const MakeTensor& make) {
+                                int layer_idx, DecodeScratch* scratch, const MakeTensor& make) {
     const size_t N = input->shape()[0];
     const size_t hidden_size = model.config.hidden_size;
     const size_t shared_inter = model.shared_expert_intermediate_size;

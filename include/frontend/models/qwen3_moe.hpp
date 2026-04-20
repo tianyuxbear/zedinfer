@@ -17,8 +17,8 @@ struct Qwen3MoEConfig : public ModelConfig {
     size_t num_experts_per_tok = 8;
     size_t moe_intermediate_size = 1536;
     size_t shared_expert_intermediate_size = 4096;
-    size_t decoder_sparse_step = 1;       // every Nth layer is sparse (MoE); default 1 = all MoE
-    std::vector<int> mlp_only_layers;     // layers forced to dense MLP (override sparse_step)
+    size_t decoder_sparse_step = 1;   // every Nth layer is sparse (MoE); default 1 = all MoE
+    std::vector<int> mlp_only_layers; // layers forced to dense MLP (override sparse_step)
     bool norm_topk_prob = true;
 
     // Attention fields (shared with Qwen3)
