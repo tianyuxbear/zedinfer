@@ -2,7 +2,7 @@
 
 #include "backend/ops/ops.hpp"
 #include "frontend/models/base.hpp"
-#include "frontend/models/expert_weights.hpp"
+#include "frontend/models/expert_pool.hpp"
 
 #include <stdexcept>
 #include <string>
@@ -48,8 +48,8 @@ struct ModelForwardConfig {
     bool norm_topk_prob = false;
     size_t decoder_sparse_step = 1;
     std::vector<int> mlp_only_layers;
-    bool has_shared_expert = false;         // uniform across all MoE layers (checked at init)
-    const ExpertWeights* experts = nullptr; // indexed expert storage, set by MoE models
+    bool has_shared_expert = false;  // uniform across all MoE layers (checked at init)
+    ExpertPool* expert_pool = nullptr; // manages GPU residency of expert weights
 
     bool is_moe_layer(size_t layer_idx) const {
         if (!is_moe) {
@@ -110,49 +110,46 @@ struct ModelForwardConfig {
         ops::linear(out, in, W(prefix + ".weight"), bias);
     }
 
-    // Dispatch an expert FFN projection via indexed ExpertWeights (fast path) or fall back
-    // to string-based weight lookup. Phase 2 (expert offloading) will hook into the
-    // indexed path to check/trigger GPU residency before dispatch.
+    // Dispatch an expert FFN projection through the ExpertPool. The pool returns a handle
+    // whose tensors are guaranteed on the compute device at return time:
+    //   - M1 (ALL_GPU): trivial lookup, no transfer
+    //   - M2 (PINNED_LRU, sync): ensure_on_gpu may block on cudaMemcpy
+    //   - M3 (PINNED_LRU, async): ensure_on_gpu inserts cudaStreamWaitEvent on compute stream
     void dispatch_expert_linear(tensor_t out, tensor_t in, int layer, int expert_id, ExpertProj proj) const {
-        if (experts) {
-            const auto& ffn = experts->at(layer, expert_id);
-            tensor_t packed = nullptr, scale = nullptr, g_idx = nullptr, weight = nullptr;
-            switch (proj) {
-                case ExpertProj::Gate:
-                    packed = ffn.gate_packed;
-                    scale = ffn.gate_scale;
-                    g_idx = ffn.gate_g_idx;
-                    weight = ffn.gate_weight;
-                    break;
-                case ExpertProj::Up:
-                    packed = ffn.up_packed;
-                    scale = ffn.up_scale;
-                    g_idx = ffn.up_g_idx;
-                    weight = ffn.up_weight;
-                    break;
-                case ExpertProj::Down:
-                    packed = ffn.down_packed;
-                    scale = ffn.down_scale;
-                    g_idx = ffn.down_g_idx;
-                    weight = ffn.down_weight;
-                    break;
-            }
-            if (packed) {
-                ops::linear_quantized(out, in, packed, nullptr, scale, g_idx, config.quant_config.weights.num_bits,
-                                      config.quant_config.weights.group_size);
-            } else if (weight) {
-                ops::linear(out, in, weight, nullptr);
-            } else {
-                throw std::runtime_error("Expert FFN weights missing for layer " + std::to_string(layer) + " expert "
-                                         + std::to_string(expert_id));
-            }
-            return;
+        if (!expert_pool) {
+            throw std::runtime_error("dispatch_expert_linear called without expert_pool set");
         }
-        // Fallback: string-based lookup.
-        const char* proj_name = (proj == ExpertProj::Gate) ? "gate_proj"
-                              : (proj == ExpertProj::Up)   ? "up_proj"
-                                                           : "down_proj";
-        dispatch_linear(out, in, expert_prefix(layer, expert_id) + proj_name, nullptr);
+        auto h = expert_pool->ensure_on_gpu(layer, expert_id);
+        tensor_t packed = nullptr, scale = nullptr, g_idx = nullptr, weight = nullptr;
+        switch (proj) {
+            case ExpertProj::Gate:
+                packed = h.gate_packed;
+                scale = h.gate_scale;
+                g_idx = h.gate_g_idx;
+                weight = h.gate_weight;
+                break;
+            case ExpertProj::Up:
+                packed = h.up_packed;
+                scale = h.up_scale;
+                g_idx = h.up_g_idx;
+                weight = h.up_weight;
+                break;
+            case ExpertProj::Down:
+                packed = h.down_packed;
+                scale = h.down_scale;
+                g_idx = h.down_g_idx;
+                weight = h.down_weight;
+                break;
+        }
+        if (packed) {
+            ops::linear_quantized(out, in, packed, nullptr, scale, g_idx, config.quant_config.weights.num_bits,
+                                  config.quant_config.weights.group_size);
+        } else if (weight) {
+            ops::linear(out, in, weight, nullptr);
+        } else {
+            throw std::runtime_error("Expert FFN weights missing for layer " + std::to_string(layer) + " expert "
+                                     + std::to_string(expert_id));
+        }
     }
 
     // Layer weight prefix

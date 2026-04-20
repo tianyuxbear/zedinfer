@@ -1,7 +1,7 @@
 #pragma once
 
 #include "frontend/models/base.hpp"
-#include "frontend/models/expert_weights.hpp"
+#include "frontend/models/expert_pool.hpp"
 #include "frontend/models/forward_config.hpp"
 
 #include <memory>
@@ -32,7 +32,7 @@ public:
 
     const Qwen3MoEConfig& config() const override { return config_; }
     const ModelWeights& weights() const override { return *weights_; }
-    const ExpertWeights& expert_weights() const { return *expert_weights_; }
+    ExpertPool& expert_pool() const { return *expert_pool_; }
     std::string model_type() const override { return "qwen3_moe"; }
     size_t num_parameters() const override { return num_params_; }
 
@@ -43,7 +43,7 @@ private:
 
     Qwen3MoEConfig config_;
     std::unique_ptr<ModelWeights> weights_;
-    std::unique_ptr<ExpertWeights> expert_weights_;
+    std::unique_ptr<ExpertPool> expert_pool_;
     size_t num_params_;
 };
 

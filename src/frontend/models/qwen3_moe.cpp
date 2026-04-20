@@ -137,7 +137,9 @@ std::unique_ptr<ExpertWeights> extract_expert_weights(ModelWeights& weights, siz
 
 Qwen3MoEModel::Qwen3MoEModel(Qwen3MoEConfig& config, std::unique_ptr<ModelWeights> weights)
     : config_(config), weights_(std::move(weights)) {
-    expert_weights_ = extract_expert_weights(*weights_, config_.num_hidden_layers, config_.num_experts);
+    auto experts = extract_expert_weights(*weights_, config_.num_hidden_layers, config_.num_experts);
+    ExpertPoolConfig pool_cfg; // defaults: ALL_GPU
+    expert_pool_ = std::make_unique<ExpertPool>(std::move(experts), pool_cfg);
     num_params_ = calculate_num_parameters();
 }
 
@@ -151,17 +153,18 @@ ModelForwardConfig Qwen3MoEModel::forward_config() const {
     cfg.norm_topk_prob = config_.norm_topk_prob;
     cfg.decoder_sparse_step = config_.decoder_sparse_step;
     cfg.mlp_only_layers = config_.mlp_only_layers;
-    cfg.experts = expert_weights_.get();
+    cfg.expert_pool = expert_pool_.get();
 
     // Detect actual expert intermediate sizes from weight shapes (via first expert's shape).
     size_t detected_moe = 0;
     size_t detected_shared = detect_intermediate_size(*weights_, "layers.0.mlp.shared_expert.");
-    if (expert_weights_ && expert_weights_->num_layers() > 0) {
-        const auto& first = expert_weights_->at(0, 0);
-        if (first.gate_packed) {
-            detected_moe = first.gate_packed->shape()[0];
-        } else if (first.gate_weight) {
-            detected_moe = first.gate_weight->shape()[0];
+    if (expert_pool_ && expert_pool_->num_layers() > 0) {
+        // Peek at layer 0 expert 0 via ensure_on_gpu (no-op under ALL_GPU; just returns a handle).
+        auto h = expert_pool_->ensure_on_gpu(0, 0);
+        if (h.gate_packed) {
+            detected_moe = h.gate_packed->shape()[0];
+        } else if (h.gate_weight) {
+            detected_moe = h.gate_weight->shape()[0];
         }
     }
 
@@ -188,14 +191,13 @@ ModelForwardConfig Qwen3MoEModel::forward_config() const {
 size_t Qwen3MoEModel::calculate_num_parameters() const {
     size_t total = 0;
     for (const auto& [name, tensor] : weights_->get_all_weights()) { total += tensor->numel(); }
-    // Also count expert tensors (moved out of weights_).
-    if (expert_weights_) {
-        for (size_t l = 0; l < expert_weights_->num_layers(); ++l) {
-            for (size_t e = 0; e < expert_weights_->num_experts_per_layer(); ++e) {
-                const auto& ffn = expert_weights_->at(l, e);
-                for (auto t :
-                     {ffn.gate_packed, ffn.gate_scale, ffn.gate_g_idx, ffn.gate_weight, ffn.up_packed, ffn.up_scale,
-                      ffn.up_g_idx, ffn.up_weight, ffn.down_packed, ffn.down_scale, ffn.down_g_idx, ffn.down_weight}) {
+    // Also count expert tensors (held inside the pool).
+    if (expert_pool_) {
+        for (size_t l = 0; l < expert_pool_->num_layers(); ++l) {
+            for (size_t e = 0; e < expert_pool_->num_experts_per_layer(); ++e) {
+                auto h = expert_pool_->ensure_on_gpu(static_cast<int>(l), static_cast<int>(e));
+                for (auto t : {h.gate_packed, h.gate_scale, h.gate_g_idx, h.gate_weight, h.up_packed, h.up_scale,
+                               h.up_g_idx, h.up_weight, h.down_packed, h.down_scale, h.down_g_idx, h.down_weight}) {
                     if (t) {
                         total += t->numel();
                     }
