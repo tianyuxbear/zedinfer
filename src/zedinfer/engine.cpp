@@ -18,6 +18,7 @@
 #include <iomanip>
 #include <limits>
 #include <plog/Log.h>
+#include <sstream>
 #include <stdexcept>
 
 namespace zedinfer {
@@ -497,10 +498,22 @@ void InferenceEngine::init_block_pool() {
     size_t block_bytes = block_config.block_bytes();
     int num_blocks = static_cast<int>(kv_budget / (2 * block_bytes));
 
+    auto fail = [&](const std::string& detail) {
+        std::ostringstream oss;
+        oss << "[Engine] Cannot allocate KV page pool: " << detail << ". "
+            << "total=" << total_bytes / (1024 * 1024) << " MB, "
+            << "free=" << free_bytes / (1024 * 1024) << " MB, "
+            << "used=" << used_bytes / (1024 * 1024) << " MB, "
+            << "allowed=" << allowed_bytes / (1024 * 1024) << " MB "
+            << "(gpu_memory_utilization=" << scheduler_config_.gpu_memory_utilization << "), "
+            << "budget=" << kv_budget / (1024 * 1024) << " MB, "
+            << "per-block=" << (2 * block_bytes) / 1024 << " KB. "
+            << "Retry with a larger --gpu-memory-utilization or free VRAM before launch.";
+        throw std::runtime_error(oss.str());
+    };
+
     if (num_blocks <= 0) {
-        LOGW << "[Engine] Not enough memory for block pool";
-        scheduler_config_.use_paged_kvcache = false;
-        return;
+        fail("budget is smaller than a single block");
     }
 
     LOGI << "[Engine] Creating KV page pool: " << num_blocks << " shared pages x " << block_config.block_size
@@ -522,9 +535,7 @@ void InferenceEngine::init_block_pool() {
     }
 
     if (!block_pool_) {
-        LOGW << "[Engine] Unable to allocate any KV page pool";
-        scheduler_config_.use_paged_kvcache = false;
-        return;
+        fail("all allocation retries exhausted");
     }
 
     if (try_blocks != num_blocks) {
