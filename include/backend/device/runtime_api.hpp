@@ -14,6 +14,14 @@ typedef zedinferStream_t (*create_stream_api)();
 typedef void (*destroy_stream_api)(zedinferStream_t);
 typedef void (*stream_synchronize_api)(zedinferStream_t);
 
+// Event management for cross-stream synchronization (Phase 2 M3 async prefetch).
+// On NVIDIA: wraps cudaEventCreateWithFlags / cudaEventRecord / cudaStreamWaitEvent /
+// cudaEventDestroy. No-op / nullptr on CPU where everything is already synchronous.
+typedef zedinferEvent_t (*create_event_api)();
+typedef void (*destroy_event_api)(zedinferEvent_t);
+typedef void (*record_event_api)(zedinferEvent_t, zedinferStream_t);
+typedef void (*stream_wait_event_api)(zedinferStream_t, zedinferEvent_t);
+
 // Device/host memory allocation
 typedef void* (*malloc_device_api)(size_t);
 typedef void (*free_device_api)(void*);
@@ -44,6 +52,12 @@ typedef struct ZedinferRuntimeAPI {
     create_stream_api create_stream;
     destroy_stream_api destroy_stream;
     stream_synchronize_api stream_synchronize;
+
+    // Event (M3: cross-stream sync between transfer and compute)
+    create_event_api create_event;
+    destroy_event_api destroy_event;
+    record_event_api record_event;
+    stream_wait_event_api stream_wait_event;
 
     // Memory
     malloc_device_api malloc_device;

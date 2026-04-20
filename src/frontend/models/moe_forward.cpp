@@ -4,6 +4,7 @@
 #include "backend/ops/ops.hpp"
 #include "frontend/models/decode_scratch.hpp"
 
+#include <algorithm>
 #include <functional>
 #include <plog/Log.h>
 #include <vector>
@@ -52,6 +53,18 @@ static ops::moe::TopKResult compute_router_topk(const ModelForwardConfig& model,
 static void moe_decode(const ModelForwardConfig& model, tensor_t moe_output, tensor_t input, int layer_idx,
                        const ops::moe::TopKResult& topk, DecodeScratch& scratch) {
     const size_t top_k = model.num_experts_per_tok;
+
+    // M3 async prefetch: kick off H2D for every selected expert on the transfer stream
+    // before the compute loop starts. Under ALL_GPU this is a no-op; under PINNED_LRU
+    // the compute loop then mostly hits with already-populated slots, overlapping the
+    // remaining H2Ds with previous experts' GEMMs. Order matches compute order so the
+    // transfer stream's FIFO delivers e0 first, e1 second, etc.
+    if (model.expert_pool) {
+        for (size_t k = 0; k < top_k; ++k) {
+            model.expert_pool->prefetch(layer_idx, topk.expert_ids[k]);
+        }
+    }
+
     for (size_t k = 0; k < top_k; ++k) {
         int expert_id = topk.expert_ids[k];
         float weight = topk.expert_weights[k];
@@ -100,12 +113,34 @@ static void moe_prefill(const ModelForwardConfig& model, tensor_t moe_output, te
     auto kind = (input->deviceType() == ZEDINFER_DEVICE_CPU) ? ZEDINFER_MEMCPY_H2H : ZEDINFER_MEMCPY_D2D;
     const size_t row_bytes = hidden_size * input->elementSize();
 
+    // Materialize the active-expert ordering used by both the prefetcher and the
+    // compute loop below, so indexing matches between the two.
+    std::vector<size_t> active_experts;
+    active_experts.reserve(num_experts);
     for (size_t eid = 0; eid < num_experts; ++eid) {
-        const auto& tokens = expert_tokens[eid];
-        if (tokens.empty()) {
-            continue;
+        if (!expert_tokens[eid].empty()) {
+            active_experts.push_back(eid);
         }
+    }
 
+    // M3.5 sliding-window prefetch. Keep `depth` transfers outstanding on the transfer
+    // stream: first issue an initial burst of min(depth, active_experts.size()) calls,
+    // then after each compute iteration issue one more so the window stays saturated.
+    // Depth is capped at the per-layer slot count so prefetches don't evict each other
+    // before compute consumes them. Under ALL_GPU depth==0 and all prefetch calls are
+    // no-ops.
+    const int depth = (model.expert_pool != nullptr) ? model.expert_pool->max_prefetch_depth() : 0;
+    size_t prefetched_upto = 0;
+    if (depth > 0) {
+        const size_t burst = std::min(static_cast<size_t>(depth), active_experts.size());
+        for (; prefetched_upto < burst; ++prefetched_upto) {
+            model.expert_pool->prefetch(layer_idx, static_cast<int>(active_experts[prefetched_upto]));
+        }
+    }
+
+    for (size_t idx = 0; idx < active_experts.size(); ++idx) {
+        const size_t eid = active_experts[idx];
+        const auto& tokens = expert_tokens[eid];
         size_t group_size = tokens.size();
 
         // Views for this expert's group size (contiguous: slicing dim 0 from 0).
@@ -134,6 +169,12 @@ static void moe_prefill(const ModelForwardConfig& model, tensor_t moe_output, te
             auto out_row = moe_output->slice(0, static_cast<int64_t>(tokens[i]), static_cast<int64_t>(tokens[i]) + 1);
             auto down_row = g_down->slice(0, static_cast<int64_t>(i), static_cast<int64_t>(i) + 1);
             ops::add_scaled(out_row, down_row, expert_weights[eid][i]);
+        }
+
+        // Slide the prefetch window forward: pull in the expert `depth` steps ahead.
+        if (depth > 0 && prefetched_upto < active_experts.size()) {
+            model.expert_pool->prefetch(layer_idx, static_cast<int>(active_experts[prefetched_upto]));
+            ++prefetched_upto;
         }
     }
 }

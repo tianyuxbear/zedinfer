@@ -21,6 +21,11 @@
 typedef void* zedinferStream_t;
 
 /**
+ * @brief Event handle for cross-stream synchronization (e.g. H2D prefetch → compute).
+ */
+typedef void* zedinferEvent_t;
+
+/**
  * @brief Device types.
  */
 typedef enum {

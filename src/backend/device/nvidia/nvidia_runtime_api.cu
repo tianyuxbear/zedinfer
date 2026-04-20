@@ -42,6 +42,28 @@ void streamSynchronize(zedinferStream_t stream) {
     }
 }
 
+zedinferEvent_t createEvent() {
+    cudaEvent_t event;
+    // cudaEventDisableTiming: we only use events for stream-to-stream ordering,
+    // not for elapsed-time measurement. Skipping timing cuts per-event overhead.
+    cudaEventCreateWithFlags(&event, cudaEventDisableTiming);
+    return reinterpret_cast<zedinferEvent_t>(event);
+}
+
+void destroyEvent(zedinferEvent_t event) {
+    if (event != nullptr) {
+        cudaEventDestroy(reinterpret_cast<cudaEvent_t>(event));
+    }
+}
+
+void recordEvent(zedinferEvent_t event, zedinferStream_t stream) {
+    cudaEventRecord(reinterpret_cast<cudaEvent_t>(event), reinterpret_cast<cudaStream_t>(stream));
+}
+
+void streamWaitEvent(zedinferStream_t stream, zedinferEvent_t event) {
+    cudaStreamWaitEvent(reinterpret_cast<cudaStream_t>(stream), reinterpret_cast<cudaEvent_t>(event), 0);
+}
+
 void* mallocDevice(size_t size) {
     void* ptr = nullptr;
     cudaMalloc(&ptr, size);
@@ -124,10 +146,25 @@ void getMemoryInfo(size_t* free, size_t* total) {
     cudaMemGetInfo(free, total);
 }
 
-static const ZedinferRuntimeAPI RUNTIME_API
-    = {&getDeviceCount,    &setDevice,    &deviceSynchronize, &createStream,     &destroyStream,
-       &streamSynchronize, &mallocDevice, &freeDevice,        &mallocHost,       &freeHost,
-       &memcpySync,        &memcpyAsync,  &registerPinned,    &unregisterPinned, &getMemoryInfo};
+static const ZedinferRuntimeAPI RUNTIME_API = {&getDeviceCount,
+                                               &setDevice,
+                                               &deviceSynchronize,
+                                               &createStream,
+                                               &destroyStream,
+                                               &streamSynchronize,
+                                               &createEvent,
+                                               &destroyEvent,
+                                               &recordEvent,
+                                               &streamWaitEvent,
+                                               &mallocDevice,
+                                               &freeDevice,
+                                               &mallocHost,
+                                               &freeHost,
+                                               &memcpySync,
+                                               &memcpyAsync,
+                                               &registerPinned,
+                                               &unregisterPinned,
+                                               &getMemoryInfo};
 
 } // namespace runtime_api
 

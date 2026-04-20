@@ -33,6 +33,16 @@ void streamSynchronize(zedinferStream_t stream) {
     ASSERT(stream == nullptr, "CPU does not support explicit streams");
 }
 
+zedinferEvent_t createEvent() {
+    return nullptr; // CPU is synchronous; events are a no-op.
+}
+
+void destroyEvent(zedinferEvent_t /*event*/) {}
+
+void recordEvent(zedinferEvent_t /*event*/, zedinferStream_t /*stream*/) {}
+
+void streamWaitEvent(zedinferStream_t /*stream*/, zedinferEvent_t /*event*/) {}
+
 void* mallocDevice(size_t size) {
     return std::malloc(size);
 }
@@ -77,10 +87,25 @@ void getMemoryInfo(size_t* free, size_t* total) {
     }
 }
 
-static const ZedinferRuntimeAPI RUNTIME_API
-    = {&getDeviceCount,    &setDevice,    &deviceSynchronize, &createStream,     &destroyStream,
-       &streamSynchronize, &mallocDevice, &freeDevice,        &mallocHost,       &freeHost,
-       &memcpySync,        &memcpyAsync,  &registerPinned,    &unregisterPinned, &getMemoryInfo};
+static const ZedinferRuntimeAPI RUNTIME_API = {&getDeviceCount,
+                                               &setDevice,
+                                               &deviceSynchronize,
+                                               &createStream,
+                                               &destroyStream,
+                                               &streamSynchronize,
+                                               &createEvent,
+                                               &destroyEvent,
+                                               &recordEvent,
+                                               &streamWaitEvent,
+                                               &mallocDevice,
+                                               &freeDevice,
+                                               &mallocHost,
+                                               &freeHost,
+                                               &memcpySync,
+                                               &memcpyAsync,
+                                               &registerPinned,
+                                               &unregisterPinned,
+                                               &getMemoryInfo};
 
 } // namespace runtime_api
 

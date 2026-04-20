@@ -1,6 +1,7 @@
 #pragma once
 
 #include "frontend/models/expert_weights.hpp"
+#include "zedinfer.h"
 
 #include <cstdint>
 #include <memory>
@@ -94,6 +95,12 @@ public:
     size_t num_layers() const { return experts_->num_layers(); }
     size_t num_experts_per_layer() const { return experts_->num_experts_per_layer(); }
     ExpertPoolStrategy strategy() const { return config_.strategy; }
+    // Maximum number of experts callers can usefully prefetch before compute consumes
+    // them. Under ALL_GPU returns 0 (no-op prefetch). Under PINNED_LRU returns the
+    // per-layer slot count.
+    int max_prefetch_depth() const {
+        return config_.strategy == ExpertPoolStrategy::PINNED_LRU ? config_.num_gpu_slots : 0;
+    }
 
     // Emit cumulative hit/miss stats to file + console. Idempotent — only the first
     // call on a given pool instance actually logs. Safe to call from a destructor or
@@ -108,7 +115,28 @@ private:
         int expert_id = -1;          // -1 when slot is empty
         std::uint64_t last_access = 0;
         ExpertGpuHandle gpu_handle;  // persistent GPU tensors; data is overwritten on miss
+        zedinferEvent_t ready_event = nullptr;  // M3: set by transfer stream after async H2D
+        // M3.5: false after a prefetch populates the slot; flipped to true the first time
+        // ensure_on_gpu hands this slot back to compute. LRU victim search skips slots
+        // that are populated but not yet compute_touched (in-flight prefetches that compute
+        // still expects to see). Prevents the sliding-window prefetcher from stomping on
+        // its own unconsumed data.
+        bool compute_touched = false;
     };
+
+    // Internal helpers shared by ensure_on_gpu (miss path) and prefetch.
+    // Both pick an LRU slot and issue an async H2D on the transfer stream; they
+    // differ only in whether compute stream waits on the resulting ready_event.
+    //
+    // pick_lru_slot returns the LRU slot among those safe to evict: empty slots or
+    // slots whose current expert has already been handed to compute. Pending-prefetch
+    // slots (populated, not yet compute_touched) are skipped. Returns -1 when every
+    // slot is a pending prefetch — caller decides whether to skip (prefetch) or fall
+    // back to any-LRU (miss path, must make forward progress).
+    int pick_lru_slot(std::size_t layer) const;
+    // Issue the async H2D and record the slot's ready_event. Caller updates
+    // residency/LRU. Does NOT emit stream_wait_event on compute.
+    void start_async_transfer(std::size_t layer, std::size_t expert_id, std::size_t slot_idx);
 
     std::unique_ptr<ExpertWeights> experts_;
     ExpertPoolConfig config_;
@@ -122,6 +150,15 @@ private:
     std::uint64_t hits_ = 0;
     std::uint64_t misses_ = 0;
     mutable bool stats_logged_ = false;  // mutated by const log_stats()
+
+    // Global "compute has reached here" barrier. Recorded on the compute stream
+    // right before a miss evicts a slot; the transfer stream waits on it before
+    // overwriting that slot. Ensures async H2D never clobbers in-flight GEMMs.
+    // One event is enough because we only need "some point past all prior compute";
+    // conservative (transfer waits for all compute, not just slot-relevant), but
+    // correct and cheap. Overlap between prefetched transfers and compute still
+    // happens because the transfer stream processes multiple H2Ds in order.
+    zedinferEvent_t compute_barrier_ = nullptr;
 };
 
 } // namespace zedinfer::model

@@ -132,19 +132,37 @@ ExpertPool::ExpertPool(std::unique_ptr<ExpertWeights> experts, ExpertPoolConfig 
         slots_[l].resize(static_cast<size_t>(N));
         for (int s = 0; s < N; ++s) {
             slots_[l][s].gpu_handle = allocate_slot_tensors(tmpl, gpu_type, gpu_id);
+            // Per-slot event used by M3 to sync async H2D with compute. Created here
+            // so the cost is paid once at init, not per transfer. No-op on CPU backend.
+            slots_[l][s].ready_event = api->create_event();
         }
     }
+    // Single compute-stream barrier event; see field comment for rationale.
+    compute_barrier_ = api->create_event();
 
     LOGI.printf("[ExpertPool] strategy=PINNED_LRU, %zu layers × %zu experts, %d GPU slots/layer", L, E, N);
 }
 
 ExpertPool::~ExpertPool() {
-    // Fallback hook: emit stats here if no one called log_stats() explicitly. Today
-    // the destructor does not run for pings due to a shared_ptr cycle in
-    // InferenceEngine (see moe_session_handoff.md §3); callers should invoke
-    // log_stats() explicitly. Kept here so the log still appears once that cycle
-    // is fixed.
+    // Emit stats first while the pool's fields are still valid (log_stats is const
+    // and only reads counters; safe either way but avoids ambiguity).
     log_stats();
+
+    // Release events created in the PINNED_LRU ctor path. No-op on ALL_GPU
+    // (slots_ is empty, compute_barrier_ is null) and on CPU backend (all events nullptr).
+    auto* api = core::context().runtime().api();
+    for (auto& layer_slots : slots_) {
+        for (auto& slot : layer_slots) {
+            if (slot.ready_event) {
+                api->destroy_event(slot.ready_event);
+                slot.ready_event = nullptr;
+            }
+        }
+    }
+    if (compute_barrier_) {
+        api->destroy_event(compute_barrier_);
+        compute_barrier_ = nullptr;
+    }
 }
 
 void ExpertPool::log_stats() const {
@@ -178,45 +196,104 @@ ExpertGpuHandle ExpertPool::ensure_on_gpu(int layer, int expert_id) {
         return h;
     }
 
-    // PINNED_LRU: per-layer slot arena with LRU eviction + synchronous H2D on miss.
+    // PINNED_LRU: per-layer slot arena with LRU eviction + async H2D on miss.
     const size_t L = static_cast<size_t>(layer);
     const size_t E = static_cast<size_t>(expert_id);
     auto& residents = residency_[L];
     auto& layer_slots = slots_[L];
     auto& counter = access_counter_[L];
+    auto* api = core::context().runtime().api();
+    auto compute_stream = core::context().runtime().stream();
 
     const int cached = residents[E];
     if (cached >= 0) {
-        // Hit: refresh LRU timestamp and return the existing handle.
+        // Hit: refresh LRU timestamp. The slot's ready_event was recorded by a prior
+        // miss or prefetch. Waiting on it is a no-op if the H2D has already
+        // completed, or blocks compute stream until it does.
         ++hits_;
         ++counter;
         layer_slots[cached].last_access = counter;
+        layer_slots[cached].compute_touched = true;
+        api->stream_wait_event(compute_stream, layer_slots[cached].ready_event);
         return layer_slots[cached].gpu_handle;
     }
     ++misses_;
 
-    // Miss: pick the slot with the smallest last_access. Empty slots (last_access == 0)
-    // are naturally preferred over populated ones.
-    size_t victim = 0;
-    for (size_t s = 1; s < layer_slots.size(); ++s) {
-        if (layer_slots[s].last_access < layer_slots[victim].last_access) {
-            victim = s;
+    // Miss: issue async H2D then wait on compute stream before returning. When every
+    // slot holds a pending prefetch (pathological caller), fall back to plain LRU so
+    // the demand fetch can still make progress; the displaced prefetch's H2D is still
+    // enqueued on transfer_stream and will complete, but the slot's ready_event gets
+    // re-recorded for the new data, so correctness is preserved.
+    int picked = pick_lru_slot(L);
+    if (picked < 0) {
+        picked = 0;
+        for (std::size_t s = 1; s < layer_slots.size(); ++s) {
+            if (layer_slots[s].last_access < layer_slots[picked].last_access) {
+                picked = static_cast<int>(s);
+            }
         }
     }
+    const std::size_t victim = static_cast<std::size_t>(picked);
+    start_async_transfer(L, E, victim);
+    api->stream_wait_event(compute_stream, layer_slots[victim].ready_event);
 
-    if (layer_slots[victim].expert_id >= 0) {
-        // Evicting a populated slot: invalidate its residency entry before overwrite.
-        residents[static_cast<size_t>(layer_slots[victim].expert_id)] = -1;
+    layer_slots[victim].expert_id = expert_id;
+    ++counter;
+    layer_slots[victim].last_access = counter;
+    layer_slots[victim].compute_touched = true;
+    residents[E] = static_cast<int>(victim);
+
+    return layer_slots[victim].gpu_handle;
+}
+
+int ExpertPool::pick_lru_slot(std::size_t layer) const {
+    const auto& layer_slots = slots_[layer];
+    int victim = -1;
+    for (std::size_t s = 0; s < layer_slots.size(); ++s) {
+        const auto& slot = layer_slots[s];
+        // Skip populated slots whose contents compute hasn't consumed yet — those
+        // are pending prefetches; evicting them would force a redundant re-fetch.
+        const bool evictable = (slot.expert_id < 0) || slot.compute_touched;
+        if (!evictable) {
+            continue;
+        }
+        if (victim < 0 || slot.last_access < layer_slots[static_cast<std::size_t>(victim)].last_access) {
+            victim = static_cast<int>(s);
+        }
     }
+    return victim;
+}
 
-    const ExpertFFN& src = experts_->at(L, E);
-    auto& dst = layer_slots[victim].gpu_handle;
-    auto* api = core::context().runtime().api();
+void ExpertPool::start_async_transfer(std::size_t layer, std::size_t expert_id, std::size_t slot_idx) {
+    auto& layer_slots = slots_[layer];
+    auto& residents = residency_[layer];
+    auto& slot = layer_slots[slot_idx];
+
+    if (slot.expert_id >= 0) {
+        residents[static_cast<std::size_t>(slot.expert_id)] = -1;
+    }
+    // The slot is about to be overwritten with fresh data; reset the "consumed by
+    // compute" flag so the prefetch window sees it as pending.
+    slot.compute_touched = false;
+
+    auto& runtime = core::context().runtime();
+    auto* api = runtime.api();
+    auto compute_stream = runtime.stream();
+    auto transfer_stream = runtime.transfer_stream();
+
+    // Barrier: transfer stream waits for compute to be done with the slot before
+    // overwriting. Conservative (waits for ALL prior compute) but correct.
+    api->record_event(compute_barrier_, compute_stream);
+    api->stream_wait_event(transfer_stream, compute_barrier_);
+
+    const ExpertFFN& src = experts_->at(layer, expert_id);
+    auto& dst = slot.gpu_handle;
     auto copy = [&](tensor_t s, tensor_t d) {
         if (!s || !d) {
             return;
         }
-        api->memcpy_sync(d->data(), s->data(), s->numel() * s->elementSize(), ZEDINFER_MEMCPY_H2D);
+        api->memcpy_async(d->data(), s->data(), s->numel() * s->elementSize(), ZEDINFER_MEMCPY_H2D,
+                          transfer_stream);
     };
     copy(src.gate_packed, dst.gate_packed);
     copy(src.gate_scale, dst.gate_scale);
@@ -231,17 +308,40 @@ ExpertGpuHandle ExpertPool::ensure_on_gpu(int layer, int expert_id) {
     copy(src.down_g_idx, dst.down_g_idx);
     copy(src.down_weight, dst.down_weight);
 
+    api->record_event(slot.ready_event, transfer_stream);
+}
+
+void ExpertPool::prefetch(int layer, int expert_id) {
+    if (config_.strategy != ExpertPoolStrategy::PINNED_LRU) {
+        return;
+    }
+    const std::size_t L = static_cast<std::size_t>(layer);
+    const std::size_t E = static_cast<std::size_t>(expert_id);
+    auto& residents = residency_[L];
+    auto& layer_slots = slots_[L];
+    auto& counter = access_counter_[L];
+
+    if (residents[E] >= 0) {
+        // Already resident (or H2D in-flight from an earlier prefetch): bump LRU so
+        // this slot isn't chosen as victim by a subsequent prefetch in the same layer.
+        ++counter;
+        layer_slots[residents[E]].last_access = counter;
+        return;
+    }
+
+    // Not resident: reserve an evictable slot and start H2D on the transfer stream.
+    // If the whole arena is already pending-prefetch (no compute_touched slot), this
+    // prefetch is skipped — compute will demand-fetch the expert later, same as M2.
+    const int picked = pick_lru_slot(L);
+    if (picked < 0) {
+        return;
+    }
+    const std::size_t victim = static_cast<std::size_t>(picked);
+    start_async_transfer(L, E, victim);
     layer_slots[victim].expert_id = expert_id;
     ++counter;
     layer_slots[victim].last_access = counter;
     residents[E] = static_cast<int>(victim);
-
-    return dst;
-}
-
-void ExpertPool::prefetch(int /*layer*/, int /*expert_id*/) {
-    // M1: all experts permanently resident, nothing to do.
-    // M3 will enqueue an async H2D on runtime.transfer_stream() and record a cudaEvent.
 }
 
 const ExpertFFN& ExpertPool::peek_expert(int layer, int expert_id) const {
