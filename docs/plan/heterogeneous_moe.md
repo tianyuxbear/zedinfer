@@ -129,67 +129,78 @@ Transfer dominates unless overlapped — **prefetching is essential**.
 - Each GPU slot holds at most one `(layer, expert_id)` at a time.
 - When compute reads a GPU slot, it waits on that slot's event (set by the transfer stream).
 
-### 5.2 Data structures
+### 5.2 Data structures (as implemented through M2)
+
+Actual location: `include/frontend/models/expert_pool.hpp`. Slot scope is **per-layer**
+(not the global arena the earlier draft showed). MoE decode visits layers strictly in
+order, so a slot reused across layers would thrash; per-layer arenas avoid it.
 
 ```cpp
-// include/backend/moe/expert_pool.hpp
+// include/frontend/models/expert_pool.hpp
 
 struct ExpertGpuHandle {
-    // Pointers into a GPU slot. Valid only after ensure_on_gpu / prefetch completes.
+    // Handles into a GPU slot. Valid for the window between ensure_on_gpu returning
+    // and the next ensure_on_gpu call that evicts the same slot (same layer, different expert).
     tensor_t gate_packed, gate_scale, gate_g_idx;
     tensor_t up_packed,   up_scale,   up_g_idx;
     tensor_t down_packed, down_scale, down_g_idx;
-    tensor_t gate_weight, up_weight, down_weight;  // dense path (unused for GPTQ models)
+    tensor_t gate_weight, up_weight, down_weight;  // dense path (unused for GPTQ)
 };
 
+enum class ExpertPoolStrategy { ALL_GPU, PINNED_LRU };
+
 struct ExpertPoolConfig {
-    int num_gpu_slots = 0;     // 0 = auto (fill available VRAM after non-expert weights + KV cache)
-    enum Strategy { ALL_GPU, LRU, PINNED_LRU };
-    Strategy strategy = Strategy::LRU;
+    ExpertPoolStrategy strategy = ExpertPoolStrategy::ALL_GPU;
+    int num_gpu_slots = -1;   // per layer; ignored for ALL_GPU
 };
 
 class ExpertPool {
 public:
-    // Takes ownership of the ExpertWeights (CPU-resident, from Qwen3MoEModel).
-    // Pins CPU memory regions and allocates GPU slot arena.
-    ExpertPool(std::unique_ptr<ExpertWeights> cpu_experts, ExpertPoolConfig cfg,
-               zedinferDeviceType_t gpu_device, int gpu_device_id);
+    // ALL_GPU: experts arrive on GPU, pool is a thin handle layer.
+    // PINNED_LRU: experts arrive on GPU, ctor D2H-migrates to CPU pinned + allocates
+    // a per-layer GPU slot arena.
+    ExpertPool(std::unique_ptr<ExpertWeights> experts, ExpertPoolConfig config);
+    ~ExpertPool();
 
-    ~ExpertPool();  // unpins CPU memory, frees GPU slots
-
-    // Bring expert (layer, expert_id) to GPU (blocking on transfer if necessary).
-    // Returns handles into the assigned GPU slot.
+    // Return a GPU-ready handle. M2: hit = O(1); miss = LRU eviction + synchronous
+    // cudaMemcpy H2D. M3 will swap the sync copy for a transfer-stream async copy
+    // plus cudaStreamWaitEvent on the compute stream.
     ExpertGpuHandle ensure_on_gpu(int layer, int expert_id);
 
-    // Start an H2D transfer for this expert on the transfer stream without blocking
-    // the compute stream. Safe to call for experts already resident (no-op + marks LRU).
+    // Prefetch hint. M1/M2: no-op. M3: async H2D on runtime.transfer_stream().
     void prefetch(int layer, int expert_id);
 
-    // Stats for diagnostics / scheduler integration.
+    // Metadata-only tensor access (shape/numel) that never triggers a transfer.
+    const ExpertFFN& peek_expert(int layer, int expert_id) const;
+
+    struct Stats { std::uint64_t hits = 0; std::uint64_t misses = 0; };
+    Stats stats() const;
     int gpu_residents() const;
-    int transfers_this_step() const;
-    void begin_step();  // resets per-step counters
+    ExpertPoolStrategy strategy() const;
 
 private:
     struct Slot {
-        int layer = -1;
-        int expert_id = -1;
-        bool valid = false;
-        uint64_t last_access = 0;
-        // GPU storage (pre-allocated at fixed size per slot).
-        ExpertGpuHandle gpu;
-        // Event marking when transfer into this slot completed.
-        cudaEvent_t ready_event = nullptr;
+        int expert_id = -1;           // -1 when slot is empty
+        std::uint64_t last_access = 0;
+        ExpertGpuHandle gpu_handle;   // persistent GPU tensors, data overwritten on miss
     };
 
-    std::unique_ptr<ExpertWeights> cpu_experts_;    // pinned host copies
-    std::vector<Slot> gpu_slots_;
-    // Map from (layer, expert) to slot index. -1 = not resident.
-    std::unordered_map<uint64_t, int> residency_;   // key = layer * num_experts + expert_id
-    uint64_t access_counter_ = 0;
-    ExpertPoolConfig cfg_;
+    std::unique_ptr<ExpertWeights> experts_;
+    ExpertPoolConfig config_;
+
+    // PINNED_LRU state; empty under ALL_GPU.
+    std::vector<std::vector<Slot>> slots_;        // slots_[L] = num_gpu_slots slots for layer L
+    std::vector<std::vector<int>>  residency_;    // residency_[L][E] = slot idx, or -1
+    std::vector<std::uint64_t>     access_counter_; // one LRU counter per layer
+
+    std::uint64_t hits_ = 0;
+    std::uint64_t misses_ = 0;
 };
 ```
+
+The slot index is an opaque per-layer ordinal. Residency is a dense `residency_[L][E]`
+vector (O(1) lookup) rather than a hashmap — `num_experts_per_layer` is small and
+dense indexing is cheaper. Eviction is a linear scan over `slots_[L]` (N slots, small).
 
 ### 5.3 Slot size calculation
 
@@ -231,36 +242,35 @@ instead of exposing the raw `ExpertWeights`.
 
 ## 6. Phase 2 milestones
 
-### M1 — ExpertPool MVP (functional, no offloading yet)
+### M1 — ExpertPool MVP (functional, no offloading yet) — ✅ DONE (commit 36e73cc)
 
-Goal: introduce the abstraction without changing behavior. Every expert has a permanently
-assigned GPU slot. `ensure_on_gpu` is a simple map lookup. No CPU copy, no transfers.
+`ExpertPool` introduced with ALL_GPU strategy. `Qwen3MoEModel` owns the pool;
+`ModelForwardConfig::expert_pool` replaces the raw `experts` field; every
+`dispatch_expert_linear` call goes through `ensure_on_gpu`. Output bit-exact vs. Phase 1.
 
-Tasks:
-- Add `ExpertPool` class (skeleton: all experts have GPU slots)
-- `Qwen3MoEModel` owns `ExpertPool` instead of `ExpertWeights`
-- `ModelForwardConfig::experts` replaced by `expert_pool`
-- `dispatch_expert_linear` goes through the pool
-- Verify perplexity / decode output unchanged against Phase 1 baseline
+### M2 — CPU pinned storage + on-demand synchronous transfer — ✅ DONE
 
-Success criteria: same output as Phase 1, same perf (±5%). No VRAM reduction yet.
+- Constructor branches on `PINNED_LRU`: D2H-migrates every expert into CPU pinned tensors
+  (`cudaMallocHost` via `Tensor::create(..., ZEDINFER_DEVICE_CPU, 0)`), then allocates a
+  per-layer GPU slot arena shaped from the template expert (0, 0).
+- Residency is a dense `residency_[L][E]` int vector (O(1) hit); eviction is a linear
+  `argmin(last_access)` over `slots_[L]` (N small). Empty slots (last_access=0) are
+  naturally preferred.
+- Miss path: `cudaMemcpy` H2D synchronous for every non-null tensor in the expert's FFN.
+  Pool-returned storage of the evicted expert is reused by the memory pool on next alloc.
+- `peek_expert(layer, expert_id)` added for init-time shape/numel queries so
+  `forward_config()` and `calculate_num_parameters()` don't thrash the arena.
+- `ZEDINFER_MOE_GPU_SLOTS=N` env var: unset or `N >= num_experts` → ALL_GPU;
+  `1 <= N < num_experts` → PINNED_LRU(N). Validated end-to-end on
+  `Qwen3-30B-A3B-GPTQ-Int4` with `N=32`: output text matches ALL_GPU, decode visibly
+  slower (expected).
 
-### M2 — CPU pinned storage + on-demand synchronous transfer
-
-Goal: reduce VRAM by moving some experts to CPU pinned memory. Transfers are synchronous
-(compute stream blocks on cudaMemcpy). Not fast, but proves the data path.
-
-Tasks:
-- Load all expert weights into CPU pinned memory (call `register_pinned` after mmap,
-  or allocate+copy into `cudaMallocHost`'d region)
-- GPU arena with `num_gpu_slots` < total experts
-- LRU eviction when arena is full
-- `ensure_on_gpu`: synchronous `cudaMemcpy` from CPU slot to GPU slot
-- Add env var / config knob: `ZEDINFER_MOE_GPU_SLOTS=N`
-
-Success criteria: runs Qwen3-30B-A3B with only (say) 32 GPU slots per layer
-× 48 layers = 1536 slots total (vs 128 × 48 = 6144 permanently resident). Output
-matches Phase 1. Decode latency degrades — that's expected, M3 fixes it.
+Known limitations carried into M3:
+- **Peak VRAM during construction**: loader still puts experts on GPU first, then ctor
+  D2H-migrates. Works for INT4 30B on 24GB. BF16 60GB needs a streaming load path (out
+  of scope for M2).
+- **Synchronous compute-stream stall** on every miss (`cudaMemcpy` is fully synchronous).
+  M3's purpose.
 
 ### M3 — Async prefetch (compute / transfer overlap)
 
