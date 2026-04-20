@@ -37,6 +37,11 @@ public:
     size_t num_parameters() const override { return num_params_; }
 
     ModelForwardConfig forward_config() const override;
+    void log_runtime_stats() const override {
+        if (expert_pool_) {
+            expert_pool_->log_stats();
+        }
+    }
 
 private:
     size_t calculate_num_parameters() const;

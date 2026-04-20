@@ -1,6 +1,9 @@
 #include "frontend/models/qwen3_moe.hpp"
 
+#include <cstdlib>
 #include <plog/Log.h>
+#include <stdexcept>
+#include <string>
 
 namespace zedinfer::model {
 
@@ -135,10 +138,53 @@ std::unique_ptr<ExpertWeights> extract_expert_weights(ModelWeights& weights, siz
 
 } // namespace
 
+namespace {
+
+// Pick an ExpertPoolConfig from the ZEDINFER_MOE_GPU_SLOTS environment variable.
+// Unset or N >= num_experts → ALL_GPU (Phase 1 behavior, no offloading).
+// 1 <= N < num_experts        → PINNED_LRU with N slots per layer.
+// N <= 0 or non-integer       → throw (fail fast on misconfiguration).
+ExpertPoolConfig choose_pool_config(size_t num_experts) {
+    ExpertPoolConfig cfg; // defaults: ALL_GPU
+    const char* env = std::getenv("ZEDINFER_MOE_GPU_SLOTS");
+    if (!env || *env == '\0') {
+        return cfg;
+    }
+
+    int n = 0;
+    try {
+        size_t consumed = 0;
+        n = std::stoi(env, &consumed);
+        if (consumed != std::string(env).size()) {
+            throw std::invalid_argument("trailing characters");
+        }
+    } catch (const std::exception& e) {
+        throw std::runtime_error(std::string("ZEDINFER_MOE_GPU_SLOTS: invalid integer '") + env + "' ("
+                                 + e.what() + ")");
+    }
+    if (n <= 0) {
+        throw std::runtime_error("ZEDINFER_MOE_GPU_SLOTS must be positive, got " + std::to_string(n));
+    }
+
+    if (static_cast<size_t>(n) >= num_experts) {
+        LOGI.printf("[Qwen3MoE] ZEDINFER_MOE_GPU_SLOTS=%d >= num_experts=%zu; falling back to ALL_GPU", n,
+                    num_experts);
+        return cfg;
+    }
+
+    cfg.strategy = ExpertPoolStrategy::PINNED_LRU;
+    cfg.num_gpu_slots = n;
+    LOGI.printf("[Qwen3MoE] ZEDINFER_MOE_GPU_SLOTS=%d; strategy=PINNED_LRU (N=%d of %zu experts per layer)", n, n,
+                num_experts);
+    return cfg;
+}
+
+} // namespace
+
 Qwen3MoEModel::Qwen3MoEModel(Qwen3MoEConfig& config, std::unique_ptr<ModelWeights> weights)
     : config_(config), weights_(std::move(weights)) {
     auto experts = extract_expert_weights(*weights_, config_.num_hidden_layers, config_.num_experts);
-    ExpertPoolConfig pool_cfg; // defaults: ALL_GPU
+    ExpertPoolConfig pool_cfg = choose_pool_config(config_.num_experts);
     expert_pool_ = std::make_unique<ExpertPool>(std::move(experts), pool_cfg);
     num_params_ = calculate_num_parameters();
 }
@@ -159,12 +205,12 @@ ModelForwardConfig Qwen3MoEModel::forward_config() const {
     size_t detected_moe = 0;
     size_t detected_shared = detect_intermediate_size(*weights_, "layers.0.mlp.shared_expert.");
     if (expert_pool_ && expert_pool_->num_layers() > 0) {
-        // Peek at layer 0 expert 0 via ensure_on_gpu (no-op under ALL_GPU; just returns a handle).
-        auto h = expert_pool_->ensure_on_gpu(0, 0);
-        if (h.gate_packed) {
-            detected_moe = h.gate_packed->shape()[0];
-        } else if (h.gate_weight) {
-            detected_moe = h.gate_weight->shape()[0];
+        // peek_expert is metadata-only: never triggers an H2D transfer under PINNED_LRU.
+        const auto& ffn = expert_pool_->peek_expert(0, 0);
+        if (ffn.gate_packed) {
+            detected_moe = ffn.gate_packed->shape()[0];
+        } else if (ffn.gate_weight) {
+            detected_moe = ffn.gate_weight->shape()[0];
         }
     }
 
@@ -191,13 +237,15 @@ ModelForwardConfig Qwen3MoEModel::forward_config() const {
 size_t Qwen3MoEModel::calculate_num_parameters() const {
     size_t total = 0;
     for (const auto& [name, tensor] : weights_->get_all_weights()) { total += tensor->numel(); }
-    // Also count expert tensors (held inside the pool).
+    // Also count expert tensors (held inside the pool). Use peek_expert so PINNED_LRU
+    // doesn't churn the GPU slot arena just to compute numel.
     if (expert_pool_) {
         for (size_t l = 0; l < expert_pool_->num_layers(); ++l) {
             for (size_t e = 0; e < expert_pool_->num_experts_per_layer(); ++e) {
-                auto h = expert_pool_->ensure_on_gpu(static_cast<int>(l), static_cast<int>(e));
-                for (auto t : {h.gate_packed, h.gate_scale, h.gate_g_idx, h.gate_weight, h.up_packed, h.up_scale,
-                               h.up_g_idx, h.up_weight, h.down_packed, h.down_scale, h.down_g_idx, h.down_weight}) {
+                const auto& ffn = expert_pool_->peek_expert(static_cast<int>(l), static_cast<int>(e));
+                for (auto t : {ffn.gate_packed, ffn.gate_scale, ffn.gate_g_idx, ffn.gate_weight, ffn.up_packed,
+                               ffn.up_scale, ffn.up_g_idx, ffn.up_weight, ffn.down_packed, ffn.down_scale,
+                               ffn.down_g_idx, ffn.down_weight}) {
                     if (t) {
                         total += t->numel();
                     }

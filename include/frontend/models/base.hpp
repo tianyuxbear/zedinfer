@@ -134,6 +134,12 @@ public:
     // Produce the forward config for this model family
     virtual ModelForwardConfig forward_config() const = 0;
 
+    // Log model-family-specific runtime stats. Called at the end of a session so that
+    // counters collected during forward (e.g. MoE ExpertPool hit/miss) get a final
+    // summary line even when destruction order keeps the model alive past exit.
+    // Default: no-op.
+    virtual void log_runtime_stats() const {}
+
     // Static factory
     static std::shared_ptr<Model> parse(const std::string& model_path, zedinferDeviceType_t target_device);
     static void load_base_config(ModelConfig& config, const json& j);
