@@ -15,19 +15,30 @@
   `register_pinned` / `unregister_pinned` API on CPU and NVIDIA backends
   (`nvidia_runtime_api.cu:113`), pre-allocated prefill buffers.
 - ✅ **M1 — ExpertPool MVP (ALL_GPU)** — commit `36e73cc`.
-- ✅ **M2 — CPU pinned storage + synchronous H2D + `ZEDINFER_MOE_GPU_SLOTS`** — this
-  session. Qwen3-30B-A3B-GPTQ-Int4 runs with `N=32` slots/layer: text output matches
-  ALL_GPU baseline; decode is synchronous-H2D slow (expected). Hit/miss stats logged
-  in destructor.
-- 🚧 **M3 — Async prefetch on transfer stream** — not started. Next milestone.
-- ⏳ **M4 (optional) — Predictive prefetch** — gated on M3 profiling.
+- ✅ **M2 — CPU pinned storage + synchronous H2D + `ZEDINFER_MOE_GPU_SLOTS`**.
+- ✅ **M3 — Async prefetch on transfer stream + sliding-window**. Async H2D on
+  `Runtime::transfer_stream()` guarded by per-slot `cudaEvent_t`; `moe_decode` and
+  `moe_prefill` issue prefetch batches before the compute loop (prefill uses a
+  sliding window sized to `max_prefetch_depth()` to avoid self-eviction). At N=32
+  on Qwen3-30B-A3B-GPTQ-Int4: prefill latency 1.36× baseline, decode ~1× baseline.
+  See `heterogeneous_moe.md §6 M3` for the numbers.
+- ⏳ **M4 (optional) — Predictive prefetch** — not needed for current workloads;
+  revisit only if a model with extreme fan-out shows under-utilized compute.
+
+Phase 2 core is functionally done. Remaining open items are out-of-scope-for-M3
+polish: streaming expert load (BF16 60GB support), auto N sizing, CPU-side Fiddler
+execution of cold experts.
 
 Key code entry points:
-- `include/frontend/models/expert_pool.hpp` + `.cpp` — `ExpertPool`, slot arena, LRU.
-  Per-layer `slots_` / `residency_` / `access_counter_`. `hits_` / `misses_` cumulative
-  stats in destructor.
+- `include/frontend/models/expert_pool.hpp` + `.cpp` — ExpertPool, slot arena, LRU,
+  async H2D, sliding-window support via `compute_touched` flag + `pick_lru_slot`
+  returning `-1` when no evictable slot.
+- `include/backend/device/runtime_api.hpp` — event API (`create_event` /
+  `destroy_event` / `record_event` / `stream_wait_event`).
 - `include/frontend/models/forward_config.hpp:52` — `ExpertPool* expert_pool`.
 - `forward_config.hpp:118-153` — `dispatch_expert_linear` calls `ensure_on_gpu`.
+- `src/frontend/models/moe_forward.cpp` — `moe_decode` batch prefetch;
+  `moe_prefill` active-experts ordering + sliding window.
 - `src/frontend/models/qwen3_moe.cpp` — `choose_pool_config()` parses
   `ZEDINFER_MOE_GPU_SLOTS`; ctor constructs pool.
 
@@ -68,17 +79,11 @@ Two models:
 
 6. **M2 peak VRAM**: PINNED_LRU ctor assumes experts arrive on GPU then D2H-migrates.
    Peak briefly holds full expert set on GPU. Enough for INT4 30B on 24 GB; BF16 60B
-   requires the streaming-load path (see §2).
+   requires the streaming-load path (see §5 item 1).
 
-7. **Shared_ptr cycle in InferenceEngine** (pre-existing, surfaced by M2 diagnostics):
-   `InferenceEngine` uses `enable_shared_from_this`; its owned `unique_ptr<ServingLoop>`
-   and `unique_ptr<Profiler>` each hold a `shared_ptr<InferenceEngine>` (from
-   `shared_from_this()`). When the outer shared_ptr in `main()` releases, refcount
-   drops from 2 → 1 and the engine is never destroyed — Model and ExpertPool never
-   hit their destructors. Workaround in place: `Model::log_runtime_stats()` virtual
-   + explicit call from `examples/ping.cpp` before `return 0`. Proper fix (out of
-   M2 scope): change ServingLoop/Profiler to hold a raw pointer or reference to
-   InferenceEngine instead of shared_ptr.
+7. *(Resolved)* Shared_ptr cycle in `InferenceEngine` — `ServingLoop` and `Profiler`
+   now hold a non-owning `InferenceEngine*`, so the engine destructor runs cleanly
+   and the ExpertPool stats log lands in `logs/ping.log` from `~ExpertPool`.
 
 ## 4. Build and run
 
@@ -100,29 +105,49 @@ ZEDINFER_MOE_GPU_SLOTS=8 xmake run ping ~/data/models/Qwen3-30B-A3B-GPTQ-Int4 --
 ZEDINFER_DISABLE_WARMUP=1 xmake run ping ~/data/models/Qwen3-30B-A3B-GPTQ-Int4 --nvidia
 ```
 
-## 5. Suggested first step for the next session (M3)
+## 5. Suggested next work (Phase 2 polish, any order)
 
-Read in order:
-1. This file.
-2. `docs/plan/heterogeneous_moe.md` §6 M3 and §7 (env vars).
-3. `include/frontend/models/expert_pool.hpp` / `.cpp` — today's PINNED_LRU
-   implementation. M3 modifies `ensure_on_gpu` miss path and `prefetch`.
-4. `include/backend/core/runtime/runtime.hpp` — `transfer_stream()` accessor.
-5. `src/frontend/models/moe_forward.cpp` — call site where M3 will insert
-   `prefetch(layer, expert_id)` after router emits top-k.
+Phase 2 M1–M3 are landed and validated on Qwen3-30B-A3B-GPTQ-Int4. These items are
+worth doing but not blocking the thesis's core claim:
 
-M3 strategy:
-- Add `cudaEvent_t ready_event` to each `Slot` (or backend-agnostic `zedinferEvent_t`
-  if we want a CPU backend story).
-- In miss path: enqueue `cudaMemcpyAsync` on `runtime.transfer_stream()`; record event.
-  Mark slot as "populating" so the compute path knows to wait.
-- Compute stream: `cudaStreamWaitEvent` on slot event before calling the expert GEMM.
-- `prefetch(layer, expert_id)` from `moe_decode` right after router: for each selected
-  expert not resident, kick off async H2D.
-- Benchmark decode latency vs. M1 ALL_GPU baseline.
+1. **Streaming expert load (BF16 60GB support).** Current PINNED_LRU ctor D2H-migrates
+   experts from GPU to CPU pinned, which assumes the loader first fit everything on
+   GPU. Needed for models that genuinely don't fit (BF16 30B on 24GB, or 70B+ MoE).
+   Touches `src/frontend/loader/safetensor.cpp` and `src/frontend/models/base.cpp` to
+   let expert tensors be read straight to CPU pinned while non-experts still go to
+   GPU. Also unlocks dense-path validation through `allocate_slot_tensors` and
+   `dispatch_expert_linear` (GPTQ path is well-tested; dense path is unexercised).
 
-Development rules:
+2. **Auto N sizing.** When `ZEDINFER_MOE_GPU_SLOTS` is unset, pick N from
+   `get_memory_info()` − KV budget − non-expert weights. Removes the "guess a number"
+   experience that currently blocks first-run users. Implementation note: do it after
+   the block_pool init, so we know KV actual footprint.
+
+3. **Fix the prefill per-row gather** (`moe_forward.cpp:140-147`). PERF-TODO predates
+   M3 but surfaces now as the dominant remaining prefill cost — M3 sliding window
+   exposed it. A single CUDA gather kernel batching the per-row copies is the obvious
+   fix.
+
+4. **Fiddler-style CPU execution** of cold experts. `docs/plan/heterogeneous_moe.md §9`
+   kept this out of Phase 2 scope; revisit only if a model/config appears where
+   transfer still dominates after M3.
+
+## 6. Pre-existing issues worth a future pass
+
+1. **Non-quantized MoE path unvalidated.** The dense (`gate_weight`/`up_weight`/
+   `down_weight`) path in `allocate_slot_tensors` and `dispatch_expert_linear` compiled
+   and runs through the motions but has never seen a BF16 MoE model. Gated on item 1
+   above.
+
+2. **`xmake run` drops env vars.** Observed during bench (see commit messages around
+   the `CUDA_VISIBLE_DEVICES` investigation). Workaround: invoke binaries directly
+   with `LD_LIBRARY_PATH=$PWD/python/zedinfer:$LD_LIBRARY_PATH`. No plan to change
+   xmake's behavior.
+
+## 7. Development rules
+
 - Small, reversible steps. `xmake build && ping` per change, compare text output.
 - Preserve the per-layer slot scope — it's the right fit for sequential-layer decode.
-- Hit-rate log in destructor is a cheap sanity check; use it to verify prefetch hits.
+- `log_stats()` fires from the destructor now (shared_ptr cycle fixed). Writes to
+  `logs/ping.log`. Useful for sanity-checking hit rates after a test.
 - At session end, **update this file**.

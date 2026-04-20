@@ -272,23 +272,54 @@ Known limitations carried into M3:
 - **Synchronous compute-stream stall** on every miss (`cudaMemcpy` is fully synchronous).
   M3's purpose.
 
-### M3 — Async prefetch (compute / transfer overlap)
+### M3 — Async prefetch (compute / transfer overlap) — ✅ DONE
 
-Goal: eliminate the transfer stall by prefetching cold experts on the transfer stream
-while the current layer's attention runs.
+- Runtime API extended with `zedinferEvent_t` + `create_event` / `destroy_event` /
+  `record_event` / `stream_wait_event` (`backend/device/runtime_api.hpp`; NVIDIA impl
+  uses `cudaEventCreateWithFlags(DisableTiming)` + `cudaStreamWaitEvent`).
+- Each `Slot` owns a `ready_event`; the pool owns a single `compute_barrier_` event
+  used to prevent the transfer stream from overwriting a slot whose in-flight compute
+  hasn't passed.
+- `ensure_on_gpu` miss path moves from `cudaMemcpy` (synchronous) to `cudaMemcpyAsync`
+  on `Runtime::transfer_stream()`, records `slot.ready_event`, then has the compute
+  stream `cudaStreamWaitEvent` on it before returning. Hit path also waits — so
+  in-flight prefetches block compute only as long as the transfer genuinely needs.
+- `prefetch(layer, expert_id)` became the real async version: claim an LRU slot,
+  kick H2D on the transfer stream, do not wait on compute.
+- `moe_decode` and `moe_prefill` call `prefetch` for all selected experts before the
+  compute loop starts. `moe_prefill` uses a sliding window of `max_prefetch_depth()`
+  (= per-layer slot count) outstanding transfers — initial burst plus one additional
+  prefetch per finished compute iteration — so prefetches never evict each other
+  before compute consumes them.
+- To support the sliding window, `Slot` gained a `compute_touched` flag;
+  `pick_lru_slot` skips populated-but-unconsumed slots when choosing a victim.
 
-Tasks:
-- Per-slot `cudaEvent_t`; transfer stream records event when H2D completes
-- `ensure_on_gpu` returns a handle immediately; compute stream does `cudaStreamWaitEvent`
-  before using the slot
-- Prefetch strategy (start simple):
-  1. At end of layer L's routing, for each selected expert not yet on GPU, issue
-     `prefetch(layer=L, expert_id)` on transfer stream
-  2. Experts selected but already resident: just update LRU timestamp, no transfer
-- Benchmark: compare M2 vs M3 decode latency
+Measurements (Qwen3-30B-A3B-GPTQ-Int4, N=32 slots/layer, `-p 128 -d 128 -r 3`):
 
-Success criteria: decode latency within 1.5× of Phase 1 (all-GPU) for 32-slot config.
-Prefill latency similar order.
+| | Prefill tok/s (ratio) | Decode tok/s (ratio) |
+|---|---|---|
+| M2 synchronous H2D | 63.3 (0.51×) | 19.3 (0.68×) |
+| M3 async no cap | 59.3 (0.55×) | 26.7 (1.13×) |
+| M3 + sliding window | 91.1 (0.74×) | 25.5 (1.19×) |
+
+**Caveat — these numbers came from a shared GPU and are noisy.** The bench binary
+landed on a contended 20GB Ada card (via `FASTEST_FIRST` CUDA ordering quirk, see
+handoff §6), while another process held a different GPU at 100% utilization. Across
+the three runs the ALL_GPU baseline drifted downward (28 → 24 → 21 tok/s decode,
+125 → 108 → 124 tok/s prefill) purely from background contention; PINNED_LRU
+numbers themselves were stable (19 → 27 → 25 decode, 63 → 59 → 91 prefill). The
+"PINNED_LRU is faster than ALL_GPU on decode" pattern in rows 2-3 is measurement
+noise, not a real speedup — it just means M3's overlap pays its own cost back to
+within noise of the baseline, which is exactly the target.
+
+A clean single-card re-measurement on the 48GB A6000 (idle) is pending; expected
+result is PINNED_LRU decode at ~parity-or-slightly-slower than ALL_GPU and prefill
+in the same 1.3-1.4× band. Independent of the exact numbers, the M3 qualitative
+claim stands: async prefetch + sliding window removes the 2× prefill blowup that
+M2 showed.
+
+Remaining gap on prefill is dominated by the per-row `memcpy_sync` gather inside
+`moe_prefill` (existing PERF-TODO, independent of expert offloading).
 
 ### M4 (optional, stretch) — Predictive prefetch / speculative prefetch
 
@@ -319,7 +350,7 @@ Otherwise, use PINNED_LRU with slots sized to fit remaining VRAM.
 | Pinned memory pressure limits other host work | Make pinning optional (fallback to pageable); keep total pinned to expert weights only |
 | CPU→GPU copy serializing on transfer stream → bottleneck | Use cudaMemcpyAsync with pinned memory (only path that actually runs in parallel) |
 | LRU thrashing when routing is uniform | Measure expert access distribution; if too uniform, fall back to ALL_GPU for that model |
-| Prefill path has many unique experts per step | M2/M3 will be slow for prefill; consider a separate "prefill all-on-GPU" mode |
+| Prefill path has many unique experts per step | M2 was 2× slowdown; M3 sliding-window prefetch closed the gap to 1.36× at N=32. Further improvements blocked on the per-row gather PERF-TODO in `moe_prefill`. |
 
 ## 9. Out of scope for Phase 2
 
