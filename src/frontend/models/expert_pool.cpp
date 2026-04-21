@@ -82,14 +82,11 @@ ExpertPool::ExpertPool(std::unique_ptr<ExpertWeights> experts, ExpertPoolConfig 
         return;
     }
 
-    // PINNED_LRU: move all experts to CPU pinned memory, then allocate a per-layer GPU
-    // slot arena. Slots will be populated on demand by ensure_on_gpu (Step 4).
-    //
-    // Peak VRAM during construction briefly holds the full expert set (as loaded by the
-    // caller) plus the slot arena, because the pool does not immediately return freed
-    // blocks to CUDA. This is fine for the INT4 Qwen3-30B-A3B validation on 24 GB; the
-    // BF16 "doesn't-fit" scenario requires a streaming load path, which is out of scope
-    // for M2.
+    // PINNED_LRU: experts live in CPU pinned memory; a per-layer GPU slot arena is
+    // populated on demand by ensure_on_gpu (or prefetch). Experts can arrive on GPU
+    // (legacy path, INT4 small-model case) or on CPU pinned already (D.2 loader
+    // routing, BF16 large-model case); the first branch below handles the former by
+    // D2H-migrating in place.
     const size_t L = experts_->num_layers();
     const size_t E = experts_->num_experts_per_layer();
 
@@ -101,26 +98,38 @@ ExpertPool::ExpertPool(std::unique_ptr<ExpertWeights> experts, ExpertPoolConfig 
     }
     const int N = config_.num_gpu_slots;
 
-    // Probe target GPU device from a non-null tensor of expert (0, 0).
+    // Target GPU comes from the current runtime (where compute and slot arena live).
+    auto& runtime = core::context().runtime();
+    const zedinferDeviceType_t gpu_type = runtime.deviceType();
+    const int gpu_id = runtime.deviceId();
+    if (gpu_type == ZEDINFER_DEVICE_CPU) {
+        throw std::runtime_error("ExpertPool(PINNED_LRU): runtime is CPU; PINNED_LRU requires a GPU runtime");
+    }
+    auto* api = runtime.api();
+
+    // Probe where experts arrived from the loader. Two cases:
+    //   (1) Experts loaded straight to CPU pinned (loader predicate, D.1/D.2 path) —
+    //       nothing to migrate; slot arena gets allocated against the current runtime.
+    //   (2) Experts loaded to GPU (legacy flow, small INT4 models) — D2H-migrate each
+    //       one into CPU pinned storage and release the GPU originals to the pool.
     const ExpertFFN& probe = experts_->at(0, 0);
     tensor_t any = probe.gate_packed ? probe.gate_packed : probe.gate_weight;
     if (!any) {
         throw std::runtime_error("ExpertPool(PINNED_LRU): expert (0,0) has no gate tensor to probe device from");
     }
-    const zedinferDeviceType_t gpu_type = any->deviceType();
-    const int gpu_id = any->deviceId();
-    if (gpu_type == ZEDINFER_DEVICE_CPU) {
-        throw std::runtime_error("ExpertPool(PINNED_LRU): experts already on CPU; nothing to offload");
-    }
+    const bool experts_on_gpu = (any->deviceType() != ZEDINFER_DEVICE_CPU);
 
-    // Step A: D2H every expert into CPU pinned storage.
-    auto* api = core::context().runtime().api();
-    for (size_t l = 0; l < L; ++l) {
-        for (size_t e = 0; e < E; ++e) {
-            migrate_expert_to_cpu(experts_->at(l, e), api);
+    if (experts_on_gpu) {
+        for (size_t l = 0; l < L; ++l) {
+            for (size_t e = 0; e < E; ++e) {
+                migrate_expert_to_cpu(experts_->at(l, e), api);
+            }
         }
+        LOGI.printf("[ExpertPool] D2H-migrated %zu experts to CPU pinned storage", L * E);
+    } else {
+        LOGI.printf("[ExpertPool] %zu experts already in CPU pinned memory (loader-routed); skipping D2H",
+                    L * E);
     }
-    LOGI.printf("[ExpertPool] D2H-migrated %zu experts to CPU pinned storage", L * E);
 
     // Step B: allocate per-layer GPU slot arena. Template shape taken from (now-CPU)
     // expert (0, 0) — all experts are homogeneous in shape for Qwen3 MoE.

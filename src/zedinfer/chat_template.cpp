@@ -120,8 +120,9 @@ ChatTemplate ChatTemplate::load(const std::string& model_path, const std::string
         }
     }
 
-    // Auto-detect: DeepSeek-R1 distillation vs standard Qwen
-    if (model_type == "qwen2" || model_type == "qwen3") {
+    // Auto-detect: DeepSeek-R1 distillation vs standard Qwen. Qwen3 MoE uses the same
+    // ChatML conversation format as dense Qwen3, so it routes through the same branch.
+    if (model_type == "qwen2" || model_type == "qwen3" || model_type == "qwen3_moe") {
         if (is_deepseek_r1_format(model_path)) {
             LOGI << "[ChatTemplate] Detected DeepSeek-R1 format for model_type=" << model_type;
             return default_deepseek_r1();

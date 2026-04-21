@@ -3,6 +3,7 @@
 #include "backend/tensor/tensor.hpp"
 #include "zedinfer.h"
 
+#include <functional>
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
@@ -144,8 +145,16 @@ public:
     static std::shared_ptr<Model> parse(const std::string& model_path, zedinferDeviceType_t target_device);
     static void load_base_config(ModelConfig& config, const json& j);
     static std::unique_ptr<ModelConfig> load_config(const std::string& config_path);
-    static std::unique_ptr<ModelWeights> load_weights(const std::string& model_path, zedinferDeviceType_t target_device,
-                                                      const ModelConfig& config);
+    // Load a model's weights, optionally routing selected tensors to CPU pinned memory
+    // instead of `target_device`. The predicate is invoked with the *mapped* internal
+    // name of each tensor (post `map_weight_name`); returning true pins the tensor on
+    // the host (cudaMallocHost) for later async H2D to a GPU slot arena. Default
+    // predicate is always-false → every tensor goes to target_device (pre-D.1 behavior).
+    // Used by MoE models to keep experts in CPU pinned memory when the full expert set
+    // wouldn't fit on GPU VRAM.
+    static std::unique_ptr<ModelWeights> load_weights(
+        const std::string& model_path, zedinferDeviceType_t target_device, const ModelConfig& config,
+        std::function<bool(const std::string&)> to_cpu_pinned = [](const std::string&) { return false; });
     static std::string map_weight_name(const std::string& raw_name);
 
 private:

@@ -14,6 +14,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <limits>
 #include <map>
 #include <memory>
@@ -34,8 +35,33 @@ std::shared_ptr<Model> Model::parse(const std::string& model_path, zedinferDevic
     std::string config_path = (fs::path(model_path) / "config.json").string();
     auto config = load_config(config_path);
 
+    // Select a tensor-routing predicate so MoE expert tensors can skip GPU entirely and
+    // land in CPU pinned memory — necessary when the full expert set doesn't fit VRAM
+    // (e.g. BF16 30B on 24GB). Single trigger: ZEDINFER_MOE_GPU_SLOTS=N with
+    // N < num_experts. That same env var also picks PINNED_LRU in Qwen3MoEModel, so
+    // loader routing and pool strategy stay coupled behind one knob.
+    std::function<bool(const std::string&)> route = [](const std::string&) { return false; };
+    if (config->model_type == "qwen3_moe" && target_device != ZEDINFER_DEVICE_CPU) {
+        auto* moe_config = dynamic_cast<const Qwen3MoEConfig*>(config.get());
+        const size_t num_experts = moe_config ? moe_config->num_experts : 0;
+        const char* sv = std::getenv("ZEDINFER_MOE_GPU_SLOTS");
+        if (sv != nullptr && *sv != '\0' && num_experts > 0) {
+            try {
+                int n = std::stoi(sv);
+                if (n > 0 && static_cast<size_t>(n) < num_experts) {
+                    LOGI << "[Model] ZEDINFER_MOE_GPU_SLOTS=" << sv << " < num_experts=" << num_experts
+                         << ": routing MoE experts to CPU pinned memory";
+                    route = [](const std::string& name) { return name.find(".mlp.experts.") != std::string::npos; };
+                }
+            } catch (...) {
+                // Leave route as no-op; choose_pool_config in Qwen3MoEModel will re-parse
+                // and throw with a proper error.
+            }
+        }
+    }
+
     // Load model weights from SafeTensors files
-    auto weights = load_weights(model_path, target_device, *config);
+    auto weights = load_weights(model_path, target_device, *config, route);
 
     if (target_device == ZEDINFER_DEVICE_CPU) {
         config->torch_dtype = "float32";
@@ -588,7 +614,8 @@ static void repack_4bit_row(const int8_t* unpacked, int32_t* packed, size_t K) {
 
 // Load model weights using memory-mapped SafeTensors.
 std::unique_ptr<ModelWeights> Model::load_weights(const std::string& model_path, zedinferDeviceType_t target_device,
-                                                  const ModelConfig& config) {
+                                                  const ModelConfig& config,
+                                                  std::function<bool(const std::string&)> to_cpu_pinned) {
     auto load_start = std::chrono::high_resolution_clock::now();
 
     auto loader_unique = zedinfer::loader::SafeTensorsLoader::create(model_path);
@@ -662,11 +689,24 @@ std::unique_ptr<ModelWeights> Model::load_weights(const std::string& model_path,
     }
 
     size_t converted_count = 0;
+    size_t cpu_pinned_count = 0;
+
+    // Materialize a tensor in CPU pinned memory by copying from its mmap source.
+    // On NVIDIA runtime, Tensor::create(..., CPU, 0) goes through cudaMallocHost, so
+    // the destination buffer is eligible for cudaMemcpyAsync with full PCIe bandwidth.
+    auto route_to_cpu_pinned = [&](tensor_t src) -> tensor_t {
+        auto pinned = Tensor::create(src->shape(), src->dtype(), ZEDINFER_DEVICE_CPU, 0);
+        std::memcpy(pinned->data(), src->data(), src->numel() * src->elementSize());
+        ++cpu_pinned_count;
+        return pinned;
+    };
 
     for (auto& pair : standalone_tensors) {
         tensor_t tensor = pair.second;
-        if (target_device == ZEDINFER_DEVICE_CPU
-            && (tensor->dtype() == ZEDINFER_DTYPE_BF16 || tensor->dtype() == ZEDINFER_DTYPE_F16)) {
+        if (to_cpu_pinned(pair.first)) {
+            tensor = route_to_cpu_pinned(tensor);
+        } else if (target_device == ZEDINFER_DEVICE_CPU
+                   && (tensor->dtype() == ZEDINFER_DTYPE_BF16 || tensor->dtype() == ZEDINFER_DTYPE_F16)) {
             tensor = tensor->to(ZEDINFER_DTYPE_F32);
             converted_count++;
         } else if (target_device != ZEDINFER_DEVICE_CPU) {
@@ -776,8 +816,10 @@ std::unique_ptr<ModelWeights> Model::load_weights(const std::string& model_path,
             if (!tensor) {
                 return;
             }
-            if (target_device == ZEDINFER_DEVICE_CPU
-                && (tensor->dtype() == ZEDINFER_DTYPE_BF16 || tensor->dtype() == ZEDINFER_DTYPE_F16)) {
+            if (to_cpu_pinned(name)) {
+                tensor = route_to_cpu_pinned(tensor);
+            } else if (target_device == ZEDINFER_DEVICE_CPU
+                       && (tensor->dtype() == ZEDINFER_DTYPE_BF16 || tensor->dtype() == ZEDINFER_DTYPE_F16)) {
                 tensor = tensor->to(ZEDINFER_DTYPE_F32);
                 converted_count++;
             } else if (target_device != ZEDINFER_DEVICE_CPU) {
@@ -800,6 +842,9 @@ std::unique_ptr<ModelWeights> Model::load_weights(const std::string& model_path,
     auto convert_end = std::chrono::high_resolution_clock::now();
     auto convert_time = std::chrono::duration<double>(convert_end - convert_start).count();
     LOGI.printf("⏱️  Conversion time: %.4fs (%zu tensors)", convert_time, converted_count);
+    if (cpu_pinned_count > 0) {
+        LOGI.printf("[Loader] Routed %zu tensors to CPU pinned memory via predicate", cpu_pinned_count);
+    }
 
 #ifdef DEBUG
     LOGD << utils::get_numa_maps_info();
