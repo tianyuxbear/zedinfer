@@ -26,10 +26,15 @@
   `heterogeneous_moe.md §6 M3`.
 - ⏳ **M4 (optional) — Predictive prefetch** — not needed for current workloads;
   revisit only if a model with extreme fan-out shows under-utilized compute.
+- ✅ **D-series — BF16 large-model support**. Loader predicate routes expert tensors
+  directly to CPU pinned memory via `Model::load_weights(..., to_cpu_pinned)`.
+  `ZEDINFER_MOE_GPU_SLOTS` is now the single user-visible knob (it controls both the
+  loader predicate and the pool strategy). `ExpertPool` ctor detects whether experts
+  arrived on GPU (legacy) or CPU pinned (new) and picks the right path. BF16
+  Qwen3-30B-A3B (~60 GB) validated end-to-end on 24 GB VRAM budget — see
+  `heterogeneous_moe.md §10` for the full run log and numbers.
 
-Phase 2 core is functionally done. Remaining open items are out-of-scope-for-M3
-polish: streaming expert load (BF16 60GB support), auto N sizing, CPU-side Fiddler
-execution of cold experts.
+Phase 2 core is functionally done. Remaining open items are polish.
 
 Key code entry points:
 - `include/frontend/models/expert_pool.hpp` + `.cpp` — ExpertPool, slot arena, LRU,
@@ -109,37 +114,37 @@ ZEDINFER_DISABLE_WARMUP=1 xmake run ping ~/data/models/Qwen3-30B-A3B-GPTQ-Int4 -
 
 ## 5. Suggested next work (Phase 2 polish, any order)
 
-Phase 2 M1–M3 are landed and validated on Qwen3-30B-A3B-GPTQ-Int4. These items are
-worth doing but not blocking the thesis's core claim:
+Phase 2 M1–M3 + BF16 large-model support all landed. These polish items remain but
+none is blocking the thesis's core claim (quantization + memory-tiered expert
+execution on a single consumer GPU):
 
-1. **Streaming expert load (BF16 60GB support).** Current PINNED_LRU ctor D2H-migrates
-   experts from GPU to CPU pinned, which assumes the loader first fit everything on
-   GPU. Needed for models that genuinely don't fit (BF16 30B on 24GB, or 70B+ MoE).
-   Touches `src/frontend/loader/safetensor.cpp` and `src/frontend/models/base.cpp` to
-   let expert tensors be read straight to CPU pinned while non-experts still go to
-   GPU. Also unlocks dense-path validation through `allocate_slot_tensors` and
-   `dispatch_expert_linear` (GPTQ path is well-tested; dense path is unexercised).
+1. **Auto N sizing.** When `ZEDINFER_MOE_GPU_SLOTS` is unset on a MoE model, pick N
+   from `get_memory_info()` − KV budget − non-expert weights. Removes the current
+   "guess a number" first-run experience. Implementation note: do it after the
+   block_pool init, so we know KV actual footprint. Worth doing for a polished demo.
 
-2. **Auto N sizing.** When `ZEDINFER_MOE_GPU_SLOTS` is unset, pick N from
-   `get_memory_info()` − KV budget − non-expert weights. Removes the "guess a number"
-   experience that currently blocks first-run users. Implementation note: do it after
-   the block_pool init, so we know KV actual footprint.
+2. **Fix the prefill per-row gather** (`moe_forward.cpp:140-147`). PERF-TODO predates
+   M3 but is the dominant remaining prefill cost — M3 sliding-window prefetch exposed
+   it. A single CUDA gather kernel batching the per-row copies is the obvious fix.
+   Helps short-prompt workloads the most (ping 12-token prefill today still shows
+   per-layer fixed overhead).
 
-3. **Fix the prefill per-row gather** (`moe_forward.cpp:140-147`). PERF-TODO predates
-   M3 but surfaces now as the dominant remaining prefill cost — M3 sliding window
-   exposed it. A single CUDA gather kernel batching the per-row copies is the obvious
-   fix.
+3. **Fiddler-style CPU execution** of cold experts. `docs/plan/heterogeneous_moe.md §9`
+   kept this out of Phase 2 scope. Would be the step that actually makes the thesis
+   claim "heterogeneous inference" literal (CPU compute + GPU compute) rather than
+   "heterogeneous memory" (the current implementation). Revisit if time allows or if
+   the thesis framing needs it.
 
-4. **Fiddler-style CPU execution** of cold experts. `docs/plan/heterogeneous_moe.md §9`
-   kept this out of Phase 2 scope; revisit only if a model/config appears where
-   transfer still dominates after M3.
+4. **Expand BF16 validation**: cross-check against HuggingFace `transformers` on the
+   same model (same prompt, greedy, compare first N token ids). Currently we've only
+   verified output is coherent, not that it matches HF token-for-token.
 
 ## 6. Pre-existing issues worth a future pass
 
-1. **Non-quantized MoE path unvalidated.** The dense (`gate_weight`/`up_weight`/
-   `down_weight`) path in `allocate_slot_tensors` and `dispatch_expert_linear` compiled
-   and runs through the motions but has never seen a BF16 MoE model. Gated on item 1
-   above.
+1. *(Resolved)* Non-quantized MoE path — BF16 Qwen3-30B-A3B (D.5) was the first run
+   that exercised `allocate_slot_tensors`'s dense branch (the
+   `gate_weight`/`up_weight`/`down_weight` fields) and `dispatch_expert_linear`
+   falling through to `ops::linear`. Both worked without code changes.
 
 2. **`xmake run` drops env vars.** Observed during bench (see commit messages around
    the `CUDA_VISIBLE_DEVICES` investigation). Workaround: invoke binaries directly

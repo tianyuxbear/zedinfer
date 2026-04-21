@@ -333,17 +333,21 @@ expert FFN.
 
 ## 7. Config exposure
 
-User-visible knobs (env vars initially, CLI flags later):
+Current surface — one env var controls everything:
 
 ```
-ZEDINFER_MOE_GPU_SLOTS          N per layer, or -1 for all (=ALL_GPU)
-ZEDINFER_MOE_STRATEGY           "all_gpu" | "lru" | "pinned_lru" (default)
-ZEDINFER_MOE_PREFETCH           0 = synchronous transfer only
-                                1 = prefetch on current-layer routing
+ZEDINFER_MOE_GPU_SLOTS = N   N per layer.
+                             N unset OR N >= num_experts → ALL_GPU, experts GPU-resident.
+                             N < num_experts             → PINNED_LRU with N slots/layer.
+                                                           Experts are loaded straight to
+                                                           CPU pinned memory via the loader
+                                                           predicate (see §10); the GPU
+                                                           slot arena is populated on demand.
 ```
 
-Default behavior: if total expert VRAM fits after non-expert allocation, use ALL_GPU.
-Otherwise, use PINNED_LRU with slots sized to fit remaining VRAM.
+The same knob couples the loader's routing predicate and the pool strategy, so users
+don't need to set them independently. Auto-sizing N based on VRAM budget is listed as
+future polish in `moe_session_handoff.md §5`.
 
 ## 8. Risks and mitigations
 
@@ -366,7 +370,93 @@ Otherwise, use PINNED_LRU with slots sized to fit remaining VRAM.
 - **Scheduler integration** (expert-aware batching). Only useful if we serve multiple
   requests concurrently — single-user decode doesn't need it.
 
-## 10. File plan
+## 10. Large-model support — BF16 30B on 24GB VRAM — ✅ DONE
+
+M1-M3 establish PINNED_LRU as a working path. But M2's construction still assumes the
+whole expert set arrived on GPU first (loader default), with a D2H migration step
+happening inside the pool's ctor. For models that genuinely don't fit — BF16
+Qwen3-30B-A3B is ~60GB on a 24GB card — that initial GPU load OOMs before D2H can run.
+
+### 10.1 Loader routing predicate
+
+`Model::load_weights` gained an optional `std::function<bool(const std::string&)>
+to_cpu_pinned` parameter (default always-false → pre-change behavior). When the
+predicate matches a tensor name, the loader allocates its destination via
+`Tensor::create(shape, dtype, ZEDINFER_DEVICE_CPU, 0)` instead of `target_device`.
+On the NVIDIA runtime, CPU tensors go through `cudaMallocHost` and are thus pinned
+— eligible for direct `cudaMemcpyAsync` onto the transfer stream with full PCIe
+bandwidth.
+
+`Model::parse` builds the predicate from `ZEDINFER_MOE_GPU_SLOTS`: when
+`N < num_experts` on a `qwen3_moe` model, every tensor whose mapped name contains
+`.mlp.experts.` routes to CPU pinned. Non-expert tensors (attention, router, embeds,
+norms, etc.) still go to the target GPU. Loader log:
+
+```
+[Model] ZEDINFER_MOE_GPU_SLOTS=16 < num_experts=128: routing MoE experts to CPU pinned memory
+[Loader] Routed 55296 tensors to CPU pinned memory via predicate
+```
+
+### 10.2 ExpertPool auto-detection
+
+`ExpertPool::ExpertPool` probes `experts_->at(0, 0)`'s device to pick its
+construction path:
+
+- `experts_on_gpu = false` → experts arrived already pinned on host. Skip the D2H
+  migration loop entirely; allocate the GPU slot arena against the current runtime.
+  Construction time collapses from ~25 s to <1 s.
+- `experts_on_gpu = true` → legacy flow for INT4 small models where everything fits
+  on GPU. D2H-migrate each expert in place, same as M2.
+
+Both branches converge to the same post-condition: `experts_` holds CPU-pinned
+tensors; per-layer slot arena is ready on GPU.
+
+### 10.3 Validation
+
+Machine: NVIDIA RTX A6000 (48 GB physical). Weight + KV cache budget limited to
+**24 GB** via `--gpu-memory-utilization 0.5` — the engine computes
+`allowed_bytes = total × utilization`, and `init_block_pool` sizes the KV cache as
+`allowed - used_after_weights_loaded`. This closely matches a 4090-24GB scenario
+for the pieces that the utilization knob controls (weights + KV cache). What it
+does *not* reproduce: forward-pass activation headroom — on A6000 activations draw
+from the remaining 24 GB outside the budget, whereas on a real 24 GB card they
+have to fit within the same 24 GB. For ping-sized workloads (12-token prompt)
+activations are under a few hundred MB so the distinction is cosmetic here; for
+long prompts or wide batches on a true 24 GB card, budget the KV cache a little
+tighter to leave headroom.
+
+Command:
+```
+ZEDINFER_MOE_GPU_SLOTS=16 \
+./build/.../ping ~/data/models/Qwen3-30B-A3B --nvidia --gpu-memory-utilization 0.5
+```
+
+Observations from the log:
+- `Device memory: free=37836 MB, total=48541 MB` — after model load, ~10.7 GB GPU
+  used (3 GB non-experts + 7.2 GB slot arena of 16 slots × 48 layers × 9.4 MB).
+- `Creating KV page pool: 434097 pages × 16 tokens, 13565 MB` — leftover 13.3 GB
+  went to KV cache (matches 24 GB allowed − 10.7 GB used).
+- Coherent output on "Who are you?".
+
+Runtime throughput (12-token ping prompt, 153 generated tokens):
+
+| | Prefill tok/s | Decode tok/s |
+|---|---|---|
+| INT4 30B, N=32 (D.3) | 17.1 | 21.5 |
+| BF16 30B, N=16 (D.5) | 5.6 | 5.3 |
+
+The ~3-4× slowdown vs INT4 matches the 4× increase in per-expert bytes (9.4 MB
+BF16 vs 2.4 MB INT4) — PCIe transfer dominates for BF16 decode. Functional result
+is the main deliverable here; perf work would go after the prefill per-row gather
+PERF-TODO and any further M3-family prefetch heuristics.
+
+**What this proves**: a 60 GB MoE model runs on a single 24 GB GPU without
+Python-side orchestration, with first-class async prefetch + sliding-window
+overlap, using one env var as the user-visible knob. First exercise of the dense
+(non-quantized) expert path through `ExpertPool` and `dispatch_expert_linear` —
+passed without code changes.
+
+## 11. File plan
 
 | File | Status | Purpose |
 |------|--------|---------|
