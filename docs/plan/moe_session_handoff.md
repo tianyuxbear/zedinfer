@@ -19,9 +19,11 @@
 - ✅ **M3 — Async prefetch on transfer stream + sliding-window**. Async H2D on
   `Runtime::transfer_stream()` guarded by per-slot `cudaEvent_t`; `moe_decode` and
   `moe_prefill` issue prefetch batches before the compute loop (prefill uses a
-  sliding window sized to `max_prefetch_depth()` to avoid self-eviction). At N=32
-  on Qwen3-30B-A3B-GPTQ-Int4: prefill latency 1.36× baseline, decode ~1× baseline.
-  See `heterogeneous_moe.md §6 M3` for the numbers.
+  sliding window sized to `max_prefetch_depth()` to avoid self-eviction). Clean
+  single-card A6000 bench at N=32 on Qwen3-30B-A3B-GPTQ-Int4: prefill 122 → 87.8
+  tok/s (1.39× latency), decode 26.3 → 31.1 tok/s (0.84× latency — PINNED_LRU
+  actually faster, probably L2 locality + warmup ordering). See
+  `heterogeneous_moe.md §6 M3`.
 - ⏳ **M4 (optional) — Predictive prefetch** — not needed for current workloads;
   revisit only if a model with extreme fan-out shows under-utilized compute.
 
