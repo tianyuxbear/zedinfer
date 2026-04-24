@@ -4,7 +4,9 @@
 #include "utils/check.hpp"
 #include "zedinfer.h"
 
+#include <future>
 #include <gtest/gtest.h>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -139,6 +141,20 @@ TEST_F(StorageTest, DeviceStorageCreation) {
 
     storage.reset();
     ctx.reset();
+}
+
+TEST_F(StorageTest, ThreadLocalContextStartsWithActiveCpuRuntime) {
+    std::promise<bool> runtime_active;
+    auto future = runtime_active.get_future();
+
+    std::thread worker([promise = std::move(runtime_active)]() mutable {
+        Context& ctx = context();
+        promise.set_value(ctx.runtime().isActive());
+        ctx.reset();
+    });
+
+    EXPECT_TRUE(future.get());
+    worker.join();
 }
 
 TEST_F(StorageTest, HostStorageCreation) {

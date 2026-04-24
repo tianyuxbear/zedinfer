@@ -12,6 +12,7 @@ Context::Context() : current_runtime_(nullptr) {
     // Initialize with a CPU runtime.
     auto runtime = Runtime::create(ZEDINFER_DEVICE_CPU, 0);
     current_runtime_ = runtime.get();
+    current_runtime_->activate();
     runtime_map_[device::Device::cpu()] = std::move(runtime);
 }
 
