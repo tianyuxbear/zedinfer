@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <link rel="icon" href="/images/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/vendor/highlight.js/styles/github.min.css">
 <title>ZedInfer</title>
 <style>
 *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
@@ -183,10 +184,18 @@ body {
     margin: 12px 0;
     font-size: 13px;
     line-height: 1.6;
+    position: relative;
 }
 .msg-content code {
     font-family: var(--font-mono);
     font-size: 13px;
+}
+.msg-content pre code.hljs {
+    display: block;
+    padding: 0;
+    background: transparent;
+    color: inherit;
+    overflow-x: visible;
 }
 .msg-content :not(pre) > code {
     background: var(--code-bg);
@@ -454,7 +463,6 @@ body {
 .msg-content table { border-collapse: collapse; margin: 8px 0; width: 100%; }
 .msg-content th, .msg-content td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; font-size: 14px; }
 .msg-content th { background: var(--bg-secondary); font-weight: 600; }
-.msg-content pre { position: relative; }
 .msg-content .copy-btn {
     position: absolute; top: 6px; right: 6px;
     background: var(--border); border: none; border-radius: 4px;
@@ -530,6 +538,7 @@ body {
     </div>
 </div>
 
+<script src="/vendor/highlight.js/highlight.min.js"></script>
 <script>
 // ===== State =====
 let messages = [];
@@ -700,15 +709,37 @@ function setGenerating(v) {
 }
 
 // ===== Markdown Renderer =====
+function normalizeCodeLanguage(lang) {
+    const raw = String(lang || '').trim().split(/\s+/)[0].toLowerCase();
+    if (!raw) return '';
+    if (raw === 'c++') return 'cpp';
+    if (raw === 'c#') return 'csharp';
+    if (raw === 'shell') return 'bash';
+    return raw;
+}
+
+function renderCodeBlock(lang, code, options = {}) {
+    const id = 'cb' + Math.random().toString(36).substr(2,6);
+    const language = normalizeCodeLanguage(lang);
+    const languageClass = language
+        ? ` language-${language}`
+        : (options.open ? ' language-plaintext' : '');
+    const openAttr = options.open ? ' data-open-fence="1"' : '';
+    return `<pre><button class="copy-btn" onclick="copyCode('${id}')">Copy</button><code id="${id}" class="${languageClass.trim()}"${openAttr}>${code.trimEnd()}</code></pre>`;
+}
+
 function renderMarkdown(text) {
     let h = text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    const codeBlocks = [];
+    const stashCodeBlock = (lang, code, options = {}) => {
+        const token = `\u0000CODE${codeBlocks.length}\u0000`;
+        codeBlocks.push(renderCodeBlock((lang || '').trim(), code || '', options));
+        return token;
+    };
 
     // Code blocks with copy button
-    h = h.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) => {
-        const escaped = code.trimEnd();
-        const id = 'cb' + Math.random().toString(36).substr(2,6);
-        return `<pre><button class="copy-btn" onclick="copyCode('${id}')">Copy</button><code id="${id}">${escaped}</code></pre>`;
-    });
+    h = h.replace(/(^|\n)```([^\n`]*)\n([\s\S]*?)```/g, (_, lead, lang, code) => `${lead}${stashCodeBlock(lang, code)}`);
+    h = h.replace(/(^|\n)```([^\n`]*)?(?:\n([\s\S]*))?$/, (_, lead, lang, code) => `${lead}${stashCodeBlock(lang, code, { open: true })}`);
 
     // Inline code
     h = h.replace(/`([^`\n]+)`/g, '<code>$1</code>');
@@ -749,7 +780,8 @@ function renderMarkdown(text) {
 
     // Paragraphs
     h = h.replace(/\n{2,}/g, '</p><p>').replace(/\n/g, '<br>');
-    return '<p>' + h + '</p>';
+    h = '<p>' + h + '</p>';
+    return h.replace(/\u0000CODE(\d+)\u0000/g, (_, idx) => codeBlocks[Number(idx)]);
 }
 
 function copyCode(id) {
@@ -759,6 +791,15 @@ function copyCode(id) {
         const btn = el.parentElement.querySelector('.copy-btn');
         if (btn) { btn.textContent = 'Copied!'; setTimeout(() => btn.textContent = 'Copy', 1500); }
     });
+}
+
+function highlightCodeBlocks(container) {
+    if (!container || !window.hljs) return;
+    for (const block of container.querySelectorAll('pre code')) {
+        if (block.dataset.hljsApplied === '1') continue;
+        window.hljs.highlightElement(block);
+        block.dataset.hljsApplied = '1';
+    }
 }
 
 function splitAssistantContent(text) {
@@ -846,6 +887,7 @@ function addMessage(role, content) {
         body.innerHTML = role === 'assistant'
             ? renderAssistantContent(content)
             : renderMarkdown(content);
+        highlightCodeBlocks(body);
     }
     inner.appendChild(av); inner.appendChild(body);
     row.appendChild(inner); chatEl.appendChild(row);
@@ -871,6 +913,7 @@ async function sendMessage() {
 
     const bodyEl = addMessage('assistant', '');
     bodyEl.innerHTML = renderAssistantContent('', { streaming: true });
+    highlightCodeBlocks(bodyEl);
     let out = '';
     const maxTokens = parseInt(maxTokensEl.value) || 1024;
 
@@ -907,6 +950,7 @@ async function sendMessage() {
                             streaming: true,
                             keepThoughtOpen,
                         });
+                        highlightCodeBlocks(bodyEl);
                         scrollToBottom();
                     }
                 } catch (e) { if (e.message && !e.message.includes('JSON')) throw e; }
@@ -915,6 +959,7 @@ async function sendMessage() {
         if (out) {
             const keepThoughtOpen = bodyEl.querySelector('.thought-toggle')?.open;
             bodyEl.innerHTML = renderAssistantContent(out, { keepThoughtOpen });
+            highlightCodeBlocks(bodyEl);
         }
         messages.push({ role: 'assistant', content: out });
     } catch (err) {
@@ -923,6 +968,7 @@ async function sendMessage() {
             if (out) {
                 const keepThoughtOpen = bodyEl.querySelector('.thought-toggle')?.open;
                 bodyEl.innerHTML = renderAssistantContent(out, { keepThoughtOpen });
+                highlightCodeBlocks(bodyEl);
                 messages.push({ role: 'assistant', content: out });
             }
         } else {
