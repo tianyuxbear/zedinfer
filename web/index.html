@@ -179,12 +179,26 @@ body {
     background: var(--code-bg);
     border: 1px solid var(--code-border);
     border-radius: 6px;
-    padding: 14px 16px;
-    overflow-x: auto;
+    overflow: hidden;
     margin: 12px 0;
     font-size: 13px;
     line-height: 1.6;
     position: relative;
+}
+.code-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 8px 10px 8px 12px;
+    border-bottom: 1px solid var(--code-border);
+    background: rgba(255, 255, 255, 0.55);
+}
+.code-lang {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-light);
+    white-space: nowrap;
 }
 .msg-content code {
     font-family: var(--font-mono);
@@ -192,10 +206,15 @@ body {
 }
 .msg-content pre code.hljs {
     display: block;
-    padding: 0;
+    padding: 14px 16px;
     background: transparent;
     color: inherit;
-    overflow-x: visible;
+    overflow-x: auto;
+}
+.msg-content pre code:not(.hljs) {
+    display: block;
+    padding: 14px 16px;
+    overflow-x: auto;
 }
 .msg-content :not(pre) > code {
     background: var(--code-bg);
@@ -464,12 +483,11 @@ body {
 .msg-content th, .msg-content td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; font-size: 14px; }
 .msg-content th { background: var(--bg-secondary); font-weight: 600; }
 .msg-content .copy-btn {
-    position: absolute; top: 6px; right: 6px;
+    position: static;
     background: var(--border); border: none; border-radius: 4px;
     padding: 3px 8px; font-size: 11px; cursor: pointer; color: var(--text-secondary);
-    opacity: 0; transition: opacity 0.15s;
+    flex-shrink: 0;
 }
-.msg-content pre:hover .copy-btn { opacity: 1; }
 .msg-content .copy-btn:hover { background: var(--text-light); color: white; }
 
 /* ===== Responsive ===== */
@@ -710,12 +728,53 @@ function setGenerating(v) {
 
 // ===== Markdown Renderer =====
 function normalizeCodeLanguage(lang) {
-    const raw = String(lang || '').trim().split(/\s+/)[0].toLowerCase();
+    const raw = String(lang || '').trim().split(/\s+/)[0].toLowerCase().replace(/[^a-z0-9#+._-]/g, '');
     if (!raw) return '';
     if (raw === 'c++') return 'cpp';
     if (raw === 'c#') return 'csharp';
     if (raw === 'shell') return 'bash';
     return raw;
+}
+
+function formatCodeLanguageLabel(lang) {
+    const value = String(lang || '').trim().toLowerCase();
+    if (!value) return 'Text';
+
+    const aliases = {
+        plaintext: 'Text',
+        text: 'Text',
+        js: 'JavaScript',
+        cpp: 'C++',
+        cxx: 'C++',
+        csharp: 'C#',
+        javascript: 'JavaScript',
+        ts: 'TypeScript',
+        typescript: 'TypeScript',
+        py: 'Python',
+        rb: 'Ruby',
+        rs: 'Rust',
+        sh: 'Bash',
+        bash: 'Bash',
+        shell: 'Shell',
+        objectivec: 'Objective-C',
+        json: 'JSON',
+        xml: 'XML',
+        yml: 'YAML',
+        yaml: 'YAML',
+        html: 'HTML',
+        css: 'CSS',
+        sql: 'SQL',
+        md: 'Markdown',
+        markdown: 'Markdown',
+        makefile: 'Makefile',
+    };
+    if (aliases[value]) return aliases[value];
+
+    return value
+        .split(/[-_]/)
+        .filter(Boolean)
+        .map(part => part.charAt(0).toUpperCase() + part.slice(1))
+        .join(' ');
 }
 
 function renderCodeBlock(lang, code, options = {}) {
@@ -725,7 +784,9 @@ function renderCodeBlock(lang, code, options = {}) {
         ? ` language-${language}`
         : (options.open ? ' language-plaintext' : '');
     const openAttr = options.open ? ' data-open-fence="1"' : '';
-    return `<pre><button class="copy-btn" onclick="copyCode('${id}')">Copy</button><code id="${id}" class="${languageClass.trim()}"${openAttr}>${code.trimEnd()}</code></pre>`;
+    const label = formatCodeLanguageLabel(language || (options.open ? 'plaintext' : ''));
+    const dataLanguage = language ? ` data-code-language="${language}"` : '';
+    return `<pre><div class="code-head"><span class="code-lang" data-code-lang>${label}</span><button class="copy-btn" onclick="copyCode('${id}')">Copy</button></div><code id="${id}" class="${languageClass.trim()}"${dataLanguage}${openAttr}>${code.trimEnd()}</code></pre>`;
 }
 
 function renderMarkdown(text) {
@@ -798,6 +859,12 @@ function highlightCodeBlocks(container) {
     for (const block of container.querySelectorAll('pre code')) {
         if (block.dataset.hljsApplied === '1') continue;
         window.hljs.highlightElement(block);
+        const label = block.parentElement?.querySelector('[data-code-lang]');
+        if (label) {
+            const explicit = block.dataset.codeLanguage || '';
+            const detected = explicit || block.result?.language || '';
+            label.textContent = formatCodeLanguageLabel(detected || 'plaintext');
+        }
         block.dataset.hljsApplied = '1';
     }
 }
