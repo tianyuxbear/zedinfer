@@ -11,12 +11,14 @@
     --bg: #ffffff;
     --bg-secondary: #f7f7f8;
     --bg-hover: #ececf1;
+    --bg-soft: #fbfbfc;
     --text: #343541;
     --text-secondary: #6e6e80;
     --text-light: #8e8ea0;
     --border: #e5e5e5;
     --accent: #10a37f;
     --accent-hover: #0d8a6c;
+    --accent-soft: rgba(16, 163, 127, 0.08);
     --user-bg: #f7f7f8;
     --assistant-bg: #ffffff;
     --code-bg: #f6f8fa;
@@ -35,7 +37,7 @@
 body {
     font-family: var(--font);
     color: var(--text);
-    background: var(--bg);
+    background: var(--bg-secondary);
     height: 100vh;
     display: flex;
 }
@@ -98,6 +100,7 @@ body {
     display: flex;
     flex-direction: column;
     min-width: 0;
+    background: var(--bg);
 }
 
 /* ===== Chat Messages ===== */
@@ -117,7 +120,7 @@ body {
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    padding: 120px 24px 24px;
+    padding: 104px 24px 24px;
     text-align: center;
 }
 .welcome-logo {
@@ -136,7 +139,7 @@ body {
 .welcome p {
     font-size: 14px;
     color: var(--text-secondary);
-    max-width: 400px;
+    max-width: 460px;
     line-height: 1.6;
 }
 
@@ -155,6 +158,8 @@ body {
     border-radius: 4px;
     flex-shrink: 0;
     overflow: hidden;
+    border: 1px solid var(--border);
+    background: var(--bg-soft);
 }
 .msg-avatar img {
     width: 100%; height: 100%;
@@ -194,19 +199,105 @@ body {
     margin: 8px 0 8px 20px;
 }
 .msg-content li { margin-bottom: 4px; }
-.thinking-text {
+.thought-toggle {
+    margin-bottom: 10px;
+}
+.thought-toggle summary {
+    list-style: none;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--text-light);
+    font-size: 12px;
+}
+.thought-toggle summary::-webkit-details-marker {
+    display: none;
+}
+.thought-label-expanded {
+    display: none;
+}
+.thought-toggle.thinking .thought-label-expanded {
+    display: none;
+}
+.thought-toggle[open] .thought-label-collapsed {
+    display: none;
+}
+.thought-toggle[open]:not(.thinking) .thought-label-expanded {
+    display: inline;
+}
+.thought-toggle[open].thinking .thought-label-collapsed {
+    display: inline;
+}
+.thought-chevron {
+    width: 9px;
+    height: 9px;
+    border-right: 1.5px solid var(--text-light);
+    border-bottom: 1.5px solid var(--text-light);
+    transform: rotate(45deg);
+    transition: transform 0.15s ease;
+}
+.thought-toggle[open] .thought-chevron {
+    transform: rotate(225deg);
+}
+.thought-toggle .thinking-text {
+    font-size: 12px;
+}
+.thought-panel {
+    margin: 8px 0 0 18px;
+    padding-left: 12px;
+    border-left: 1px solid var(--border);
+    color: var(--text-light);
+    font-size: 14px;
+    line-height: 1.65;
+}
+.thought-panel > *:first-child {
+    margin-top: 0;
+}
+.thought-panel strong,
+.thought-panel h1,
+.thought-panel h2,
+.thought-panel h3,
+.thought-panel th,
+.thought-panel td,
+.thought-panel code,
+.thought-panel a {
+    color: var(--text-secondary);
+}
+.thought-panel a:hover {
+    color: var(--text-secondary);
+}
+.thought-panel blockquote {
+    color: var(--text-light);
+}
+.thought-empty {
     color: var(--text-light);
     font-style: italic;
 }
-.thinking-text::after {
-    content: '';
-    animation: dots 1.4s steps(4) infinite;
+.assistant-placeholder {
+    margin-bottom: 10px;
 }
-@keyframes dots {
-    0%  { content: ''; }
-    25% { content: '.'; }
-    50% { content: '..'; }
-    75% { content: '...'; }
+.error-text {
+    color: #ef4444;
+}
+.thinking-text {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--text-light);
+    font-style: normal;
+}
+.thinking-spinner {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    border: 1.5px solid rgba(142, 142, 160, 0.3);
+    border-top-color: var(--text-light);
+    animation: spin 0.9s linear infinite;
+    flex-shrink: 0;
+}
+@keyframes spin {
+    to { transform: rotate(360deg); }
 }
 
 /* ===== Input Area ===== */
@@ -221,8 +312,8 @@ body {
     margin: 0 auto;
     background: var(--input-bg);
     border: 1px solid var(--input-border);
-    border-radius: 12px;
-    box-shadow: var(--shadow);
+    border-radius: 14px;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04), var(--shadow);
     display: flex;
     align-items: flex-end;
     padding: 8px 12px;
@@ -346,6 +437,14 @@ body {
     padding: 2px 6px; font-size: 13px; color: var(--text);
     outline: none; background: var(--bg);
 }
+.history-empty {
+    padding: 8px 10px;
+    border-radius: 6px;
+    font-size: 13px;
+    color: var(--text-light);
+    background: var(--bg);
+    border: 1px dashed var(--border);
+}
 .msg-content h1, .msg-content h2, .msg-content h3 { margin: 12px 0 6px; font-weight: 600; }
 .msg-content h1 { font-size: 1.4em; }
 .msg-content h2 { font-size: 1.2em; }
@@ -410,6 +509,7 @@ body {
         <div class="chat-messages" id="chat">
             <div class="welcome" id="welcome">
                 <div class="welcome-logo"><img src="/images/logo-light.svg" alt="ZedInfer"></div>
+                <h2>ZedInfer Chat</h2>
                 <p>A lightweight C++ inference engine. Type a message below to start chatting.</p>
             </div>
         </div>
@@ -438,8 +538,12 @@ let sessionId = '';
 let currentConvId = '';
 let abortCtrl = null; // AbortController for stopping generation
 const STORAGE = 'zedinfer_state';
+const SPIN_MS = 900;
+const THINK_OPEN = '<think>';
+const THINK_CLOSE = '</think>';
 const WELCOME_HTML = `<div class="welcome" id="welcome">
     <div class="welcome-logo"><img src="/images/logo-light.svg" alt="ZedInfer"></div>
+    <h2>ZedInfer Chat</h2>
     <p>A lightweight C++ inference engine. Type a message below to start chatting.</p>
 </div>`;
 
@@ -495,6 +599,13 @@ function deleteHistory(convId) {
 function renderHistory() {
     const s = loadStore();
     historyListEl.innerHTML = '';
+    if (!(s.history || []).length) {
+        const empty = document.createElement('li');
+        empty.className = 'history-empty';
+        empty.textContent = 'No saved conversations yet.';
+        historyListEl.appendChild(empty);
+        return;
+    }
     for (const h of (s.history || [])) {
         const li = document.createElement('li');
         li.className = 'history-item' + (h.convId === currentConvId ? ' active' : '');
@@ -650,6 +761,78 @@ function copyCode(id) {
     });
 }
 
+function splitAssistantContent(text) {
+    const raw = String(text || '');
+    const openIdx = raw.indexOf(THINK_OPEN);
+    if (openIdx === -1) {
+        return { hasThought: false, thought: '', answer: raw.trim(), thinking: false };
+    }
+
+    const before = raw.slice(0, openIdx).trim();
+    const afterOpen = raw.slice(openIdx + THINK_OPEN.length);
+    const closeIdx = afterOpen.indexOf(THINK_CLOSE);
+
+    if (closeIdx === -1) {
+        return {
+            hasThought: true,
+            thought: afterOpen.trim(),
+            answer: before,
+            thinking: true,
+        };
+    }
+
+    const thought = afterOpen.slice(0, closeIdx).trim();
+    const afterClose = afterOpen.slice(closeIdx + THINK_CLOSE.length).trim();
+    const answer = [before, afterClose].filter(Boolean).join('\n\n');
+
+    return {
+        hasThought: true,
+        thought,
+        answer,
+        thinking: false,
+    };
+}
+
+function renderThinkingText(label) {
+    const phase = Math.floor(performance.now() % SPIN_MS);
+    return `<span class="thinking-text"><span class="thinking-spinner" style="animation-delay:-${phase}ms"></span>${label}</span>`;
+}
+
+function renderAssistantContent(content, options = {}) {
+    const parsed = splitAssistantContent(content);
+    const shouldOpen = options.keepThoughtOpen || (parsed.thinking && !options.streaming);
+    const keepOpen = shouldOpen ? ' open' : '';
+
+    if (!content && options.streaming) {
+        return `<div class="assistant-placeholder">${renderThinkingText('Thinking')}</div>`;
+    }
+
+    let html = '';
+    if (parsed.hasThought) {
+        const thoughtHtml = parsed.thought
+            ? renderMarkdown(parsed.thought)
+            : '<p class="thought-empty">No reasoning content.</p>';
+
+        html += `<details class="thought-toggle${parsed.thinking ? ' thinking' : ''}"${keepOpen}>
+            <summary>
+                ${parsed.thinking ? renderThinkingText('Thinking') : '<span class="thought-chevron"></span>'}
+                ${parsed.thinking ? '<span class="thought-chevron"></span>' : ''}
+                <span class="thought-label-collapsed">${parsed.thinking ? '' : 'Expand reasoning'}</span>
+                <span class="thought-label-expanded">Collapse reasoning</span>
+            </summary>
+            <div class="thought-panel">${thoughtHtml}</div>
+        </details>`;
+    }
+
+    if (parsed.answer) {
+        html += renderMarkdown(parsed.answer);
+    } else if ((options.streaming || parsed.thinking) && !parsed.hasThought) {
+        html += `<div class="assistant-placeholder">${renderThinkingText('Thinking')}</div>`;
+    }
+
+    return html;
+}
+
 function addMessage(role, content) {
     const w = document.getElementById('welcome'); if (w) w.remove();
     const row = document.createElement('div'); row.className = 'msg-row';
@@ -659,7 +842,11 @@ function addMessage(role, content) {
     img.src = role==='user' ? '/images/user.svg' : '/images/bot.svg'; img.alt = role;
     av.appendChild(img);
     const body = document.createElement('div'); body.className = 'msg-content';
-    if (content) body.innerHTML = renderMarkdown(content);
+    if (content) {
+        body.innerHTML = role === 'assistant'
+            ? renderAssistantContent(content)
+            : renderMarkdown(content);
+    }
     inner.appendChild(av); inner.appendChild(body);
     row.appendChild(inner); chatEl.appendChild(row);
     scrollToBottom();
@@ -683,7 +870,7 @@ async function sendMessage() {
     saveCurrent();
 
     const bodyEl = addMessage('assistant', '');
-    bodyEl.innerHTML = '<span class="thinking-text">Thinking</span>';
+    bodyEl.innerHTML = renderAssistantContent('', { streaming: true });
     let out = '';
     const maxTokens = parseInt(maxTokensEl.value) || 1024;
 
@@ -713,17 +900,33 @@ async function sendMessage() {
                     const c = JSON.parse(d);
                     if (c.error) throw new Error(c.error.message || 'Generation error');
                     const t = c.choices?.[0]?.delta?.content;
-                    if (t) { out += t; bodyEl.innerHTML = renderMarkdown(out); scrollToBottom(); }
+                    if (t) {
+                        out += t;
+                        const keepThoughtOpen = bodyEl.querySelector('.thought-toggle')?.open;
+                        bodyEl.innerHTML = renderAssistantContent(out, {
+                            streaming: true,
+                            keepThoughtOpen,
+                        });
+                        scrollToBottom();
+                    }
                 } catch (e) { if (e.message && !e.message.includes('JSON')) throw e; }
             }
+        }
+        if (out) {
+            const keepThoughtOpen = bodyEl.querySelector('.thought-toggle')?.open;
+            bodyEl.innerHTML = renderAssistantContent(out, { keepThoughtOpen });
         }
         messages.push({ role: 'assistant', content: out });
     } catch (err) {
         if (err.name === 'AbortError') {
             // User clicked stop — keep partial output
-            if (out) messages.push({ role: 'assistant', content: out });
+            if (out) {
+                const keepThoughtOpen = bodyEl.querySelector('.thought-toggle')?.open;
+                bodyEl.innerHTML = renderAssistantContent(out, { keepThoughtOpen });
+                messages.push({ role: 'assistant', content: out });
+            }
         } else {
-            bodyEl.innerHTML = '<p style="color:#ef4444;">Error: '+err.message.replace(/</g,'&lt;')+'</p>';
+            bodyEl.innerHTML = '<p class="error-text">Error: '+err.message.replace(/</g,'&lt;')+'</p>';
         }
     }
 
