@@ -139,6 +139,18 @@ execution on a single consumer GPU):
    same model (same prompt, greedy, compare first N token ids). Currently we've only
    verified output is coherent, not that it matches HF token-for-token.
 
+5. **Load chat templates from `tokenizer_config.json` via real Jinja2 evaluator.**
+   Currently `ChatTemplate::load` (`src/zedinfer/chat_template.cpp:124-135`) hardcodes
+   one ChatML formatter for all Qwen variants and one DeepSeek-R1 formatter. The HF
+   chat_template field in `tokenizer_config.json` is a full Jinja2 program with
+   `namespace`, slicing, `is` tests, string methods, filters — modern Qwen3 uses it
+   for tool calling and thinking-mode. Right approach: vendor minja
+   (llama.cpp-style minimal Jinja2 evaluator, header-only ~3k LOC, MIT) and route
+   `apply()` through it; delete the hardcoded `default_qwen_chatml` /
+   `default_deepseek_r1` once the Jinja path is verified. ROI is low for the thesis
+   (none of decode/prefill numbers change) but it's the architecturally correct
+   answer and would be a clean post-defense PR. ~1 day work.
+
 ## 6. Pre-existing issues worth a future pass
 
 1. *(Resolved)* Non-quantized MoE path — BF16 Qwen3-30B-A3B (D.5) was the first run
