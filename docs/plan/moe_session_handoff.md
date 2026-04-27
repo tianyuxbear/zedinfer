@@ -134,11 +134,14 @@ execution on a single consumer GPU):
    `ops::scatter_add_rows` (CPU + NVIDIA), per-expert launch count cut from
    ~2×group_size to 2. Indices/weights uploaded once per prefill from a thread-local
    pinned-host scratch via async H2D on the compute stream. A6000 48GB at util=0.5,
-   p=128 d=128: ALL_GPU prefill 122 → 223.22 tok/s (+83%); PINNED_LRU N=32 prefill
-   87.8 → 112.32 tok/s (+28%). Decode unchanged within noise (P2 doesn't touch
-   `moe_decode`). See `heterogeneous_moe.md §11`. Lifetime caveat documented there:
-   thread-local scratch holds shared_ptr to pool storage until thread exit; OK for
-   single-engine serving.
+   p=128 d=128, vs M3-rebench (`1db011b`) on the same machine:
+   ALL_GPU prefill 135.92 → 223.22 tok/s (**+64%**); PINNED_LRU N=32 prefill
+   90.78 → 112.32 tok/s (**+24%**). Decode within noise (~6% drift across
+   1db011b → 860c1c9 → HEAD; P2 doesn't touch `moe_decode`). The earlier "+83% /
+   +28%" claims compared against single-shot M3 numbers in the doc that didn't
+   reproduce on rebench — see `heterogeneous_moe.md §11.2` for the corrected table.
+   Lifetime caveat: thread-local scratch holds shared_ptr to pool storage until
+   thread exit; OK for single-engine serving.
 
 3. **Fiddler-style CPU execution** of cold experts. `docs/plan/heterogeneous_moe.md §9`
    kept this out of Phase 2 scope. Would be the step that actually makes the thesis

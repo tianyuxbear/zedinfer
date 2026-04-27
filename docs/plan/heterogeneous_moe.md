@@ -527,17 +527,29 @@ thread serving model; revisit if multiple engines coexist.
 
 ### 11.2 A6000 48GB, util=0.5, p=128 d=128
 
-| Config | M3 baseline | After §11 | Δ |
+The §6 M3 row originally cited prefill 122 / decode 26.25 (ALL_GPU) and prefill
+87.8 / decode 31.10 (PINNED_LRU N=32). Re-running the M3 commit (`1db011b`) on the
+same machine after this work landed gives different absolute numbers — single-shot
+benches on a multi-tenant GPU have ±10% variance from thermal / load drift. The
+table below uses fresh M3-rebench baselines for an apples-to-apples diff.
+
+| Config | M3 rebench (1db011b) | After §11 | Δ |
 |---|---:|---:|---:|
-| ALL_GPU prefill | 122.0 | 223.22 | **+83%** |
-| PINNED_LRU N=32 prefill | 87.8 | 112.32 | **+28%** |
+| ALL_GPU prefill | 135.92 | 223.22 | **+64%** |
+| PINNED_LRU N=32 prefill | 90.78 | 112.32 | **+24%** |
 | PINNED_LRU N=8 prefill | — | 115.43 | (sliding-window unaffected by N=8 vs N=32) |
-| ALL_GPU decode | 26.3 | 21.63 | unchanged within noise (decode goes through `moe_decode`, not touched) |
-| PINNED_LRU N=32 decode | 31.1 | 27.69 | unchanged within noise |
+| ALL_GPU decode | 23.06 | 21.63 | within noise (decode path untouched by §11) |
+| PINNED_LRU N=32 decode | 26.73 | 27.69 | within noise |
 
 ALL_GPU now correctly outpaces PINNED_LRU as expected (no transfer overhead).
 PINNED_LRU prefill at N=8 ≈ N=32 confirms sliding-window prefetch hides H2D
-even at the tightest viable slot count.
+even at the tightest viable slot count. Decode trace across `1db011b → 860c1c9
+(D-series) → HEAD` is 23.06 → 22.32 → 21.63: a ~6% drift inside the run-to-run
+noise band, no commit-localized regression.
+
+(The §6 M3 row keeps its original 122 / 26.25 numbers as historical record. The
+commit message for the §11 work cited +83% / +28% based on those single-shot
+figures; the corrected speedups against rebench are +64% / +24%.)
 
 ## 12. File plan
 
