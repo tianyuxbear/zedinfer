@@ -27,4 +27,14 @@ void add_scaled(tensor_t out, tensor_t a, float alpha);
 // Fill tensor with zeros
 void fill_zero(tensor_t t);
 
+// dst[r, :] = src[indices[r], :] for r in [0, dst.shape[0]).
+// dst/src 2D, same dtype + same device; indices 1D int32, length = dst.shape[0].
+// Replaces a per-row memcpy loop with a single launch on GPU.
+void gather_rows(tensor_t dst, tensor_t src, tensor_t indices);
+
+// out[indices[r], :] += weights[r] * src[r, :] for r in [0, src.shape[0]).
+// Within one call, indices[r] are required to be unique (no intra-call write race).
+// Across calls, stream ordering serializes accumulations into the same row.
+void scatter_add_rows(tensor_t out, tensor_t src, tensor_t indices, tensor_t weights);
+
 } // namespace zedinfer::ops

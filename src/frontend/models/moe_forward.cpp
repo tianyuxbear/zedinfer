@@ -16,6 +16,48 @@ namespace {
 // Tensor factory bound to exec_config device/dtype.
 using MakeTensor = std::function<tensor_t(std::vector<size_t>)>;
 
+// Persistent scratch for prefill indices/weights uploads. Grows monotonically; reused
+// across moe_prefill calls and across MoE layers within a single inference.
+//
+// Why this exists: under ALL_GPU mode the BestFitMemoryPool is heavily populated by
+// ~14 GB of expert weights, so per-layer Tensor::create / dealloc round-trips for these
+// tiny indices/weights buffers hit the pool's slow path. PINNED_LRU was unaffected
+// because its pool only holds ~150 MB of slot arena. Persistent buffers also let the
+// upload run as memcpy_async on the compute stream, avoiding the per-layer global
+// sync from cudaMemcpy.
+//
+// Lifetime caveat: thread_local persistence means these tensors hold shared_ptr to
+// pool-backed storage until thread exit. If the engine (and its memory pool) is
+// destroyed before the thread, these dangle. Acceptable for the current single-engine
+// single-inference-thread serving model; revisit if multiple engines coexist.
+struct PrefillIndexScratch {
+    tensor_t indices_dev;     // device, I32, [capacity]
+    tensor_t weights_dev;     // device, F32, [capacity]
+    tensor_t indices_host;    // pinned host (cudaMallocHost on NVIDIA), I32, [capacity]
+    tensor_t weights_host;    // pinned host, F32, [capacity]
+    size_t capacity = 0;
+    zedinferDeviceType_t device_type = ZEDINFER_DEVICE_CPU;
+    int device_id = -1;
+};
+
+static thread_local PrefillIndexScratch s_prefill_scratch;
+
+static void ensure_prefill_scratch(size_t needed, zedinferDeviceType_t device_type, int device_id) {
+    if (s_prefill_scratch.capacity >= needed && s_prefill_scratch.device_type == device_type
+        && s_prefill_scratch.device_id == device_id && s_prefill_scratch.indices_dev) {
+        return;
+    }
+    // Grow with headroom so we don't reallocate every batch-size bump.
+    const size_t new_cap = std::max(needed, s_prefill_scratch.capacity * 2);
+    s_prefill_scratch.indices_dev = Tensor::create({new_cap}, ZEDINFER_DTYPE_I32, device_type, device_id);
+    s_prefill_scratch.weights_dev = Tensor::create({new_cap}, ZEDINFER_DTYPE_F32, device_type, device_id);
+    s_prefill_scratch.indices_host = Tensor::create({new_cap}, ZEDINFER_DTYPE_I32, ZEDINFER_DEVICE_CPU, 0);
+    s_prefill_scratch.weights_host = Tensor::create({new_cap}, ZEDINFER_DTYPE_F32, ZEDINFER_DEVICE_CPU, 0);
+    s_prefill_scratch.capacity = new_cap;
+    s_prefill_scratch.device_type = device_type;
+    s_prefill_scratch.device_id = device_id;
+}
+
 // Compute router logits on device, then bring them to host as F32 for top-k selection.
 static ops::moe::TopKResult compute_router_topk(const ModelForwardConfig& model, tensor_t input, int layer_idx,
                                                 tensor_t router_logits_buf, size_t top_k) {
@@ -80,8 +122,12 @@ static void moe_decode(const ModelForwardConfig& model, tensor_t moe_output, ten
 
 // Execute the N>1 prefill path: permute tokens by expert, run FFN per expert group, scatter back.
 // Buffers (gathered, g_gate, g_up, g_act, g_down) are allocated ONCE at max group size = N
-// and reused via slice views for each expert. Phase 2's ExpertPool will manage these at a
-// higher level.
+// and reused via slice views for each expert.
+//
+// Gather/scatter use single-launch CUDA kernels (`ops::gather_rows` / `ops::scatter_add_rows`)
+// fed from a flat indices/weights upload built once at the start of prefill. Replaces the
+// O(group_size) per-row memcpy and per-row add_scaled loops, cutting launch count from
+// ~2 × group_size per expert to ~2 per expert.
 static void moe_prefill(const ModelForwardConfig& model, tensor_t moe_output, tensor_t input, int layer_idx,
                         const ops::moe::TopKResult& topk, const MakeTensor& make) {
     const size_t N = input->shape()[0];
@@ -102,19 +148,8 @@ static void moe_prefill(const ModelForwardConfig& model, tensor_t moe_output, te
         }
     }
 
-    // Pre-allocate buffers at max group size (N) and reuse across experts via slice views.
-    auto gathered_full = make({N, hidden_size});
-    auto g_gate_full = make({N, moe_inter});
-    auto g_up_full = make({N, moe_inter});
-    auto g_act_full = make({N, moe_inter});
-    auto g_down_full = make({N, hidden_size});
-
-    auto* api = zedinfer::core::context().runtime().api();
-    auto kind = (input->deviceType() == ZEDINFER_DEVICE_CPU) ? ZEDINFER_MEMCPY_H2H : ZEDINFER_MEMCPY_D2D;
-    const size_t row_bytes = hidden_size * input->elementSize();
-
-    // Materialize the active-expert ordering used by both the prefetcher and the
-    // compute loop below, so indexing matches between the two.
+    // Materialize the active-expert ordering used by the prefetcher and the compute loop
+    // below, so indexing matches between the two.
     std::vector<size_t> active_experts;
     active_experts.reserve(num_experts);
     for (size_t eid = 0; eid < num_experts; ++eid) {
@@ -122,6 +157,54 @@ static void moe_prefill(const ModelForwardConfig& model, tensor_t moe_output, te
             active_experts.push_back(eid);
         }
     }
+
+    // Build flat indices/weights per active-expert order into the persistent pinned host
+    // scratch. Sum of group sizes is exactly N × top_k by construction. Grow the device-
+    // side scratch lazily if this prefill is bigger than any seen before on this thread.
+    const size_t total = N * top_k;
+    ensure_prefill_scratch(total, input->deviceType(), input->deviceId());
+
+    auto* idx_host = reinterpret_cast<std::int32_t*>(s_prefill_scratch.indices_host->data());
+    auto* w_host = reinterpret_cast<float*>(s_prefill_scratch.weights_host->data());
+
+    std::vector<size_t> expert_offsets;
+    expert_offsets.reserve(active_experts.size() + 1);
+    expert_offsets.push_back(0);
+    size_t pos = 0;
+    for (size_t idx = 0; idx < active_experts.size(); ++idx) {
+        const size_t eid = active_experts[idx];
+        const auto& tokens = expert_tokens[eid];
+        const auto& wts = expert_weights[eid];
+        for (size_t i = 0; i < tokens.size(); ++i) {
+            idx_host[pos] = static_cast<std::int32_t>(tokens[i]);
+            w_host[pos] = wts[i];
+            ++pos;
+        }
+        expert_offsets.push_back(pos);
+    }
+
+    // Async H2D on the compute stream: keeps the upload ordered with the gather/scatter
+    // kernels that consume it (FIFO on the same stream) without forcing a global sync.
+    // Pinned host source guarantees DMA-overlap eligibility.
+    auto& runtime = zedinfer::core::context().runtime();
+    auto* api = runtime.api();
+    auto compute_stream = runtime.stream();
+    const auto kind_h2d = (input->deviceType() == ZEDINFER_DEVICE_CPU) ? ZEDINFER_MEMCPY_H2H : ZEDINFER_MEMCPY_H2D;
+    api->memcpy_async(s_prefill_scratch.indices_dev->data(), s_prefill_scratch.indices_host->data(),
+                      total * sizeof(std::int32_t), kind_h2d, compute_stream);
+    api->memcpy_async(s_prefill_scratch.weights_dev->data(), s_prefill_scratch.weights_host->data(),
+                      total * sizeof(float), kind_h2d, compute_stream);
+
+    // Slice views over the prefix actually used this call (scratch capacity may be larger).
+    auto indices_buf = s_prefill_scratch.indices_dev->slice(0, 0, total);
+    auto weights_buf = s_prefill_scratch.weights_dev->slice(0, 0, total);
+
+    // Pre-allocate buffers at max group size (N) and reuse across experts via slice views.
+    auto gathered_full = make({N, hidden_size});
+    auto g_gate_full = make({N, moe_inter});
+    auto g_up_full = make({N, moe_inter});
+    auto g_act_full = make({N, moe_inter});
+    auto g_down_full = make({N, hidden_size});
 
     // M3.5 sliding-window prefetch. Keep `depth` transfers outstanding on the transfer
     // stream: first issue an initial burst of min(depth, active_experts.size()) calls,
@@ -140,36 +223,27 @@ static void moe_prefill(const ModelForwardConfig& model, tensor_t moe_output, te
 
     for (size_t idx = 0; idx < active_experts.size(); ++idx) {
         const size_t eid = active_experts[idx];
-        const auto& tokens = expert_tokens[eid];
-        size_t group_size = tokens.size();
+        const size_t group_size = expert_tokens[eid].size();
+        const size_t off = expert_offsets[idx];
+
+        auto idx_view = indices_buf->slice(0, off, off + group_size);
+        auto w_view = weights_buf->slice(0, off, off + group_size);
 
         // Views for this expert's group size (contiguous: slicing dim 0 from 0).
-        auto gathered = gathered_full->slice(0, 0, static_cast<int64_t>(group_size));
-        auto g_gate = g_gate_full->slice(0, 0, static_cast<int64_t>(group_size));
-        auto g_up = g_up_full->slice(0, 0, static_cast<int64_t>(group_size));
-        auto g_act = g_act_full->slice(0, 0, static_cast<int64_t>(group_size));
-        auto g_down = g_down_full->slice(0, 0, static_cast<int64_t>(group_size));
+        auto gathered = gathered_full->slice(0, 0, group_size);
+        auto g_gate = g_gate_full->slice(0, 0, group_size);
+        auto g_up = g_up_full->slice(0, 0, group_size);
+        auto g_act = g_act_full->slice(0, 0, group_size);
+        auto g_down = g_down_full->slice(0, 0, group_size);
 
-        // PERF-TODO: replace per-row cudaMemcpy with a single CUDA gather kernel. Current
-        // implementation launches O(group_size) small copies per expert per layer; a gather
-        // kernel would batch them into one launch and use coalesced loads.
-        for (size_t i = 0; i < group_size; ++i) {
-            void* dst = gathered->data() + static_cast<ptrdiff_t>(i * row_bytes);
-            const void* src = input->data() + static_cast<ptrdiff_t>(tokens[i] * row_bytes);
-            api->memcpy_sync(dst, src, row_bytes, kind);
-        }
+        ops::gather_rows(gathered, input, idx_view);
 
         model.dispatch_expert_linear(g_gate, gathered, layer_idx, static_cast<int>(eid), ExpertProj::Gate);
         model.dispatch_expert_linear(g_up, gathered, layer_idx, static_cast<int>(eid), ExpertProj::Up);
         ops::swiglu(g_act, g_gate, g_up);
         model.dispatch_expert_linear(g_down, g_act, layer_idx, static_cast<int>(eid), ExpertProj::Down);
 
-        // Scatter weighted rows back.
-        for (size_t i = 0; i < group_size; ++i) {
-            auto out_row = moe_output->slice(0, static_cast<int64_t>(tokens[i]), static_cast<int64_t>(tokens[i]) + 1);
-            auto down_row = g_down->slice(0, static_cast<int64_t>(i), static_cast<int64_t>(i) + 1);
-            ops::add_scaled(out_row, down_row, expert_weights[eid][i]);
-        }
+        ops::scatter_add_rows(moe_output, g_down, idx_view, w_view);
 
         // Slide the prefetch window forward: pull in the expert `depth` steps ahead.
         if (depth > 0 && prefetched_upto < active_experts.size()) {
