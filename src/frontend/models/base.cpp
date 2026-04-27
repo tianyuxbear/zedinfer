@@ -1,3 +1,4 @@
+#include "backend/device/runtime_api.hpp"
 #include "frontend/loader/safetensors.hpp"
 #include "frontend/models/qwen2.hpp"
 #include "frontend/models/qwen3.hpp"
@@ -29,33 +30,148 @@ using json = nlohmann::json;
 
 namespace zedinfer::model {
 
+namespace {
+
+// Rough per-expert FFN byte size from config — quant-aware. Used as a heuristic input to
+// auto-sizing; precision is not critical because the pool's slot arena allocates from the
+// actual loaded tensor shapes, not from this estimate.
+size_t estimate_per_expert_bytes(const Qwen3MoEConfig& cfg) {
+    const size_t hidden = cfg.hidden_size;
+    const size_t inter = cfg.moe_intermediate_size;
+
+    if (cfg.quant_config.enabled && cfg.quant_config.weights.num_bits > 0) {
+        const int bits = cfg.quant_config.weights.num_bits;
+        const int gs = cfg.quant_config.weights.group_size > 0 ? cfg.quant_config.weights.group_size : 128;
+        // Linear [out, in]: packed weight bytes + fp16 group scales. g_idx / qzeros are small.
+        auto linear_bytes = [bits, gs](size_t out, size_t in) {
+            size_t weight = (out * in * static_cast<size_t>(bits)) / 8;
+            size_t scale = out * ((in + static_cast<size_t>(gs) - 1) / static_cast<size_t>(gs)) * 2;
+            return weight + scale;
+        };
+        return linear_bytes(inter, hidden)    // gate_proj
+             + linear_bytes(inter, hidden)    // up_proj
+             + linear_bytes(hidden, inter);   // down_proj
+    }
+
+    // Dense: 3 × hidden × inter weights at torch_dtype size.
+    const size_t elem_bytes = utils::dsize(utils::str_to_dtype(cfg.torch_dtype));
+    return 3 * hidden * inter * elem_bytes;
+}
+
+// Decide ExpertPoolConfig for a Qwen3MoE model. Order:
+//  1. If ZEDINFER_MOE_GPU_SLOTS is set: parse and respect it.
+//  2. Else: auto-size. Apply gpu_memory_utilization the same way init_block_pool does
+//     (allowed = total × util; headroom = allowed − used), then carve out a fraction
+//     of headroom for experts. Falls back to ALL_GPU when experts fit.
+//
+// Using the same util-aware formula as init_block_pool prevents the loader from picking
+// ALL_GPU on a budget the engine will then refuse to honor (e.g. user passes
+// --gpu-memory-utilization 0.5 to fit alongside other workloads).
+ExpertPoolConfig compute_moe_pool_config(const Qwen3MoEConfig& cfg, zedinferDeviceType_t device,
+                                          float gpu_memory_utilization) {
+    ExpertPoolConfig pool; // defaults: ALL_GPU
+
+    if (device == ZEDINFER_DEVICE_CPU) {
+        return pool;
+    }
+
+    const char* env = std::getenv("ZEDINFER_MOE_GPU_SLOTS");
+    if (env != nullptr && *env != '\0') {
+        int n = 0;
+        try {
+            size_t consumed = 0;
+            n = std::stoi(env, &consumed);
+            if (consumed != std::string(env).size()) {
+                throw std::invalid_argument("trailing characters");
+            }
+        } catch (const std::exception& e) {
+            throw std::runtime_error(std::string("ZEDINFER_MOE_GPU_SLOTS: invalid integer '") + env + "' ("
+                                     + e.what() + ")");
+        }
+        if (n <= 0) {
+            throw std::runtime_error("ZEDINFER_MOE_GPU_SLOTS must be positive, got " + std::to_string(n));
+        }
+        if (static_cast<size_t>(n) >= cfg.num_experts) {
+            LOGI.printf("[Model] ZEDINFER_MOE_GPU_SLOTS=%d >= num_experts=%zu; ALL_GPU", n, cfg.num_experts);
+            return pool;
+        }
+        pool.strategy = ExpertPoolStrategy::PINNED_LRU;
+        pool.num_gpu_slots = n;
+        LOGI.printf("[Model] ZEDINFER_MOE_GPU_SLOTS=%d; PINNED_LRU N=%d of %zu experts/layer", n, n,
+                    cfg.num_experts);
+        return pool;
+    }
+
+    // Auto path. Query VRAM before any allocation.
+    auto api = device::getRuntimeAPI(device);
+    size_t free_bytes = 0, total_bytes = 0;
+    api->get_memory_info(&free_bytes, &total_bytes);
+
+    // Mirror init_block_pool's accounting: "allowed" caps total zedinfer footprint;
+    // "headroom" is what's actually available after other processes' usage.
+    const size_t used_bytes = (total_bytes > free_bytes) ? (total_bytes - free_bytes) : 0;
+    const size_t allowed_bytes = static_cast<size_t>(static_cast<double>(total_bytes) * gpu_memory_utilization);
+    const size_t headroom_bytes = (allowed_bytes > used_bytes) ? (allowed_bytes - used_bytes) : 0;
+
+    const size_t per_expert = estimate_per_expert_bytes(cfg);
+    const size_t total_expert_bytes = cfg.num_experts * cfg.num_hidden_layers * per_expert;
+
+    // Of the headroom, experts may take up to kExpertVramFraction; the rest covers
+    // KV cache + non-expert weights + activations + scratch.
+    constexpr double kExpertVramFraction = 0.70;
+    const size_t expert_budget = static_cast<size_t>(static_cast<double>(headroom_bytes) * kExpertVramFraction);
+
+    LOGI.printf("[Model] Auto MoE sizing: total=%zu MB, free=%zu MB, allowed=%zu MB (util=%.2f), "
+                "headroom=%zu MB, per_expert≈%zu KB, total_experts=%zu MB, budget=%zu MB",
+                total_bytes / (1024 * 1024), free_bytes / (1024 * 1024), allowed_bytes / (1024 * 1024),
+                gpu_memory_utilization, headroom_bytes / (1024 * 1024), per_expert / 1024,
+                total_expert_bytes / (1024 * 1024), expert_budget / (1024 * 1024));
+
+    if (total_expert_bytes <= expert_budget) {
+        LOGI.printf("[Model] Auto: experts fit in budget; ALL_GPU");
+        return pool;
+    }
+
+    // Compute per-layer slot count. Floor at num_experts_per_tok so a single layer's
+    // selected experts always fit without eviction within that layer.
+    size_t denom = cfg.num_hidden_layers * per_expert;
+    int n = denom > 0 ? static_cast<int>(expert_budget / denom) : 0;
+    if (n < static_cast<int>(cfg.num_experts_per_tok)) {
+        n = static_cast<int>(cfg.num_experts_per_tok);
+    }
+    if (static_cast<size_t>(n) >= cfg.num_experts) {
+        LOGI.printf("[Model] Auto: budget allows all experts; ALL_GPU");
+        return pool;
+    }
+
+    pool.strategy = ExpertPoolStrategy::PINNED_LRU;
+    pool.num_gpu_slots = n;
+    LOGI.printf("[Model] Auto: PINNED_LRU N=%d of %zu experts/layer (budget exceeded by %zu MB)", n,
+                cfg.num_experts, (total_expert_bytes - expert_budget) / (1024 * 1024));
+    return pool;
+}
+
+} // namespace
+
 // Parse model config and weights, then instantiate the corresponding model.
-std::shared_ptr<Model> Model::parse(const std::string& model_path, zedinferDeviceType_t target_device) {
+std::shared_ptr<Model> Model::parse(const std::string& model_path, zedinferDeviceType_t target_device,
+                                     float gpu_memory_utilization) {
     // Load model configuration
     std::string config_path = (fs::path(model_path) / "config.json").string();
     auto config = load_config(config_path);
 
-    // Select a tensor-routing predicate so MoE expert tensors can skip GPU entirely and
-    // land in CPU pinned memory — necessary when the full expert set doesn't fit VRAM
-    // (e.g. BF16 30B on 24GB). Single trigger: ZEDINFER_MOE_GPU_SLOTS=N with
-    // N < num_experts. That same env var also picks PINNED_LRU in Qwen3MoEModel, so
-    // loader routing and pool strategy stay coupled behind one knob.
+    // For MoE models, decide the ExpertPool strategy up front so the loader's CPU-pinned
+    // routing predicate and the pool strategy stay coupled to the same single decision
+    // (env var override or auto-sized fallback).
+    ExpertPoolConfig moe_pool_config; // defaults: ALL_GPU; only meaningful for qwen3_moe.
     std::function<bool(const std::string&)> route = [](const std::string&) { return false; };
     if (config->model_type == "qwen3_moe" && target_device != ZEDINFER_DEVICE_CPU) {
         auto* moe_config = dynamic_cast<const Qwen3MoEConfig*>(config.get());
-        const size_t num_experts = moe_config ? moe_config->num_experts : 0;
-        const char* sv = std::getenv("ZEDINFER_MOE_GPU_SLOTS");
-        if (sv != nullptr && *sv != '\0' && num_experts > 0) {
-            try {
-                int n = std::stoi(sv);
-                if (n > 0 && static_cast<size_t>(n) < num_experts) {
-                    LOGI << "[Model] ZEDINFER_MOE_GPU_SLOTS=" << sv << " < num_experts=" << num_experts
-                         << ": routing MoE experts to CPU pinned memory";
-                    route = [](const std::string& name) { return name.find(".mlp.experts.") != std::string::npos; };
-                }
-            } catch (...) {
-                // Leave route as no-op; choose_pool_config in Qwen3MoEModel will re-parse
-                // and throw with a proper error.
+        if (moe_config) {
+            moe_pool_config = compute_moe_pool_config(*moe_config, target_device, gpu_memory_utilization);
+            if (moe_pool_config.strategy == ExpertPoolStrategy::PINNED_LRU) {
+                LOGI << "[Model] Routing MoE expert tensors to CPU pinned memory";
+                route = [](const std::string& name) { return name.find(".mlp.experts.") != std::string::npos; };
             }
         }
     }
@@ -93,7 +209,7 @@ std::shared_ptr<Model> Model::parse(const std::string& model_path, zedinferDevic
         if (!moe_config) {
             throw std::logic_error("Config is not Qwen3MoEConfig");
         }
-        return std::make_shared<Qwen3MoEModel>(*moe_config, std::move(weights));
+        return std::make_shared<Qwen3MoEModel>(*moe_config, std::move(weights), moe_pool_config);
     }
 
     throw std::runtime_error("Unsupported model type: " + config->model_type);

@@ -107,7 +107,7 @@ std::shared_ptr<InferenceEngine> InferenceEngine::create(const std::string& mode
 
     LOGI << "[Engine] Loading model from: " << model_path;
 
-    auto model = model::Model::parse(model_path, device.type());
+    auto model = model::Model::parse(model_path, device.type(), sched_config.gpu_memory_utilization);
     if (!model) {
         throw std::runtime_error("Failed to parse model from: " + model_path);
     }

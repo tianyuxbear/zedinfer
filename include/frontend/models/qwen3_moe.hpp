@@ -28,7 +28,10 @@ struct Qwen3MoEConfig : public ModelConfig {
 
 class Qwen3MoEModel : public Model {
 public:
-    Qwen3MoEModel(Qwen3MoEConfig& config, std::unique_ptr<ModelWeights> weights);
+    // pool_config is computed by Model::parse before weights are loaded so that the loader's
+    // CPU-pinned routing predicate and the ExpertPool strategy stay coupled to the same
+    // decision (env var override or auto-sized fallback).
+    Qwen3MoEModel(Qwen3MoEConfig& config, std::unique_ptr<ModelWeights> weights, ExpertPoolConfig pool_config);
 
     const Qwen3MoEConfig& config() const override { return config_; }
     const ModelWeights& weights() const override { return *weights_; }

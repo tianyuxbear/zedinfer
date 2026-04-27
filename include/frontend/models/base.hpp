@@ -141,8 +141,12 @@ public:
     // Default: no-op.
     virtual void log_runtime_stats() const {}
 
-    // Static factory
-    static std::shared_ptr<Model> parse(const std::string& model_path, zedinferDeviceType_t target_device);
+    // Static factory.
+    // gpu_memory_utilization mirrors SchedulerConfig and is used by the MoE auto-sizing
+    // path so the loader's CPU-pinned routing predicate respects the same total-VRAM cap
+    // that init_block_pool will apply later.
+    static std::shared_ptr<Model> parse(const std::string& model_path, zedinferDeviceType_t target_device,
+                                        float gpu_memory_utilization = 0.9f);
     static void load_base_config(ModelConfig& config, const json& j);
     static std::unique_ptr<ModelConfig> load_config(const std::string& config_path);
     // Load a model's weights, optionally routing selected tensors to CPU pinned memory
