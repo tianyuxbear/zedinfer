@@ -76,9 +76,10 @@ Two models:
 3. **GPTQ format quirks**: `qweight` transposed in loader (`[K/8, N]` → `[N, K/8]`);
    zero-point convention adjusted in `process_gptq_group`.
 
-4. **`moe_prefill` per-row memcpy gather**: known perf TODO
-   (`moe_forward.cpp:118-125`). A CUDA gather kernel would batch launches. Not on
-   critical path for M3.
+4. *(Resolved)* **`moe_prefill` per-row memcpy gather** — replaced by single-launch
+   `ops::gather_rows` and `ops::scatter_add_rows` kernels with a thread-local
+   pinned-host scratch and async H2D on the compute stream. See
+   `heterogeneous_moe.md §11`. ALL_GPU prefill +83% vs M3 baseline; PINNED_LRU +28%.
 
 5. **Router logits D2H sync**: per-MoE-layer `cudaDeviceSynchronize` forced by
    `compute_router_topk`'s copy to CPU. GPU top-k kernel would eliminate it.
@@ -129,11 +130,15 @@ execution on a single consumer GPU):
    when the loader needs to decide routing. The 70% heuristic is conservative
    (favors fewer slots over KV starvation); tunable via `kExpertVramFraction`.
 
-2. **Fix the prefill per-row gather** (`moe_forward.cpp:140-147`). PERF-TODO predates
-   M3 but is the dominant remaining prefill cost — M3 sliding-window prefetch exposed
-   it. A single CUDA gather kernel batching the per-row copies is the obvious fix.
-   Helps short-prompt workloads the most (ping 12-token prefill today still shows
-   per-layer fixed overhead).
+2. *(Done)* **Fix the prefill per-row gather**. Landed as `ops::gather_rows` +
+   `ops::scatter_add_rows` (CPU + NVIDIA), per-expert launch count cut from
+   ~2×group_size to 2. Indices/weights uploaded once per prefill from a thread-local
+   pinned-host scratch via async H2D on the compute stream. A6000 48GB at util=0.5,
+   p=128 d=128: ALL_GPU prefill 122 → 223.22 tok/s (+83%); PINNED_LRU N=32 prefill
+   87.8 → 112.32 tok/s (+28%). Decode unchanged within noise (P2 doesn't touch
+   `moe_decode`). See `heterogeneous_moe.md §11`. Lifetime caveat documented there:
+   thread-local scratch holds shared_ptr to pool storage until thread exit; OK for
+   single-engine serving.
 
 3. **Fiddler-style CPU execution** of cold experts. `docs/plan/heterogeneous_moe.md §9`
    kept this out of Phase 2 scope. Would be the step that actually makes the thesis
