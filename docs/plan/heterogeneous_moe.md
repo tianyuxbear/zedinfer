@@ -333,21 +333,45 @@ expert FFN.
 
 ## 7. Config exposure
 
-Current surface — one env var controls everything:
+Current surface — one env var, optional:
 
 ```
-ZEDINFER_MOE_GPU_SLOTS = N   N per layer.
-                             N unset OR N >= num_experts → ALL_GPU, experts GPU-resident.
-                             N < num_experts             → PINNED_LRU with N slots/layer.
-                                                           Experts are loaded straight to
-                                                           CPU pinned memory via the loader
-                                                           predicate (see §10); the GPU
-                                                           slot arena is populated on demand.
+ZEDINFER_MOE_GPU_SLOTS = N   N per layer (explicit override).
+                             N >= num_experts → ALL_GPU, experts GPU-resident.
+                             N <  num_experts → PINNED_LRU with N slots/layer.
+                                                Experts loaded straight to CPU
+                                                pinned via the loader predicate
+                                                (see §10); GPU slot arena populated
+                                                on demand.
+
+  unset                      Auto-sizing in `compute_moe_pool_config`
+                             (`src/frontend/models/base.cpp`).
+                             Uses the same util-aware accounting as
+                             `init_block_pool` so the loader and KV pool
+                             don't disagree:
+                               allowed   = total × gpu_memory_utilization
+                               headroom  = max(0, allowed − used)
+                               budget    = headroom × kExpertVramFraction
+                                                              (= 0.70)
+                             Then:
+                               • Estimate per-expert bytes (quant-aware).
+                               • Fits → ALL_GPU.
+                               • Doesn't fit → PINNED_LRU with
+                                 N = budget / (num_layers × per_expert_bytes),
+                                 floored at num_experts_per_tok.
 ```
 
-The same knob couples the loader's routing predicate and the pool strategy, so users
-don't need to set them independently. Auto-sizing N based on VRAM budget is listed as
-future polish in `moe_session_handoff.md §5`.
+The decision happens once in `Model::parse` (with `gpu_memory_utilization` plumbed
+from `SchedulerConfig`). Same `ExpertPoolConfig` drives both the loader's CPU-pinned
+routing predicate and the pool strategy, so they can't drift.
+
+Auto-sizing caveats:
+- The 70% headroom-fraction is conservative — biased toward fewer slots over KV
+  starvation. The remaining 30% covers KV cache + non-expert weights + activations
+  + scratch. Set `ZEDINFER_MOE_GPU_SLOTS=N` to override when the heuristic mis-sizes.
+- "used" comes from `get_memory_info()` which reflects all processes on the GPU.
+  On a busy multi-tenant GPU, transient pressure from other workloads can flip the
+  decision between back-to-back runs. The override env var is the escape hatch.
 
 ## 8. Risks and mitigations
 

@@ -118,10 +118,16 @@ Phase 2 M1–M3 + BF16 large-model support all landed. These polish items remain
 none is blocking the thesis's core claim (quantization + memory-tiered expert
 execution on a single consumer GPU):
 
-1. **Auto N sizing.** When `ZEDINFER_MOE_GPU_SLOTS` is unset on a MoE model, pick N
-   from `get_memory_info()` − KV budget − non-expert weights. Removes the current
-   "guess a number" first-run experience. Implementation note: do it after the
-   block_pool init, so we know KV actual footprint. Worth doing for a polished demo.
+1. *(Done)* **Auto N sizing.** When `ZEDINFER_MOE_GPU_SLOTS` is unset on a MoE model,
+   `compute_moe_pool_config` (`src/frontend/models/base.cpp`) queries
+   `get_memory_info()` and picks ALL_GPU vs PINNED_LRU(N) with a 70%-of-free-VRAM
+   expert budget heuristic. The decision happens once in `Model::parse` so the
+   loader's CPU-pinned routing predicate and the pool strategy share a single source
+   of truth. Verified on Qwen3-30B-A3B-GPTQ-Int4: free=31 GB → budget=22 GB ≥ total
+   experts=14 GB → ALL_GPU. Caveat: the "after block_pool init" timing from the
+   original note isn't satisfied — KV cache actual footprint isn't known up front
+   when the loader needs to decide routing. The 70% heuristic is conservative
+   (favors fewer slots over KV starvation); tunable via `kExpertVramFraction`.
 
 2. **Fix the prefill per-row gather** (`moe_forward.cpp:140-147`). PERF-TODO predates
    M3 but is the dominant remaining prefill cost — M3 sliding-window prefetch exposed
