@@ -42,6 +42,18 @@ struct PrefillIndexScratch {
 
 static thread_local PrefillIndexScratch s_prefill_scratch;
 
+// Persistent host-side bucketing scratch for moe_prefill. Same motivation as
+// PrefillIndexScratch: reuse capacity across calls so the per-layer bucket build
+// doesn't allocate. Inner vectors are cleared (capacity preserved) each call.
+struct PrefillBucketScratch {
+    std::vector<std::vector<size_t>> expert_tokens;
+    std::vector<std::vector<float>> expert_weights;
+    std::vector<size_t> active_experts;
+    std::vector<size_t> expert_offsets;
+};
+
+static thread_local PrefillBucketScratch s_prefill_buckets;
+
 static void ensure_prefill_scratch(size_t needed, zedinferDeviceType_t device_type, int device_id) {
     if (s_prefill_scratch.capacity >= needed && s_prefill_scratch.device_type == device_type
         && s_prefill_scratch.device_id == device_id && s_prefill_scratch.indices_dev) {
@@ -138,8 +150,15 @@ static void moe_prefill(const ModelForwardConfig& model, tensor_t moe_output, te
 
     // Bucket token indices by selected expert. Each expert receives at most N tokens
     // (since top-k picks are distinct per token), so max group size is N.
-    std::vector<std::vector<size_t>> expert_tokens(num_experts);
-    std::vector<std::vector<float>> expert_weights(num_experts);
+    // Reuse thread_local capacity across calls; inner clear() keeps allocated storage.
+    auto& expert_tokens = s_prefill_buckets.expert_tokens;
+    auto& expert_weights = s_prefill_buckets.expert_weights;
+    expert_tokens.resize(num_experts);
+    expert_weights.resize(num_experts);
+    for (size_t e = 0; e < num_experts; ++e) {
+        expert_tokens[e].clear();
+        expert_weights[e].clear();
+    }
     for (size_t n = 0; n < N; ++n) {
         for (size_t k = 0; k < top_k; ++k) {
             int eid = topk.expert_ids[n * top_k + k];
@@ -150,8 +169,8 @@ static void moe_prefill(const ModelForwardConfig& model, tensor_t moe_output, te
 
     // Materialize the active-expert ordering used by the prefetcher and the compute loop
     // below, so indexing matches between the two.
-    std::vector<size_t> active_experts;
-    active_experts.reserve(num_experts);
+    auto& active_experts = s_prefill_buckets.active_experts;
+    active_experts.clear();
     for (size_t eid = 0; eid < num_experts; ++eid) {
         if (!expert_tokens[eid].empty()) {
             active_experts.push_back(eid);
@@ -167,8 +186,8 @@ static void moe_prefill(const ModelForwardConfig& model, tensor_t moe_output, te
     auto* idx_host = reinterpret_cast<std::int32_t*>(s_prefill_scratch.indices_host->data());
     auto* w_host = reinterpret_cast<float*>(s_prefill_scratch.weights_host->data());
 
-    std::vector<size_t> expert_offsets;
-    expert_offsets.reserve(active_experts.size() + 1);
+    auto& expert_offsets = s_prefill_buckets.expert_offsets;
+    expert_offsets.clear();
     expert_offsets.push_back(0);
     size_t pos = 0;
     for (size_t idx = 0; idx < active_experts.size(); ++idx) {
