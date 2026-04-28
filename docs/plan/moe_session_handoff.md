@@ -165,6 +165,42 @@ execution on a single consumer GPU):
    (none of decode/prefill numbers change) but it's the architecturally correct
    answer and would be a clean post-defense PR. ~1 day work.
 
+## 5.5 Phase 2 polish round 2 — basic perf cleanup (done)
+
+Found by reading the MoE hot path with a "what's avoidable per-layer" lens after P1
+and P2 landed. None changes design or user-visible knobs; pure CPU-side cleanup.
+
+- `fb52ee5` **ExpertGpuHandle returned by const reference**. `ensure_on_gpu` used
+  to copy 12 `shared_ptr<Tensor>` on every call; `dispatch_expert_linear` then
+  copied 4 more into locals. Now the pool stores per-(layer, expert) handles
+  permanently (`cached_handles_` for ALL_GPU; `Slot::gpu_handle` for PINNED_LRU)
+  and returns a stable `const&`; `dispatch_expert_linear` uses `const tensor_t*`
+  field selection. ~20K atomic refcount ops cut per Qwen3-30B-A3B decode step.
+
+- `0bd53b5` **Skip per-layer D2D copy in `apply_shared_expert` when the model has
+  no shared expert** (Qwen3-30B-A3B's case). `moe_layer_forward` now writes the
+  expert accumulator directly into the layer's `output` buffer; `apply_shared_
+  expert` becomes a no-op. Measured ALL_GPU decode **+27% on A6000** (20.4 →
+  25.4 tok/s).
+
+- `822da9f` **thread_local bucket vectors in `moe_prefill`**. `expert_tokens` /
+  `expert_weights` / `active_experts` / `expert_offsets` are now reused across
+  calls (clear() preserves capacity). Removes per-layer `vector<vector>` ctor
+  and push_back-driven small allocs. Same lifetime caveat as `PrefillIndexScratch`.
+
+- `b3a64d4` **Cache router weight tensors and expert quant params in
+  `ModelForwardConfig`**. `compute_router_topk` indexes `router_weights[L]`
+  instead of doing `router_weight_name(L) → has_tensor → get_tensor` per layer.
+  `dispatch_expert_linear` reads `expert_quant_num_bits` /
+  `expert_quant_group_size` directly instead of navigating `quant_config.weights.*`.
+
+Together, these moved the relative speedup numbers further but the only delta
+that survived single-shot bench noise was #2 (the D2D copy elimination). The
+others land cleanly and don't regress.
+
+Remaining non-trivial CPU-side cost on the MoE path is `compute_router_topk`'s
+D2H synchronous copy of router logits (already flagged as PERF-TODO in §3 item 5).
+
 ## 6. Pre-existing issues worth a future pass
 
 1. *(Resolved)* Non-quantized MoE path — BF16 Qwen3-30B-A3B (D.5) was the first run
