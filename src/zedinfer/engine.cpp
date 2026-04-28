@@ -500,14 +500,11 @@ void InferenceEngine::init_block_pool() {
 
     auto fail = [&](const std::string& detail) {
         std::ostringstream oss;
-        oss << "[Engine] Cannot allocate KV page pool: " << detail << ". "
-            << "total=" << total_bytes / (1024 * 1024) << " MB, "
-            << "free=" << free_bytes / (1024 * 1024) << " MB, "
-            << "used=" << used_bytes / (1024 * 1024) << " MB, "
-            << "allowed=" << allowed_bytes / (1024 * 1024) << " MB "
+        oss << "[Engine] Cannot allocate KV page pool: " << detail << ". " << "total=" << total_bytes / (1024 * 1024)
+            << " MB, " << "free=" << free_bytes / (1024 * 1024) << " MB, " << "used=" << used_bytes / (1024 * 1024)
+            << " MB, " << "allowed=" << allowed_bytes / (1024 * 1024) << " MB "
             << "(gpu_memory_utilization=" << scheduler_config_.gpu_memory_utilization << "), "
-            << "budget=" << kv_budget / (1024 * 1024) << " MB, "
-            << "per-block=" << (2 * block_bytes) / 1024 << " KB. "
+            << "budget=" << kv_budget / (1024 * 1024) << " MB, " << "per-block=" << (2 * block_bytes) / 1024 << " KB. "
             << "Retry with a larger --gpu-memory-utilization or free VRAM before launch.";
         throw std::runtime_error(oss.str());
     };

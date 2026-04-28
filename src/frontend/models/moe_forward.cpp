@@ -31,10 +31,10 @@ using MakeTensor = std::function<tensor_t(std::vector<size_t>)>;
 // destroyed before the thread, these dangle. Acceptable for the current single-engine
 // single-inference-thread serving model; revisit if multiple engines coexist.
 struct PrefillIndexScratch {
-    tensor_t indices_dev;     // device, I32, [capacity]
-    tensor_t weights_dev;     // device, F32, [capacity]
-    tensor_t indices_host;    // pinned host (cudaMallocHost on NVIDIA), I32, [capacity]
-    tensor_t weights_host;    // pinned host, F32, [capacity]
+    tensor_t indices_dev;  // device, I32, [capacity]
+    tensor_t weights_dev;  // device, F32, [capacity]
+    tensor_t indices_host; // pinned host (cudaMallocHost on NVIDIA), I32, [capacity]
+    tensor_t weights_host; // pinned host, F32, [capacity]
     size_t capacity = 0;
     zedinferDeviceType_t device_type = ZEDINFER_DEVICE_CPU;
     int device_id = -1;
@@ -114,9 +114,7 @@ static void moe_decode(const ModelForwardConfig& model, tensor_t moe_output, ten
     // remaining H2Ds with previous experts' GEMMs. Order matches compute order so the
     // transfer stream's FIFO delivers e0 first, e1 second, etc.
     if (model.expert_pool) {
-        for (size_t k = 0; k < top_k; ++k) {
-            model.expert_pool->prefetch(layer_idx, topk.expert_ids[k]);
-        }
+        for (size_t k = 0; k < top_k; ++k) { model.expert_pool->prefetch(layer_idx, topk.expert_ids[k]); }
     }
 
     for (size_t k = 0; k < top_k; ++k) {

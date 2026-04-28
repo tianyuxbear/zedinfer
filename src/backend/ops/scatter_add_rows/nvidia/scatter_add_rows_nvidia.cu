@@ -21,9 +21,7 @@ __global__ void scatter_add_rows_kernel_f32(float* out, const float* src, const 
     const float w = weights[r];
     const float* sp = src + r * row_elements;
     float* op = out + out_row * row_elements;
-    for (size_t c = threadIdx.x; c < row_elements; c += blockDim.x) {
-        op[c] = op[c] + w * sp[c];
-    }
+    for (size_t c = threadIdx.x; c < row_elements; c += blockDim.x) { op[c] = op[c] + w * sp[c]; }
 }
 
 __global__ void scatter_add_rows_kernel_f16(half* out, const half* src, const int* indices, const float* weights,

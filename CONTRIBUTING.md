@@ -77,19 +77,39 @@ CI runs clang-format and ruff on every push/PR. Run locally before pushing:
 
 ### C++ (clang-format)
 
+**Pin to clang-format 18.1.3 — same version CI runs.** Version skew matters:
+the `.clang-format` config exercises trailing-comment alignment and chained
+`<<` wrapping rules whose behavior shifted between 18.1.3 → 18.1.8. Newer
+versions (e.g. 22.x) and older system packages (Ubuntu 24.04 ships v14) will
+disagree with CI on a handful of lines, leading to passing-locally /
+failing-on-CI surprises.
+
+Install the matching version once:
+
 ```bash
+pipx install --force 'clang-format==18.1.3'
+~/.local/bin/clang-format --version   # → clang-format version 18.1.3
+```
+
+Then run before every push:
+
+```bash
+CLANG=~/.local/bin/clang-format
+
 # Check (dry run, no changes)
 find include/ src/ examples/ tests/ \
   -name '*.cpp' -o -name '*.hpp' -o -name '*.c' -o -name '*.h' -o -name '*.cu' -o -name '*.cuh' \
-  | xargs clang-format --dry-run --Werror
+  | xargs $CLANG --dry-run --Werror
 
 # Auto-fix
 find include/ src/ examples/ tests/ \
   -name '*.cpp' -o -name '*.hpp' -o -name '*.c' -o -name '*.h' -o -name '*.cu' -o -name '*.cuh' \
-  | xargs clang-format -i
+  | xargs $CLANG -i
 ```
 
-Config: `.clang-format` (LLVM-based, 4-space indent, K&R braces).
+Config: `.clang-format` (LLVM-based, 4-space indent, K&R braces). CI uses
+`apt install clang-format-18` on Ubuntu 24.04, which currently resolves to
+`1:18.1.3-1ubuntu1` — match locally with the pipx pin above.
 
 ### Python (ruff)
 

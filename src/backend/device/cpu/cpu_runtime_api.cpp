@@ -87,25 +87,11 @@ void getMemoryInfo(size_t* free, size_t* total) {
     }
 }
 
-static const ZedinferRuntimeAPI RUNTIME_API = {&getDeviceCount,
-                                               &setDevice,
-                                               &deviceSynchronize,
-                                               &createStream,
-                                               &destroyStream,
-                                               &streamSynchronize,
-                                               &createEvent,
-                                               &destroyEvent,
-                                               &recordEvent,
-                                               &streamWaitEvent,
-                                               &mallocDevice,
-                                               &freeDevice,
-                                               &mallocHost,
-                                               &freeHost,
-                                               &memcpySync,
-                                               &memcpyAsync,
-                                               &registerPinned,
-                                               &unregisterPinned,
-                                               &getMemoryInfo};
+static const ZedinferRuntimeAPI RUNTIME_API
+    = {&getDeviceCount,    &setDevice,      &deviceSynchronize, &createStream, &destroyStream,
+       &streamSynchronize, &createEvent,    &destroyEvent,      &recordEvent,  &streamWaitEvent,
+       &mallocDevice,      &freeDevice,     &mallocHost,        &freeHost,     &memcpySync,
+       &memcpyAsync,       &registerPinned, &unregisterPinned,  &getMemoryInfo};
 
 } // namespace runtime_api
 

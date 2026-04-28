@@ -120,10 +120,10 @@ private:
     // A Slot owns persistent GPU tensors sized to hold any single expert's FFN; over
     // time it is re-populated via cudaMemcpy from the CPU-pinned canonical copy.
     struct Slot {
-        int expert_id = -1;          // -1 when slot is empty
+        int expert_id = -1;                    // -1 when slot is empty
         std::uint64_t last_access = 0;
-        ExpertGpuHandle gpu_handle;  // persistent GPU tensors; data is overwritten on miss
-        zedinferEvent_t ready_event = nullptr;  // M3: set by transfer stream after async H2D
+        ExpertGpuHandle gpu_handle;            // persistent GPU tensors; data is overwritten on miss
+        zedinferEvent_t ready_event = nullptr; // M3: set by transfer stream after async H2D
         // M3.5: false after a prefetch populates the slot; flipped to true the first time
         // ensure_on_gpu hands this slot back to compute. LRU victim search skips slots
         // that are populated but not yet compute_touched (in-flight prefetches that compute
@@ -156,14 +156,14 @@ private:
     std::vector<std::vector<ExpertGpuHandle>> cached_handles_;
 
     // PINNED_LRU state. Left empty under ALL_GPU.
-    std::vector<std::vector<Slot>> slots_;       // slots_[L] = num_gpu_slots slots for layer L
-    std::vector<std::vector<int>> residency_;    // residency_[L][E] = slot idx in slots_[L], or -1
-    std::vector<std::uint64_t> access_counter_;  // monotonic per-layer counter for LRU
+    std::vector<std::vector<Slot>> slots_;      // slots_[L] = num_gpu_slots slots for layer L
+    std::vector<std::vector<int>> residency_;   // residency_[L][E] = slot idx in slots_[L], or -1
+    std::vector<std::uint64_t> access_counter_; // monotonic per-layer counter for LRU
 
     // Cumulative ensure_on_gpu stats. Mutated on the compute path; single-threaded use.
     std::uint64_t hits_ = 0;
     std::uint64_t misses_ = 0;
-    mutable bool stats_logged_ = false;  // mutated by const log_stats()
+    mutable bool stats_logged_ = false; // mutated by const log_stats()
 
     // Global "compute has reached here" barrier. Recorded on the compute stream
     // right before a miss evicts a slot; the transfer stream waits on it before

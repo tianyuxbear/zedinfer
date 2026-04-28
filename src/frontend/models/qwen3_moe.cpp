@@ -211,9 +211,9 @@ size_t Qwen3MoEModel::calculate_num_parameters() const {
         for (size_t l = 0; l < expert_pool_->num_layers(); ++l) {
             for (size_t e = 0; e < expert_pool_->num_experts_per_layer(); ++e) {
                 const auto& ffn = expert_pool_->peek_expert(static_cast<int>(l), static_cast<int>(e));
-                for (auto t : {ffn.gate_packed, ffn.gate_scale, ffn.gate_g_idx, ffn.gate_weight, ffn.up_packed,
-                               ffn.up_scale, ffn.up_g_idx, ffn.up_weight, ffn.down_packed, ffn.down_scale,
-                               ffn.down_g_idx, ffn.down_weight}) {
+                for (auto t :
+                     {ffn.gate_packed, ffn.gate_scale, ffn.gate_g_idx, ffn.gate_weight, ffn.up_packed, ffn.up_scale,
+                      ffn.up_g_idx, ffn.up_weight, ffn.down_packed, ffn.down_scale, ffn.down_g_idx, ffn.down_weight}) {
                     if (t) {
                         total += t->numel();
                     }

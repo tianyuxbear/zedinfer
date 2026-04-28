@@ -48,7 +48,7 @@ struct ModelForwardConfig {
     bool norm_topk_prob = false;
     size_t decoder_sparse_step = 1;
     std::vector<int> mlp_only_layers;
-    bool has_shared_expert = false;  // uniform across all MoE layers (checked at init)
+    bool has_shared_expert = false;    // uniform across all MoE layers (checked at init)
     ExpertPool* expert_pool = nullptr; // manages GPU residency of expert weights
 
     // Per-layer router (gate) weight tensor, indexed by layer_idx. Populated by the

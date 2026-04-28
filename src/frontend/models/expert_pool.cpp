@@ -145,14 +145,11 @@ ExpertPool::ExpertPool(std::unique_ptr<ExpertWeights> experts, ExpertPoolConfig 
 
     if (experts_on_gpu) {
         for (size_t l = 0; l < L; ++l) {
-            for (size_t e = 0; e < E; ++e) {
-                migrate_expert_to_cpu(experts_->at(l, e), api);
-            }
+            for (size_t e = 0; e < E; ++e) { migrate_expert_to_cpu(experts_->at(l, e), api); }
         }
         LOGI.printf("[ExpertPool] D2H-migrated %zu experts to CPU pinned storage", L * E);
     } else {
-        LOGI.printf("[ExpertPool] %zu experts already in CPU pinned memory (loader-routed); skipping D2H",
-                    L * E);
+        LOGI.printf("[ExpertPool] %zu experts already in CPU pinned memory (loader-routed); skipping D2H", L * E);
     }
 
     // Step B: allocate per-layer GPU slot arena. Template shape taken from (now-CPU)
@@ -205,8 +202,8 @@ void ExpertPool::log_stats() const {
     stats_logged_ = true;
     const std::uint64_t total = hits_ + misses_;
     const double rate = (total > 0) ? (100.0 * static_cast<double>(hits_) / static_cast<double>(total)) : 0.0;
-    LOGI.printf("[ExpertPool] stats: %llu hits, %llu misses (%.2f%% hit rate)",
-                static_cast<unsigned long long>(hits_), static_cast<unsigned long long>(misses_), rate);
+    LOGI.printf("[ExpertPool] stats: %llu hits, %llu misses (%.2f%% hit rate)", static_cast<unsigned long long>(hits_),
+                static_cast<unsigned long long>(misses_), rate);
 }
 
 const ExpertGpuHandle& ExpertPool::ensure_on_gpu(int layer, int expert_id) {
@@ -311,8 +308,7 @@ void ExpertPool::start_async_transfer(std::size_t layer, std::size_t expert_id, 
         if (!s || !d) {
             return;
         }
-        api->memcpy_async(d->data(), s->data(), s->numel() * s->elementSize(), ZEDINFER_MEMCPY_H2D,
-                          transfer_stream);
+        api->memcpy_async(d->data(), s->data(), s->numel() * s->elementSize(), ZEDINFER_MEMCPY_H2D, transfer_stream);
     };
     copy(src.gate_packed, dst.gate_packed);
     copy(src.gate_scale, dst.gate_scale);

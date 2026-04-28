@@ -24,14 +24,10 @@ __global__ void gather_rows_kernel(char* dst, const char* src, const int* indice
     const size_t row_words = row_bytes >> 2;
     const unsigned int* sw = reinterpret_cast<const unsigned int*>(sp);
     unsigned int* dw = reinterpret_cast<unsigned int*>(dp);
-    for (size_t i = threadIdx.x; i < row_words; i += blockDim.x) {
-        dw[i] = sw[i];
-    }
+    for (size_t i = threadIdx.x; i < row_words; i += blockDim.x) { dw[i] = sw[i]; }
     // Tail bytes (only fires when row_bytes % 4 != 0 — uncommon for our shapes).
     const size_t tail_start = row_words << 2;
-    for (size_t i = tail_start + threadIdx.x; i < row_bytes; i += blockDim.x) {
-        dp[i] = sp[i];
-    }
+    for (size_t i = tail_start + threadIdx.x; i < row_bytes; i += blockDim.x) { dp[i] = sp[i]; }
 }
 
 } // namespace

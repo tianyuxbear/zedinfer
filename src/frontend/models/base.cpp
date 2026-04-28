@@ -48,9 +48,9 @@ size_t estimate_per_expert_bytes(const Qwen3MoEConfig& cfg) {
             size_t scale = out * ((in + static_cast<size_t>(gs) - 1) / static_cast<size_t>(gs)) * 2;
             return weight + scale;
         };
-        return linear_bytes(inter, hidden)    // gate_proj
-             + linear_bytes(inter, hidden)    // up_proj
-             + linear_bytes(hidden, inter);   // down_proj
+        return linear_bytes(inter, hidden)  // gate_proj
+             + linear_bytes(inter, hidden)  // up_proj
+             + linear_bytes(hidden, inter); // down_proj
     }
 
     // Dense: 3 × hidden × inter weights at torch_dtype size.
@@ -68,7 +68,7 @@ size_t estimate_per_expert_bytes(const Qwen3MoEConfig& cfg) {
 // ALL_GPU on a budget the engine will then refuse to honor (e.g. user passes
 // --gpu-memory-utilization 0.5 to fit alongside other workloads).
 ExpertPoolConfig compute_moe_pool_config(const Qwen3MoEConfig& cfg, zedinferDeviceType_t device,
-                                          float gpu_memory_utilization) {
+                                         float gpu_memory_utilization) {
     ExpertPoolConfig pool; // defaults: ALL_GPU
 
     if (device == ZEDINFER_DEVICE_CPU) {
@@ -85,8 +85,8 @@ ExpertPoolConfig compute_moe_pool_config(const Qwen3MoEConfig& cfg, zedinferDevi
                 throw std::invalid_argument("trailing characters");
             }
         } catch (const std::exception& e) {
-            throw std::runtime_error(std::string("ZEDINFER_MOE_GPU_SLOTS: invalid integer '") + env + "' ("
-                                     + e.what() + ")");
+            throw std::runtime_error(std::string("ZEDINFER_MOE_GPU_SLOTS: invalid integer '") + env + "' (" + e.what()
+                                     + ")");
         }
         if (n <= 0) {
             throw std::runtime_error("ZEDINFER_MOE_GPU_SLOTS must be positive, got " + std::to_string(n));
@@ -97,8 +97,7 @@ ExpertPoolConfig compute_moe_pool_config(const Qwen3MoEConfig& cfg, zedinferDevi
         }
         pool.strategy = ExpertPoolStrategy::PINNED_LRU;
         pool.num_gpu_slots = n;
-        LOGI.printf("[Model] ZEDINFER_MOE_GPU_SLOTS=%d; PINNED_LRU N=%d of %zu experts/layer", n, n,
-                    cfg.num_experts);
+        LOGI.printf("[Model] ZEDINFER_MOE_GPU_SLOTS=%d; PINNED_LRU N=%d of %zu experts/layer", n, n, cfg.num_experts);
         return pool;
     }
 
@@ -146,8 +145,8 @@ ExpertPoolConfig compute_moe_pool_config(const Qwen3MoEConfig& cfg, zedinferDevi
 
     pool.strategy = ExpertPoolStrategy::PINNED_LRU;
     pool.num_gpu_slots = n;
-    LOGI.printf("[Model] Auto: PINNED_LRU N=%d of %zu experts/layer (budget exceeded by %zu MB)", n,
-                cfg.num_experts, (total_expert_bytes - expert_budget) / (1024 * 1024));
+    LOGI.printf("[Model] Auto: PINNED_LRU N=%d of %zu experts/layer (budget exceeded by %zu MB)", n, cfg.num_experts,
+                (total_expert_bytes - expert_budget) / (1024 * 1024));
     return pool;
 }
 
@@ -155,7 +154,7 @@ ExpertPoolConfig compute_moe_pool_config(const Qwen3MoEConfig& cfg, zedinferDevi
 
 // Parse model config and weights, then instantiate the corresponding model.
 std::shared_ptr<Model> Model::parse(const std::string& model_path, zedinferDeviceType_t target_device,
-                                     float gpu_memory_utilization) {
+                                    float gpu_memory_utilization) {
     // Load model configuration
     std::string config_path = (fs::path(model_path) / "config.json").string();
     auto config = load_config(config_path);
