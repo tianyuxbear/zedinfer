@@ -119,33 +119,41 @@ struct ModelForwardConfig {
         if (!expert_pool) {
             throw std::runtime_error("dispatch_expert_linear called without expert_pool set");
         }
-        auto h = expert_pool->ensure_on_gpu(layer, expert_id);
-        tensor_t packed = nullptr, scale = nullptr, g_idx = nullptr, weight = nullptr;
+        // ensure_on_gpu returns a stable const reference; binding it locally avoids a
+        // 12 × shared_ptr copy of the handle struct on every call. The four `const
+        // tensor_t*` aliases below pick the (packed, scale, g_idx, weight) field set
+        // for this projection without copying any shared_ptr until linear_quantized /
+        // linear actually receives the args.
+        const ExpertGpuHandle& h = expert_pool->ensure_on_gpu(layer, expert_id);
+        const tensor_t* packed = nullptr;
+        const tensor_t* scale = nullptr;
+        const tensor_t* g_idx = nullptr;
+        const tensor_t* weight = nullptr;
         switch (proj) {
             case ExpertProj::Gate:
-                packed = h.gate_packed;
-                scale = h.gate_scale;
-                g_idx = h.gate_g_idx;
-                weight = h.gate_weight;
+                packed = &h.gate_packed;
+                scale = &h.gate_scale;
+                g_idx = &h.gate_g_idx;
+                weight = &h.gate_weight;
                 break;
             case ExpertProj::Up:
-                packed = h.up_packed;
-                scale = h.up_scale;
-                g_idx = h.up_g_idx;
-                weight = h.up_weight;
+                packed = &h.up_packed;
+                scale = &h.up_scale;
+                g_idx = &h.up_g_idx;
+                weight = &h.up_weight;
                 break;
             case ExpertProj::Down:
-                packed = h.down_packed;
-                scale = h.down_scale;
-                g_idx = h.down_g_idx;
-                weight = h.down_weight;
+                packed = &h.down_packed;
+                scale = &h.down_scale;
+                g_idx = &h.down_g_idx;
+                weight = &h.down_weight;
                 break;
         }
-        if (packed) {
-            ops::linear_quantized(out, in, packed, nullptr, scale, g_idx, config.quant_config.weights.num_bits,
+        if (*packed) {
+            ops::linear_quantized(out, in, *packed, nullptr, *scale, *g_idx, config.quant_config.weights.num_bits,
                                   config.quant_config.weights.group_size);
-        } else if (weight) {
-            ops::linear(out, in, weight, nullptr);
+        } else if (*weight) {
+            ops::linear(out, in, *weight, nullptr);
         } else {
             throw std::runtime_error("Expert FFN weights missing for layer " + std::to_string(layer) + " expert "
                                      + std::to_string(expert_id));

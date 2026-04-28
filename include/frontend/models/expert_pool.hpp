@@ -69,7 +69,15 @@ public:
     // Return a GPU-ready handle for (layer, expert_id). M1 does no transfer. M2 will issue
     // a synchronous H2D if the expert isn't currently resident. M3 will wait on a
     // per-slot cudaEvent populated by the transfer stream.
-    ExpertGpuHandle ensure_on_gpu(int layer, int expert_id);
+    //
+    // Returns by const reference: under ALL_GPU the handle is a member of a permanent
+    // per-(layer, expert) cache; under PINNED_LRU it points into the assigned slot's
+    // persistent handle field. Either way the reference is stable until the pool is
+    // destroyed (ALL_GPU) or until the same caller's NEXT ensure_on_gpu call evicts
+    // the slot in the same layer (PINNED_LRU). The compute path uses each returned
+    // handle immediately and discards it — never holds across another ensure_on_gpu —
+    // so the latter window is safe in practice.
+    const ExpertGpuHandle& ensure_on_gpu(int layer, int expert_id);
 
     // Hint: start bringing (layer, expert_id) to GPU without blocking. No-op in M1.
     // M3 will trigger an async H2D on the runtime's transfer stream.
@@ -140,6 +148,12 @@ private:
 
     std::unique_ptr<ExpertWeights> experts_;
     ExpertPoolConfig config_;
+
+    // ALL_GPU state. Pre-built ExpertGpuHandle per (layer, expert) so ensure_on_gpu
+    // can return a stable const reference instead of constructing+copying a handle
+    // (12 shared_ptr atomic ops) on every dispatch_expert_linear call. Empty under
+    // PINNED_LRU (handles live in each slot).
+    std::vector<std::vector<ExpertGpuHandle>> cached_handles_;
 
     // PINNED_LRU state. Left empty under ALL_GPU.
     std::vector<std::vector<Slot>> slots_;       // slots_[L] = num_gpu_slots slots for layer L

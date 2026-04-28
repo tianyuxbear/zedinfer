@@ -77,8 +77,32 @@ ExpertPool::ExpertPool(std::unique_ptr<ExpertWeights> experts, ExpertPoolConfig 
     }
 
     if (config_.strategy == ExpertPoolStrategy::ALL_GPU) {
-        LOGI.printf("[ExpertPool] strategy=ALL_GPU, %zu layers × %zu experts, all resident on GPU",
-                    experts_->num_layers(), experts_->num_experts_per_layer());
+        // Pre-build per-(layer, expert) ExpertGpuHandle from the ExpertFFN tensors so
+        // ensure_on_gpu can hand back a const reference. Avoids constructing+copying a
+        // handle (12 shared_ptr atomic ops) on every dispatch_expert_linear call.
+        const size_t L = experts_->num_layers();
+        const size_t E = experts_->num_experts_per_layer();
+        cached_handles_.resize(L);
+        for (size_t l = 0; l < L; ++l) {
+            cached_handles_[l].resize(E);
+            for (size_t e = 0; e < E; ++e) {
+                const auto& ffn = experts_->at(l, e);
+                auto& h = cached_handles_[l][e];
+                h.gate_packed = ffn.gate_packed;
+                h.gate_scale = ffn.gate_scale;
+                h.gate_g_idx = ffn.gate_g_idx;
+                h.gate_weight = ffn.gate_weight;
+                h.up_packed = ffn.up_packed;
+                h.up_scale = ffn.up_scale;
+                h.up_g_idx = ffn.up_g_idx;
+                h.up_weight = ffn.up_weight;
+                h.down_packed = ffn.down_packed;
+                h.down_scale = ffn.down_scale;
+                h.down_g_idx = ffn.down_g_idx;
+                h.down_weight = ffn.down_weight;
+            }
+        }
+        LOGI.printf("[ExpertPool] strategy=ALL_GPU, %zu layers × %zu experts, all resident on GPU", L, E);
         return;
     }
 
@@ -185,24 +209,10 @@ void ExpertPool::log_stats() const {
                 static_cast<unsigned long long>(hits_), static_cast<unsigned long long>(misses_), rate);
 }
 
-ExpertGpuHandle ExpertPool::ensure_on_gpu(int layer, int expert_id) {
+const ExpertGpuHandle& ExpertPool::ensure_on_gpu(int layer, int expert_id) {
     if (config_.strategy == ExpertPoolStrategy::ALL_GPU) {
         ++hits_;
-        const auto& ffn = experts_->at(static_cast<size_t>(layer), static_cast<size_t>(expert_id));
-        ExpertGpuHandle h;
-        h.gate_packed = ffn.gate_packed;
-        h.gate_scale = ffn.gate_scale;
-        h.gate_g_idx = ffn.gate_g_idx;
-        h.gate_weight = ffn.gate_weight;
-        h.up_packed = ffn.up_packed;
-        h.up_scale = ffn.up_scale;
-        h.up_g_idx = ffn.up_g_idx;
-        h.up_weight = ffn.up_weight;
-        h.down_packed = ffn.down_packed;
-        h.down_scale = ffn.down_scale;
-        h.down_g_idx = ffn.down_g_idx;
-        h.down_weight = ffn.down_weight;
-        return h;
+        return cached_handles_[static_cast<size_t>(layer)][static_cast<size_t>(expert_id)];
     }
 
     // PINNED_LRU: per-layer slot arena with LRU eviction + async H2D on miss.
