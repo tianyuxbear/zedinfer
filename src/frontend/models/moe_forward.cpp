@@ -255,20 +255,19 @@ static void moe_prefill(const ModelForwardConfig& model, tensor_t moe_output, te
 
 // Compute shared expert FFN (always active on all tokens) and add to moe_output.
 // Writes final result (moe_output + shared) into `output`.
-// If no shared expert exists for this layer, copies moe_output to output.
+//
+// Caller's invariant when has_shared_expert == false: `moe_output` and `output` alias
+// the same buffer, so this function is a no-op in that case (no copy needed).
 static void apply_shared_expert(const ModelForwardConfig& model, tensor_t output, tensor_t moe_output, tensor_t input,
                                 int layer_idx, DecodeScratch* scratch, const MakeTensor& make) {
+    if (!model.has_shared_expert) {
+        return;
+    }
+
     const size_t N = input->shape()[0];
     const size_t hidden_size = model.config.hidden_size;
     const size_t shared_inter = model.shared_expert_intermediate_size;
     const bool use_scratch = (scratch != nullptr && N == 1);
-
-    if (!model.has_shared_expert) {
-        auto* api = zedinfer::core::context().runtime().api();
-        auto kind = (output->deviceType() == ZEDINFER_DEVICE_CPU) ? ZEDINFER_MEMCPY_H2H : ZEDINFER_MEMCPY_D2D;
-        api->memcpy_sync(output->data(), moe_output->data(), output->numel() * output->elementSize(), kind);
-        return;
-    }
 
     auto sp = model.shared_expert_prefix(layer_idx);
     auto sh_gate = use_scratch ? scratch->shared_gate : make({N, shared_inter});
@@ -303,8 +302,19 @@ void moe_layer_forward(const ModelForwardConfig& model, tensor_t output, tensor_
     auto router_logits = use_scratch ? scratch->router_logits : make({N, num_experts});
     auto topk = compute_router_topk(model, input, layer_idx, router_logits, top_k);
 
-    // Accumulator for weighted sum of routed-expert outputs.
-    auto moe_output = use_scratch ? scratch->moe_output : make({N, hidden_size});
+    // Accumulator for weighted sum of routed-expert outputs. When the layer has no
+    // shared expert (e.g. Qwen3-30B-A3B), we accumulate directly into `output` —
+    // apply_shared_expert becomes a no-op, saving a per-layer hidden_size D2D copy
+    // + global sync. With shared expert, allocate a separate buffer so the shared
+    // FFN result can be added without races.
+    tensor_t moe_output;
+    if (!model.has_shared_expert) {
+        moe_output = output;
+    } else if (use_scratch) {
+        moe_output = scratch->moe_output;
+    } else {
+        moe_output = make({N, hidden_size});
+    }
     ops::fill_zero(moe_output);
 
     if (use_scratch) {
