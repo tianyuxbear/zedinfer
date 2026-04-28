@@ -176,6 +176,20 @@ ModelForwardConfig Qwen3MoEModel::forward_config() const {
     cfg.has_shared_expert = weights_->has_tensor("layers.0.mlp.shared_expert.gate_proj.weight")
                          || weights_->has_tensor("layers.0.mlp.shared_expert.gate_proj.weight_packed");
 
+    // Cache per-layer router weight tensors so compute_router_topk can index instead of
+    // doing a string-key map lookup every layer × decode step. Null entry = layer's
+    // router goes through the quantized path (dispatch_linear by prefix); compute
+    // path falls back gracefully.
+    cfg.router_weights.resize(config_.num_hidden_layers);
+    for (size_t l = 0; l < config_.num_hidden_layers; ++l) {
+        std::string name = cfg.router_weight_name(static_cast<int>(l));
+        cfg.router_weights[l] = weights_->has_tensor(name) ? weights_->get_tensor(name) : nullptr;
+    }
+
+    // Cache quant params used by every dispatch_expert_linear call.
+    cfg.expert_quant_num_bits = config_.quant_config.weights.num_bits;
+    cfg.expert_quant_group_size = config_.quant_config.weights.group_size;
+
     if (detected_moe > 0 && detected_moe != config_.moe_intermediate_size) {
         LOGI.printf("[Qwen3MoE] Detected moe_intermediate_size=%zu from weights (config=%zu)", detected_moe,
                     config_.moe_intermediate_size);

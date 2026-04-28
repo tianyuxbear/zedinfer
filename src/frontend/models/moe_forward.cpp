@@ -77,11 +77,11 @@ static ops::moe::TopKResult compute_router_topk(const ModelForwardConfig& model,
     const size_t num_experts = model.num_experts;
 
     // Router weight is typically not quantized (small [num_experts, hidden_size] matrix).
-    std::string gate_name = model.router_weight_name(layer_idx);
-    if (model.weights.has_tensor(gate_name)) {
-        ops::linear(router_logits_buf, input, model.W(gate_name), nullptr);
+    // Use the per-layer pointer cached at init time; falls back to dispatch_linear by
+    // prefix when the layer's router happens to be quantized (entry is null).
+    if (const auto& router_w = model.router_weights[static_cast<size_t>(layer_idx)]) {
+        ops::linear(router_logits_buf, input, router_w, nullptr);
     } else {
-        // Fallback: quantized router path.
         std::string gate_prefix = "layers." + std::to_string(layer_idx) + ".mlp.gate";
         model.dispatch_linear(router_logits_buf, input, gate_prefix, nullptr);
     }

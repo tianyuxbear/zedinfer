@@ -51,6 +51,18 @@ struct ModelForwardConfig {
     bool has_shared_expert = false;  // uniform across all MoE layers (checked at init)
     ExpertPool* expert_pool = nullptr; // manages GPU residency of expert weights
 
+    // Per-layer router (gate) weight tensor, indexed by layer_idx. Populated by the
+    // model's forward_config() factory so compute_router_topk can skip the per-layer
+    // `router_weight_name(L) → has_tensor → get_tensor` string-keyed dance. Entry is
+    // nullptr for layers whose router uses the quantized path; caller falls back to
+    // dispatch_linear by prefix in that case.
+    std::vector<tensor_t> router_weights;
+
+    // Cached expert quantization parameters (set once at init from quant_config.weights).
+    // Avoids repeated struct-navigation in dispatch_expert_linear's hot path.
+    int expert_quant_num_bits = 0;
+    int expert_quant_group_size = -1;
+
     bool is_moe_layer(size_t layer_idx) const {
         if (!is_moe) {
             return false;
@@ -150,8 +162,8 @@ struct ModelForwardConfig {
                 break;
         }
         if (*packed) {
-            ops::linear_quantized(out, in, *packed, nullptr, *scale, *g_idx, config.quant_config.weights.num_bits,
-                                  config.quant_config.weights.group_size);
+            ops::linear_quantized(out, in, *packed, nullptr, *scale, *g_idx, expert_quant_num_bits,
+                                  expert_quant_group_size);
         } else if (*weight) {
             ops::linear(out, in, *weight, nullptr);
         } else {
