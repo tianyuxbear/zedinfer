@@ -22,3 +22,6 @@
 [submodule "third_party/cutlass"]
 	path = third_party/cutlass
 	url = git@github.com:NVIDIA/cutlass.git
+[submodule "third_party/termbar"]
+	path = third_party/termbar
+	url = git@github.com:AthBe1337/termbar.git

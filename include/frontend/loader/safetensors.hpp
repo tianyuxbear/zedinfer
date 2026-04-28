@@ -3,6 +3,7 @@
 #include "interface.hpp"
 #include "zedinfer.h"
 
+#include <functional>
 #include <memory>
 #include <unordered_map>
 
@@ -54,15 +55,19 @@ public:
 
 // Loader for models split across one or more .safetensors files
 class SafeTensorsLoader : public IModelLoader {
+public:
+    using ProgressCallback = std::function<void(size_t current, size_t total)>;
+
 private:
     std::vector<std::unique_ptr<IModelFile>> files;
     std::unordered_map<std::string, size_t> tensor_to_file; // Maps tensor name → file index
+    ProgressCallback progress_callback_;
 
 public:
     // Factory method to create a loader instance
-    static std::unique_ptr<IModelLoader> create(const std::string& model_path);
+    static std::unique_ptr<IModelLoader> create(const std::string& model_path, ProgressCallback progress_callback = {});
 
-    explicit SafeTensorsLoader(const std::string& model_path);
+    explicit SafeTensorsLoader(const std::string& model_path, ProgressCallback progress_callback = {});
 
     // IModelLoader interface
     void load(const std::string& model_path) override;

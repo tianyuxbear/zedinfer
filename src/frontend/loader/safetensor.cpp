@@ -24,8 +24,9 @@ namespace zedinfer::loader {
 // SafeTensorFile Implementation
 // ============================================
 
-std::unique_ptr<IModelLoader> SafeTensorsLoader::create(const std::string& model_path) {
-    return std::make_unique<SafeTensorsLoader>(model_path);
+std::unique_ptr<IModelLoader> SafeTensorsLoader::create(const std::string& model_path,
+                                                        ProgressCallback progress_callback) {
+    return std::make_unique<SafeTensorsLoader>(model_path, std::move(progress_callback));
 }
 
 SafeTensorFile::SafeTensorFile(const std::string& path)
@@ -248,7 +249,8 @@ bool SafeTensorFile::has_tensor(const std::string& name) const {
 // SafeTensorsLoader Implementation
 // ============================================
 
-SafeTensorsLoader::SafeTensorsLoader(const std::string& model_path) {
+SafeTensorsLoader::SafeTensorsLoader(const std::string& model_path, ProgressCallback progress_callback)
+    : progress_callback_(std::move(progress_callback)) {
     load(model_path);
 }
 
@@ -275,11 +277,18 @@ void SafeTensorsLoader::load(const std::string& model_path) {
     // Sort to ensure consistent loading order (e.g., for sharded models)
     std::sort(safetensor_files.begin(), safetensor_files.end());
 
+    if (progress_callback_) {
+        progress_callback_(0, safetensor_files.size());
+    }
+
     files.reserve(safetensor_files.size());
     for (const auto& filepath : safetensor_files) {
         auto file = std::make_unique<SafeTensorFile>(filepath);
         for (const auto& name : file->get_tensor_names()) { tensor_to_file[name] = files.size(); }
         files.push_back(std::move(file));
+        if (progress_callback_) {
+            progress_callback_(files.size(), safetensor_files.size());
+        }
     }
 }
 

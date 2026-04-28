@@ -5,6 +5,9 @@
 #include "frontend/models/qwen3_moe.hpp"
 #include "utils/types.hpp"
 #include "zedinfer.h"
+#ifdef ZEDINFER_USE_TERMBAR
+#include "termbar.h"
+#endif
 #ifdef DEBUG
 #include "utils/system_info.hpp"
 #endif
@@ -16,6 +19,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <iostream>
 #include <limits>
 #include <map>
 #include <memory>
@@ -24,6 +28,14 @@
 #include <plog/Log.h>
 #include <string>
 #include <vector>
+
+#ifdef ZEDINFER_USE_TERMBAR
+#ifdef _WIN32
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
+#endif
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
@@ -149,7 +161,97 @@ ExpertPoolConfig compute_moe_pool_config(const Qwen3MoEConfig& cfg, zedinferDevi
                 (total_expert_bytes - expert_budget) / (1024 * 1024));
     return pool;
 }
+enum class LoadProgressColor {
+    Blue,
+};
 
+#ifdef ZEDINFER_USE_TERMBAR
+
+static size_t clamp_progress_value(size_t value) {
+    return std::min(value, static_cast<size_t>(std::numeric_limits<int>::max()));
+}
+
+static bool is_stdout_interactive() {
+#ifdef _WIN32
+    return _isatty(_fileno(stdout)) != 0;
+#else
+    return isatty(STDOUT_FILENO) != 0;
+#endif
+}
+
+static bool should_render_load_progress() {
+    if (std::getenv("ZEDINFER_DISABLE_LOAD_PROGRESS") != nullptr) {
+        return false;
+    }
+    const char* term = std::getenv("TERM");
+    if (term && std::strcmp(term, "dumb") == 0) {
+        return false;
+    }
+    return is_stdout_interactive();
+}
+
+static termbar::Color to_termbar_color(LoadProgressColor color) {
+    switch (color) {
+        case LoadProgressColor::Blue:
+        default:
+            return termbar::Color::Blue;
+    }
+}
+
+class ModelLoadProgress {
+public:
+    ModelLoadProgress() : enabled_(should_render_load_progress()) {}
+
+    void begin_stage(const std::string& label, size_t total_steps, LoadProgressColor color) {
+        finish_stage();
+
+        stage_total_ = clamp_progress_value(std::max<size_t>(total_steps, 1));
+        current_step_ = 0;
+        if (!enabled_) {
+            return;
+        }
+
+        std::cout << label << std::endl;
+        bar_ = std::make_unique<termbar::ProgressBar>(static_cast<int>(stage_total_), to_termbar_color(color));
+        bar_->update(0);
+    }
+
+    void update(size_t step) {
+        current_step_ = stage_total_ == 0 ? 0 : std::min(clamp_progress_value(step), stage_total_);
+        if (enabled_ && bar_) {
+            bar_->update(static_cast<int>(current_step_));
+        }
+    }
+
+    void advance() { update(current_step_ + 1); }
+
+    void finish_stage() {
+        if (bar_) {
+            bar_->finish();
+            bar_.reset();
+        }
+        stage_total_ = 0;
+        current_step_ = 0;
+    }
+
+private:
+    bool enabled_ = false;
+    size_t stage_total_ = 0;
+    size_t current_step_ = 0;
+    std::unique_ptr<termbar::ProgressBar> bar_;
+};
+
+#else
+
+class ModelLoadProgress {
+public:
+    void begin_stage(const std::string&, size_t, LoadProgressColor) {}
+    void update(size_t) {}
+    void advance() {}
+    void finish_stage() {}
+};
+
+#endif
 } // namespace
 
 // Parse model config and weights, then instantiate the corresponding model.
@@ -732,11 +834,23 @@ std::unique_ptr<ModelWeights> Model::load_weights(const std::string& model_path,
                                                   const ModelConfig& config,
                                                   std::function<bool(const std::string&)> to_cpu_pinned) {
     auto load_start = std::chrono::high_resolution_clock::now();
+    ModelLoadProgress progress;
 
-    auto loader_unique = zedinfer::loader::SafeTensorsLoader::create(model_path);
+    size_t shard_total = 0;
+    auto loader_unique = zedinfer::loader::SafeTensorsLoader::create(model_path, [&](size_t current, size_t total) {
+        if (total == 0) {
+            return;
+        }
+        if (shard_total != total) {
+            shard_total = total;
+            progress.begin_stage("Loading safetensor shards...", total, LoadProgressColor::Blue);
+        }
+        progress.update(current);
+    });
     std::shared_ptr<zedinfer::loader::IModelLoader> loader(std::move(loader_unique));
 
     auto mmap_end = std::chrono::high_resolution_clock::now();
+    progress.finish_stage();
     auto mmap_time = std::chrono::duration<double>(mmap_end - load_start).count();
     LOGI.printf("⏱️  Mmap time: %.4fs", mmap_time);
 
@@ -745,10 +859,14 @@ std::unique_ptr<ModelWeights> Model::load_weights(const std::string& model_path,
     std::map<std::string, LayerGroup> layer_groups;
     std::vector<std::pair<std::string, tensor_t>> standalone_tensors;
     auto convert_start = std::chrono::high_resolution_clock::now();
+    auto tensor_names = loader->get_all_tensor_names();
 
-    for (const auto& raw_name : loader->get_all_tensor_names()) {
+    progress.begin_stage("Indexing tensors...", tensor_names.size(), LoadProgressColor::Blue);
+
+    for (const auto& raw_name : tensor_names) {
         std::string mapped_name = map_weight_name(raw_name);
         if (mapped_name.find("_shape") != std::string::npos) {
+            progress.advance();
             continue;
         }
 
@@ -801,10 +919,36 @@ std::unique_ptr<ModelWeights> Model::load_weights(const std::string& model_path,
         } else {
             standalone_tensors.push_back({mapped_name, tensor});
         }
+
+        progress.advance();
     }
+    progress.finish_stage();
 
     size_t converted_count = 0;
     size_t cpu_pinned_count = 0;
+    size_t materialize_total = standalone_tensors.size();
+    for (const auto& [_, group] : layer_groups) {
+        if (group.t_weight) {
+            materialize_total++;
+        }
+        if (group.t_packed) {
+            materialize_total++;
+        }
+        if (group.t_scale) {
+            materialize_total++;
+        }
+        if (group.t_bias) {
+            materialize_total++;
+        }
+        if (group.t_g_idx) {
+            materialize_total++;
+        }
+        if (group.t_zeros) {
+            materialize_total++;
+        }
+    }
+
+    progress.begin_stage("Preparing model weights...", materialize_total, LoadProgressColor::Blue);
 
     // Materialize a tensor in CPU pinned memory by copying from its mmap source.
     // On NVIDIA runtime, Tensor::create(..., CPU, 0) goes through cudaMallocHost, so
@@ -828,6 +972,7 @@ std::unique_ptr<ModelWeights> Model::load_weights(const std::string& model_path,
             tensor = tensor->to(target_device, 0);
         }
         weights->add_tensor(pair.first, tensor);
+        progress.advance();
     }
 
     for (auto& [prefix, group] : layer_groups) {
@@ -941,6 +1086,7 @@ std::unique_ptr<ModelWeights> Model::load_weights(const std::string& model_path,
                 tensor = tensor->to(target_device, 0);
             }
             weights->add_tensor(name, tensor);
+            progress.advance();
         };
 
         process_and_add(group.t_weight, group.weight_name);
@@ -955,6 +1101,7 @@ std::unique_ptr<ModelWeights> Model::load_weights(const std::string& model_path,
         }
     }
     auto convert_end = std::chrono::high_resolution_clock::now();
+    progress.finish_stage();
     auto convert_time = std::chrono::duration<double>(convert_end - convert_start).count();
     LOGI.printf("⏱️  Conversion time: %.4fs (%zu tensors)", convert_time, converted_count);
     if (cpu_pinned_count > 0) {
