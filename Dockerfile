@@ -21,9 +21,12 @@ COPY . .
 ARG GIT_HASH=unknown
 ENV ZEDINFER_GIT_HASH=${GIT_HASH}
 
-# Build release binaries (portable AVX2 baseline + GPU + oneDNN)
+# Build release binaries (portable AVX2 baseline + GPU + oneDNN + FlashInfer).
+# Submodules (third_party/*) must be initialized on the host before `docker build`,
+# since `.dockerignore` excludes `.git/` and the build context cannot fetch them
+# itself. See CONTRIBUTING.md.
 ENV XMAKE_ROOT=y
-RUN xmake f -m release --nv-gpu=y --onednn=y --portable=y -y \
+RUN xmake f -m release --nv-gpu=y --onednn=y --flashinfer=y --portable=y -y \
     && xmake
 
 # Locate the oneDNN shared library installed by XMake for later COPY
