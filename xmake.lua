@@ -76,6 +76,7 @@ add_required_includedir("third_party/argparse/include", third_party_hint)
 add_required_includedir("third_party/cpp-httplib", third_party_hint)
 add_required_includedir("third_party/dbg-macro", third_party_hint)
 add_required_includedir("third_party/minja/include", third_party_hint)
+add_required_includedir("third_party/stb", third_party_hint)
 
 if has_config("flashinfer") then
     add_defines("USE_FLASHINFER")
