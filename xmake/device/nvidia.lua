@@ -25,6 +25,15 @@ target("ops-nvidia")
     -- cuBLAS for optimized linear (GEMM/GEMV)
     add_links("cublas", "cublasLt")
 
+    if has_config("flashinfer") then
+        -- FlashInfer Mamba headers (selective_state_update.cuh and friends)
+        -- need the BF16 conversion path enabled, host constexpr usable from
+        -- __device__ code, and C++20-style templated lambdas in dispatch
+        -- helpers. These mirror the flags proven by the M0 link probe target
+        -- `test-flashinfer-ssu-link` (see xmake/tests.lua).
+        add_defines("FLASHINFER_ENABLE_BF16")
+        add_cuflags("--expt-relaxed-constexpr", "--expt-extended-lambda", {force = true})
+    end
 
     on_install(function (target) end)
 target_end()
