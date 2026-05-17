@@ -1,6 +1,7 @@
 #pragma once
 
 #include "backend/kvcache/block_pool.hpp"
+#include "backend/tensor/tensor.hpp"
 #include "zedinfer/generation_types.hpp"
 
 #include <atomic>
@@ -83,10 +84,37 @@ struct InferenceRequest {
     bool has_block_table() const { return block_table_ptr_ != nullptr; }
     bool owns_block_table() const { return owns_block_table_; }
 
+    // Qwen3.5 hybrid-path state. Default-valued for non-hybrid models; the
+    // Scheduler populates ssm_slot_idx_ at admit and clears it on finish.
+    //
+    // ssm_slot_idx_   : index into SSMStatePool; -1 = no slot held
+    // image_embeds_   : pre-computed vision-tower output, scattered into the
+    //                   input embedding sequence at <|image_pad|> positions
+    // pos_ids_thw_    : [3, N_total] int32 (t, h, w) positions per token for
+    //                   3D MRoPE; null for non-hybrid models
+    // has_images_    : convenience flag mirroring image_embeds_ != nullptr
+    int  ssm_slot_idx() const { return ssm_slot_idx_; }
+    void set_ssm_slot_idx(int idx) { ssm_slot_idx_ = idx; }
+
+    bool has_images() const { return has_images_; }
+    tensor_t image_embeds() const { return image_embeds_; }
+    void set_image_embeds(tensor_t e) {
+        image_embeds_ = std::move(e);
+        has_images_ = static_cast<bool>(image_embeds_);
+    }
+
+    tensor_t pos_ids_thw() const { return pos_ids_thw_; }
+    void set_pos_ids_thw(tensor_t t) { pos_ids_thw_ = std::move(t); }
+
 private:
     kvcache::SequenceBlockTable* block_table_ptr_ = nullptr;
     kvcache::SequenceBlockTable owned_block_table_;
     bool owns_block_table_ = false;
+
+    int      ssm_slot_idx_ = -1;
+    tensor_t image_embeds_;
+    tensor_t pos_ids_thw_;
+    bool     has_images_ = false;
 };
 
 } // namespace zedinfer
