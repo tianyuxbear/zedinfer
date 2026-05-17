@@ -1232,6 +1232,10 @@ std::string Model::map_weight_name(const std::string& raw_name) {
     if (name.size() > 6 && name.substr(0, 6) == "model.") {
         name = name.substr(6);
     }
+    // Then strip "language_model." prefix (Qwen3.5)
+    if (name.size() > 15 && name.substr(0, 15) == "language_model.") {
+        name = name.substr(15);
+    }
 
     // Map GPTQ suffixes to internal naming convention
     if (name.size() > 8 && name.substr(name.size() - 8) == ".qweight") {
