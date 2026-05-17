@@ -174,3 +174,12 @@ target("test-flashinfer-ssu-link")
     else
         on_load(function () raise("test-flashinfer-ssu-link requires --flashinfer=y") end)
     end
+
+target("test-ops-mamba-ssu")
+    set_kind("binary")
+    set_group("test")
+    set_rundir("$(projectdir)")
+    add_files("../tests/models/test_ops_mamba_ssu.cpp")
+    add_deps("zedinfer")
+    add_packages("gtest")
+    add_syslinks("gtest_main")
