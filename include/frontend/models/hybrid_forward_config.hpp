@@ -45,12 +45,43 @@ struct HybridForwardConfig : public ModelForwardConfig {
     // pool has not yet been wired (early init).
     SSMStatePool*          ssm_pool = nullptr;
 
+    // Precomputed lookup tables: full_layer_index_table[L] = index of layer L
+    // among full-attention layers (and similarly for linear). Populated by
+    // rebuild_layer_index_tables() after layer_kinds is filled. M1 decode hot
+    // path indexes these in O(1) instead of scanning layer_kinds per call.
+    std::vector<int> full_layer_index_table;
+    std::vector<int> linear_layer_index_table;
+
+    // Repopulate full_/linear_layer_index_table from the current layer_kinds.
+    // Callers must invoke this once after assigning layer_kinds (and again if
+    // the layout ever changes — which it does not for a constructed model).
+    void rebuild_layer_index_tables() {
+        full_layer_index_table.assign(layer_kinds.size(), 0);
+        linear_layer_index_table.assign(layer_kinds.size(), 0);
+        int full_n = 0;
+        int linear_n = 0;
+        for (size_t i = 0; i < layer_kinds.size(); ++i) {
+            full_layer_index_table[i] = full_n;
+            linear_layer_index_table[i] = linear_n;
+            if (layer_kinds[i] == LayerKind::Full) {
+                ++full_n;
+            } else {
+                ++linear_n;
+            }
+        }
+    }
+
     bool is_linear_attn_layer(size_t L) const { return layer_kinds[L] == LayerKind::Linear; }
 
     // Index of layer L among the full-attention layers (0 for the first full
     // layer, 1 for the second, ...). Used to address per-full-layer scratch /
-    // KV-cache slots without paying for the linear layers in between.
+    // KV-cache slots without paying for the linear layers in between. O(1)
+    // after rebuild_layer_index_tables; falls back to O(L) scan otherwise so
+    // the helpers stay safe to call on partially-initialized configs.
     int full_layer_index(size_t L) const {
+        if (L < full_layer_index_table.size()) {
+            return full_layer_index_table[L];
+        }
         int idx = 0;
         for (size_t i = 0; i < L; ++i) {
             if (layer_kinds[i] == LayerKind::Full) {
@@ -63,6 +94,9 @@ struct HybridForwardConfig : public ModelForwardConfig {
     // Index of layer L among the linear-attention layers. Mirrors
     // full_layer_index for the SSM slot/conv-state addressing path.
     int linear_layer_index(size_t L) const {
+        if (L < linear_layer_index_table.size()) {
+            return linear_layer_index_table[L];
+        }
         int idx = 0;
         for (size_t i = 0; i < L; ++i) {
             if (layer_kinds[i] == LayerKind::Linear) {

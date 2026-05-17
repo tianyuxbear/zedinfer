@@ -135,6 +135,17 @@ Qwen3_5MoeModel::Qwen3_5MoeModel(Qwen3_5MoEConfig config, std::unique_ptr<ModelW
     if (!weights_) {
         throw std::runtime_error("[Qwen3_5MoeModel] parent ctor did not retain ModelWeights");
     }
+    // Early guard: a missing or zero num_experts in config silently produces an empty
+    // ExpertPool, which is only detectable later via an "experts not found" failure deep
+    // inside the M1 forward path. Catch it at construction time so misconfigured models
+    // (e.g. text_config.num_experts absent from config.json) fail fast and clearly.
+    if (moe_config_.num_experts <= 0 || moe_config_.num_experts_per_tok <= 0) {
+        throw std::runtime_error(
+            "[Qwen3_5MoeModel] invalid MoE config: num_experts="
+            + std::to_string(moe_config_.num_experts)
+            + ", num_experts_per_tok=" + std::to_string(moe_config_.num_experts_per_tok)
+            + " (both must be > 0; check config.json text_config)");
+    }
     auto experts = extract_expert_weights(*weights_, moe_config_.num_hidden_layers,
                                           static_cast<size_t>(moe_config_.num_experts));
     expert_pool_ = std::make_unique<ExpertPool>(std::move(experts), pool_cfg);

@@ -117,6 +117,9 @@ HybridForwardConfig Qwen3_5Model::hybrid_forward_config() const {
     h.mrope.theta          = config_.rope_theta;
     h.attn_output_gate     = config_.attn_output_gate;
     h.ssm_pool             = ssm_pool_.get();
+    // Precompute O(1) layer-index lookup tables for the M1 decode hot path so
+    // dispatch sites do not rescan layer_kinds on every layer call.
+    h.rebuild_layer_index_tables();
     return h;
 }
 
