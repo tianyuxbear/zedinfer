@@ -2,6 +2,7 @@
 #include "frontend/loader/safetensors.hpp"
 #include "frontend/models/qwen2.hpp"
 #include "frontend/models/qwen3.hpp"
+#include "frontend/models/qwen3_5_config.hpp"
 #include "frontend/models/qwen3_moe.hpp"
 #include "utils/types.hpp"
 #include "zedinfer.h"
@@ -583,7 +584,29 @@ std::unique_ptr<ModelConfig> Model::load_config(const std::string& config_path) 
     std::string model_type = safe_string(j, "model_type", "unknown");
 
     ModelConfig base_config;
-    load_base_config(base_config, j);
+    // Qwen3.5 nests text-model fields under "text_config" (top-level only carries
+    // multimodal token IDs + vision_config + quantization_config). Route the base
+    // load through that nested object so hidden_size/num_hidden_layers/etc. are
+    // populated from the right slot. The qwen3_5 dispatcher branch below relies on
+    // the result and additionally populates hybrid/vision/mrope fields.
+    const bool is_qwen3_5 = (model_type == "qwen3_5" || model_type == "qwen3_5_moe");
+    if (is_qwen3_5 && j.contains("text_config") && j["text_config"].is_object()) {
+        // Make a mutable copy so we can inject safe defaults for fields the dense
+        // base loader requires unconditionally (e.g. intermediate_size, which the
+        // Qwen3.5-MoE text_config omits because every layer uses experts).
+        json text_for_base = j["text_config"];
+        if (!text_for_base.contains("intermediate_size")) {
+            text_for_base["intermediate_size"]
+                = text_for_base.value("moe_intermediate_size", static_cast<size_t>(0));
+        }
+        load_base_config(base_config, text_for_base);
+        // load_base_config copies model_type out of the nested JSON (e.g. "qwen3_5_text"
+        // or "qwen3_5_moe_text"); restore the canonical top-level value so the
+        // dispatcher and downstream model code see "qwen3_5" / "qwen3_5_moe".
+        base_config.model_type = model_type;
+    } else {
+        load_base_config(base_config, j);
+    }
 
     if (j.contains("quantization_config") && j["quantization_config"].is_object()) {
         auto& q_json = j["quantization_config"];
@@ -667,6 +690,91 @@ std::unique_ptr<ModelConfig> Model::load_config(const std::string& config_path) 
                     moe_config->num_hidden_layers, moe_config->num_experts, moe_config->num_experts_per_tok,
                     moe_config->moe_intermediate_size, moe_config->shared_expert_intermediate_size);
         return moe_config;
+    } else if (model_type == "qwen3_5" || model_type == "qwen3_5_moe") {
+        // base_config has already been populated from text_config above (see is_qwen3_5
+        // dispatch). Here we layer on the hybrid / vision / mrope / linear-attn fields.
+        const json& text_json = j.contains("text_config") && j["text_config"].is_object()
+                                    ? j["text_config"]
+                                    : j;
+        const json vision_json = j.value("vision_config", json::object());
+
+        // Hybrid attention layout.
+        if (text_json.contains("layer_types") && text_json["layer_types"].is_array()) {
+            base_config.layer_types.clear();
+            base_config.layer_types.reserve(text_json["layer_types"].size());
+            for (const auto& el : text_json["layer_types"]) {
+                base_config.layer_types.push_back(el.get<std::string>());
+            }
+        }
+        base_config.attn_output_gate = text_json.value("attn_output_gate", false);
+        base_config.mtp_num_hidden_layers = text_json.value("mtp_num_hidden_layers", 0);
+
+        // RoPE parameters (Qwen3.5 nests them under text_config.rope_parameters).
+        if (text_json.contains("rope_parameters") && text_json["rope_parameters"].is_object()) {
+            const auto& rp = text_json["rope_parameters"];
+            base_config.partial_rotary_factor = rp.value("partial_rotary_factor", 1.0f);
+            base_config.mrope_interleaved = rp.value("mrope_interleaved", false);
+            if (rp.contains("mrope_section") && rp["mrope_section"].is_array()
+                && rp["mrope_section"].size() == 3) {
+                for (int i = 0; i < 3; ++i) {
+                    base_config.mrope_section[i] = rp["mrope_section"][i].get<int>();
+                }
+            }
+            base_config.rope_theta = rp.value("rope_theta", base_config.rope_theta);
+        }
+
+        // Linear attention sub-config (mamba-style state-space layers).
+        base_config.linear_attn.num_v_heads = text_json.value("linear_num_value_heads", 0);
+        base_config.linear_attn.value_head_dim = text_json.value("linear_value_head_dim", 0);
+        base_config.linear_attn.num_k_heads = text_json.value("linear_num_key_heads", 0);
+        base_config.linear_attn.key_head_dim = text_json.value("linear_key_head_dim", 0);
+        base_config.linear_attn.conv_kernel_dim = text_json.value("linear_conv_kernel_dim", 4);
+        base_config.linear_attn.state_dtype = text_json.value("mamba_ssm_dtype", std::string("bfloat16"));
+        // d_state defaults to value_head_dim; the loader can override it from the actual
+        // in_proj_b tensor shape once weights are read.
+        base_config.linear_attn.d_state = base_config.linear_attn.value_head_dim;
+
+        // Vision sub-config (top-level "vision_config", not nested in text_config).
+        if (!vision_json.empty() && vision_json.is_object()) {
+            base_config.has_vision = true;
+            base_config.vision.depth = vision_json.value("depth", 0);
+            base_config.vision.hidden_size = vision_json.value("hidden_size", 0);
+            base_config.vision.out_hidden_size = vision_json.value("out_hidden_size", 0);
+            base_config.vision.num_heads = vision_json.value("num_heads", 0);
+            base_config.vision.patch_size = vision_json.value("patch_size", 16);
+            base_config.vision.temporal_patch_size = vision_json.value("temporal_patch_size", 2);
+            base_config.vision.spatial_merge_size = vision_json.value("spatial_merge_size", 2);
+            base_config.vision.num_position_embeddings = vision_json.value("num_position_embeddings", 0);
+            base_config.vision.intermediate_size = vision_json.value("intermediate_size", 0);
+        }
+
+        // Special-token IDs live at the *top* of the config, not under text_config.
+        base_config.image_token_id = j.value("image_token_id", -1);
+        base_config.video_token_id = j.value("video_token_id", -1);
+        base_config.vision_start_token_id = j.value("vision_start_token_id", -1);
+        base_config.vision_end_token_id = j.value("vision_end_token_id", -1);
+
+        if (model_type == "qwen3_5_moe") {
+            auto moe_cfg = std::make_unique<Qwen3_5MoEConfig>(std::move(base_config));
+            moe_cfg->num_experts = text_json.value("num_experts", 0);
+            moe_cfg->num_experts_per_tok = text_json.value("num_experts_per_tok", 0);
+            moe_cfg->moe_intermediate_size = text_json.value("moe_intermediate_size", 0);
+            moe_cfg->shared_expert_intermediate_size = text_json.value("shared_expert_intermediate_size", 0);
+            moe_cfg->decoder_sparse_step = text_json.value("decoder_sparse_step", 1);
+            if (text_json.contains("mlp_only_layers") && text_json["mlp_only_layers"].is_array()) {
+                moe_cfg->mlp_only_layers = text_json["mlp_only_layers"].get<std::vector<int>>();
+            }
+            LOGI.printf("[Model] Qwen3.5-MoE: %zu layers, %d experts (top-%d), moe_inter=%d, shared_inter=%d",
+                        moe_cfg->num_hidden_layers, moe_cfg->num_experts, moe_cfg->num_experts_per_tok,
+                        moe_cfg->moe_intermediate_size, moe_cfg->shared_expert_intermediate_size);
+            return moe_cfg;
+        }
+
+        auto dense_cfg = std::make_unique<Qwen3_5Config>(std::move(base_config));
+        LOGI.printf("[Model] Qwen3.5: %zu layers (hybrid, linear_v_heads=%d), vision=%s",
+                    dense_cfg->num_hidden_layers, dense_cfg->linear_attn.num_v_heads,
+                    dense_cfg->has_vision ? "true" : "false");
+        return dense_cfg;
     }
 
     throw std::runtime_error("Unsupported model type: " + model_type);
