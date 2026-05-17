@@ -123,13 +123,14 @@ std::unique_ptr<ExpertWeights> extract_expert_weights(ModelWeights& weights, siz
 } // namespace
 
 Qwen3_5MoeModel::Qwen3_5MoeModel(Qwen3_5MoEConfig config, std::unique_ptr<ModelWeights> weights,
-                                 const ExecutorConfig& exec, int max_concurrent, ExpertPoolConfig pool_cfg)
+                                 const ExecutorConfig& exec, int max_concurrent, ExpertPoolConfig pool_cfg,
+                                 const std::string& model_path)
     // Forward to parent: Qwen3_5Model takes ownership of the weights and exposes them through the
     // protected weights_ member. The parent ctor runs SSM pool sizing + optional VisionTower
     // verification first; expert extraction below mutates *weights_ in-place after that. The
     // base-slice copy is intentional — Qwen3_5Config / Qwen3_5MoEConfig are plain structs with
     // no virtual functions, so slicing the MoE-only fields off the parent copy is safe.
-    : Qwen3_5Model(static_cast<const Qwen3_5Config&>(config), std::move(weights), exec, max_concurrent),
+    : Qwen3_5Model(static_cast<const Qwen3_5Config&>(config), std::move(weights), exec, max_concurrent, model_path),
       moe_config_(std::move(config)) {
     if (!weights_) {
         throw std::runtime_error("[Qwen3_5MoeModel] parent ctor did not retain ModelWeights");

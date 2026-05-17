@@ -351,7 +351,7 @@ std::shared_ptr<Model> Model::parse(const std::string& model_path, zedinferDevic
         // M0 default; M5 will revisit this to plumb through SchedulerConfig.
         const int max_concurrent = 1;
         ExecutorConfig exec(target_device, 0, ZEDINFER_DTYPE_BF16);
-        return std::make_shared<Qwen3_5Model>(*qcfg, std::move(weights), exec, max_concurrent);
+        return std::make_shared<Qwen3_5Model>(*qcfg, std::move(weights), exec, max_concurrent, model_path);
     } else if (config->model_type == "qwen3_5_moe") {
         auto* qcfg = dynamic_cast<Qwen3_5MoEConfig*>(config.get());
         if (!qcfg) {
@@ -362,7 +362,8 @@ std::shared_ptr<Model> Model::parse(const std::string& model_path, zedinferDevic
         // coupled to the same single decision (env override or auto fallback).
         const int max_concurrent = 1;
         ExecutorConfig exec(target_device, 0, ZEDINFER_DTYPE_BF16);
-        return std::make_shared<Qwen3_5MoeModel>(*qcfg, std::move(weights), exec, max_concurrent, moe_pool_config);
+        return std::make_shared<Qwen3_5MoeModel>(*qcfg, std::move(weights), exec, max_concurrent, moe_pool_config,
+                                                 model_path);
     }
 
     throw std::runtime_error("Unsupported model type: " + config->model_type);

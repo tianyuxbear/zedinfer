@@ -2,17 +2,21 @@
 
 #include "frontend/models/vision_tower.hpp"
 #include "zedinfer.h"
+#include "zedinfer/chat_template_jinja.hpp"
 
 #include <plog/Log.h>
 
 #include <algorithm>
+#include <filesystem>
 #include <stdexcept>
 #include <utility>
+
+namespace fs = std::filesystem;
 
 namespace zedinfer::model {
 
 Qwen3_5Model::Qwen3_5Model(Qwen3_5Config config, std::unique_ptr<ModelWeights> weights, const ExecutorConfig& exec,
-                           int max_concurrent)
+                           int max_concurrent, const std::string& model_path)
     : config_(std::move(config)), weights_(std::move(weights)) {
     // Count linear-attention layers and compute the QKV concat width used by
     // the SSM conv-state buffer. Width matches the in_proj_b output layout:
@@ -57,6 +61,27 @@ Qwen3_5Model::Qwen3_5Model(Qwen3_5Config config, std::unique_ptr<ModelWeights> w
     const int num_full = static_cast<int>(config_.num_hidden_layers) - num_linear;
     LOGI.printf("[Qwen3_5Model] constructed: %d linear-attn layers, %d full-attn layers, vision=%s", num_linear,
                 num_full, vision_ ? "yes" : "no");
+
+    // Optional: load chat_template.jinja for Qwen3.5's multimodal ChatML
+    // dialect. The file is shipped alongside the safetensors in HF releases;
+    // when absent (e.g. minimal test fixtures) we silently leave the member
+    // null so server / smoke-test code paths can fall back to the data-driven
+    // zedinfer::ChatTemplate as needed.
+    if (!model_path.empty()) {
+        fs::path tpl_path = fs::path(model_path) / "chat_template.jinja";
+        if (fs::exists(tpl_path)) {
+            try {
+                chat_template_ = std::make_shared<ChatTemplateJinja>(
+                    ChatTemplateJinja::load(tpl_path.string()));
+                LOGI << "[Qwen3_5Model] Loaded chat_template.jinja from " << tpl_path.string();
+            } catch (const std::exception& e) {
+                LOGW << "[Qwen3_5Model] Failed to compile chat_template.jinja at " << tpl_path.string()
+                     << ": " << e.what();
+            }
+        } else {
+            LOGI << "[Qwen3_5Model] No chat_template.jinja in " << model_path << "; skipping Jinja loader";
+        }
+    }
 }
 
 Qwen3_5Model::~Qwen3_5Model() = default;

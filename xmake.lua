@@ -169,7 +169,10 @@ target("zedinfer")
     add_deps("utils")
     add_deps("frontend")
     add_deps("backend")
-    add_files("src/zedinfer/*.cpp")
+    -- chat_template_jinja.cpp is compiled into the `models` target so that
+    -- Qwen3_5Model can call ChatTemplateJinja::load without violating the
+    -- static-link order (models is downstream of zedinfer in -l flags).
+    add_files("src/zedinfer/*.cpp|chat_template_jinja.cpp")
 
     -- Inject git hash and build date as compile-time defines.
     -- Propagated to all dependent binaries (serve, bench, etc.) via {public = true}.

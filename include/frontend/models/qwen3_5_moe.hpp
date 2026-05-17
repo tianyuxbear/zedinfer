@@ -18,7 +18,7 @@ namespace zedinfer::model {
 class Qwen3_5MoeModel : public Qwen3_5Model {
 public:
     Qwen3_5MoeModel(Qwen3_5MoEConfig config, std::unique_ptr<ModelWeights> weights, const ExecutorConfig& exec,
-                    int max_concurrent, ExpertPoolConfig pool_cfg);
+                    int max_concurrent, ExpertPoolConfig pool_cfg, const std::string& model_path);
     ~Qwen3_5MoeModel() override;
 
     std::string model_type() const override { return "qwen3_5_moe"; }

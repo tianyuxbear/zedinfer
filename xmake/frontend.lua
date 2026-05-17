@@ -45,5 +45,11 @@ target("models")
     add_deps("loader")
     add_deps("termbar")
     add_files("../src/frontend/models/*.cpp")
+    -- ChatTemplateJinja is referenced by Qwen3_5Model::Qwen3_5Model in this
+    -- target. Linking it from the parent `zedinfer` archive would require the
+    -- linker to revisit `zedinfer.a` after `models.a` resolves its undefined
+    -- symbol, which the default -lzedinfer ... -lmodels order forbids. Compile
+    -- the TU here so `models.a` carries its own dependency.
+    add_files("../src/zedinfer/chat_template_jinja.cpp")
     on_install(function (target) end)
 target_end()
