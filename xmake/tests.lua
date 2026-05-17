@@ -95,3 +95,29 @@ target("test-stb-smoke")
     add_files("../tests/integration/test_stb_smoke.cpp")
     add_packages("gtest")
     add_syslinks("gtest_main")
+
+target("test-flashinfer-ssu-link")
+    set_kind("binary")
+    set_group("test")
+    set_rundir("$(projectdir)")
+    if has_config("flashinfer") then
+        add_defines("USE_FLASHINFER", "FLASHINFER_ENABLE_BF16")
+        add_files("../tests/integration/test_flashinfer_ssu_link.cu")
+        -- Match the CUDA flags used by ops-nvidia / flashinfer_wrapper.cu so
+        -- that the FlashInfer Mamba headers compile under the same toolchain.
+        -- --expt-relaxed-constexpr and --expt-extended-lambda mirror FlashInfer's
+        -- own JIT flags (flashinfer/jit/cpp_ext.py) — the Mamba headers call
+        -- host constexpr from __device__ code and use C++20-style templated
+        -- lambdas inside dispatch helpers.
+        set_policy("build.cuda.devlink", true)
+        set_policy("check.auto_ignore_flags", false)
+        add_cugencodes("native")
+        add_cxflags("-fPIC", {force = true})
+        add_cuflags("-rdc=true", "-Xcompiler=-fPIC",
+                    "--expt-relaxed-constexpr", "--expt-extended-lambda",
+                    {force = true})
+        add_culdflags("-Xcompiler=-fPIC", {force = true})
+        add_syslinks("cuda", "cudart")
+    else
+        on_load(function () raise("test-flashinfer-ssu-link requires --flashinfer=y") end)
+    end
