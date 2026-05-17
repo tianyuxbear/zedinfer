@@ -4,6 +4,7 @@
 #include "frontend/models/qwen3.hpp"
 #include "frontend/models/qwen3_5.hpp"
 #include "frontend/models/qwen3_5_config.hpp"
+#include "frontend/models/qwen3_5_moe.hpp"
 #include "frontend/models/qwen3_moe.hpp"
 #include "zedinfer/activation.hpp"
 #include "utils/types.hpp"
@@ -164,6 +165,25 @@ ExpertPoolConfig compute_moe_pool_config(const Qwen3MoEConfig& cfg, zedinferDevi
                 (total_expert_bytes - expert_budget) / (1024 * 1024));
     return pool;
 }
+
+// Thin adapter so the Qwen3.5-MoE dispatcher can reuse the same auto-sizing logic as
+// Qwen3-MoE without duplicating the env-var + VRAM heuristic. Shim a Qwen3MoEConfig
+// from the relevant fields of Qwen3_5MoEConfig; the helper only reads num_experts,
+// num_experts_per_tok, num_hidden_layers, hidden_size, moe_intermediate_size, and
+// quant_config (already inherited on the base ModelConfig). The hybrid-specific
+// SSM reservation is M5's job per docs/plan/qwen3_5_p1_m0_load_and_parse.md.
+ExpertPoolConfig compute_moe_pool_config_qwen3_5(const Qwen3_5MoEConfig& cfg, zedinferDeviceType_t target_device,
+                                                 float gpu_memory_utilization) {
+    Qwen3MoEConfig shim(static_cast<const ModelConfig&>(cfg));
+    shim.num_experts = static_cast<size_t>(cfg.num_experts);
+    shim.num_experts_per_tok = static_cast<size_t>(cfg.num_experts_per_tok);
+    shim.moe_intermediate_size = static_cast<size_t>(cfg.moe_intermediate_size);
+    shim.shared_expert_intermediate_size = static_cast<size_t>(cfg.shared_expert_intermediate_size);
+    shim.decoder_sparse_step = static_cast<size_t>(cfg.decoder_sparse_step);
+    shim.mlp_only_layers = cfg.mlp_only_layers;
+    return compute_moe_pool_config(shim, target_device, gpu_memory_utilization);
+}
+
 enum class LoadProgressColor {
     Blue,
 };
@@ -267,7 +287,7 @@ std::shared_ptr<Model> Model::parse(const std::string& model_path, zedinferDevic
     // For MoE models, decide the ExpertPool strategy up front so the loader's CPU-pinned
     // routing predicate and the pool strategy stay coupled to the same single decision
     // (env var override or auto-sized fallback).
-    ExpertPoolConfig moe_pool_config; // defaults: ALL_GPU; only meaningful for qwen3_moe.
+    ExpertPoolConfig moe_pool_config; // defaults: ALL_GPU; only meaningful for qwen3_moe / qwen3_5_moe.
     std::function<bool(const std::string&)> route = [](const std::string&) { return false; };
     if (config->model_type == "qwen3_moe" && target_device != ZEDINFER_DEVICE_CPU) {
         auto* moe_config = dynamic_cast<const Qwen3MoEConfig*>(config.get());
@@ -275,6 +295,15 @@ std::shared_ptr<Model> Model::parse(const std::string& model_path, zedinferDevic
             moe_pool_config = compute_moe_pool_config(*moe_config, target_device, gpu_memory_utilization);
             if (moe_pool_config.strategy == ExpertPoolStrategy::PINNED_LRU) {
                 LOGI << "[Model] Routing MoE expert tensors to CPU pinned memory";
+                route = [](const std::string& name) { return name.find(".mlp.experts.") != std::string::npos; };
+            }
+        }
+    } else if (config->model_type == "qwen3_5_moe" && target_device != ZEDINFER_DEVICE_CPU) {
+        auto* moe_config = dynamic_cast<const Qwen3_5MoEConfig*>(config.get());
+        if (moe_config) {
+            moe_pool_config = compute_moe_pool_config_qwen3_5(*moe_config, target_device, gpu_memory_utilization);
+            if (moe_pool_config.strategy == ExpertPoolStrategy::PINNED_LRU) {
+                LOGI << "[Model] Routing Qwen3.5 MoE expert tensors to CPU pinned memory";
                 route = [](const std::string& name) { return name.find(".mlp.experts.") != std::string::npos; };
             }
         }
@@ -323,6 +352,17 @@ std::shared_ptr<Model> Model::parse(const std::string& model_path, zedinferDevic
         const int max_concurrent = 1;
         ExecutorConfig exec(target_device, 0, ZEDINFER_DTYPE_BF16);
         return std::make_shared<Qwen3_5Model>(*qcfg, std::move(weights), exec, max_concurrent);
+    } else if (config->model_type == "qwen3_5_moe") {
+        auto* qcfg = dynamic_cast<Qwen3_5MoEConfig*>(config.get());
+        if (!qcfg) {
+            throw std::logic_error("Config is not Qwen3_5MoEConfig");
+        }
+        // M0 default; M5 will revisit this to plumb through SchedulerConfig. moe_pool_config was
+        // computed up-front so the loader's CPU-pinned routing predicate and the ExpertPool stay
+        // coupled to the same single decision (env override or auto fallback).
+        const int max_concurrent = 1;
+        ExecutorConfig exec(target_device, 0, ZEDINFER_DTYPE_BF16);
+        return std::make_shared<Qwen3_5MoeModel>(*qcfg, std::move(weights), exec, max_concurrent, moe_pool_config);
     }
 
     throw std::runtime_error("Unsupported model type: " + config->model_type);
