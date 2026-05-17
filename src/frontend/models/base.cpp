@@ -2,8 +2,10 @@
 #include "frontend/loader/safetensors.hpp"
 #include "frontend/models/qwen2.hpp"
 #include "frontend/models/qwen3.hpp"
+#include "frontend/models/qwen3_5.hpp"
 #include "frontend/models/qwen3_5_config.hpp"
 #include "frontend/models/qwen3_moe.hpp"
+#include "zedinfer/activation.hpp"
 #include "utils/types.hpp"
 #include "zedinfer.h"
 #ifdef ZEDINFER_USE_TERMBAR
@@ -312,6 +314,15 @@ std::shared_ptr<Model> Model::parse(const std::string& model_path, zedinferDevic
             throw std::logic_error("Config is not Qwen3MoEConfig");
         }
         return std::make_shared<Qwen3MoEModel>(*moe_config, std::move(weights), moe_pool_config);
+    } else if (config->model_type == "qwen3_5") {
+        auto* qcfg = dynamic_cast<Qwen3_5Config*>(config.get());
+        if (!qcfg) {
+            throw std::logic_error("Config is not Qwen3_5Config");
+        }
+        // M0 default; M5 will revisit this to plumb through SchedulerConfig.
+        const int max_concurrent = 1;
+        ExecutorConfig exec(target_device, 0, ZEDINFER_DTYPE_BF16);
+        return std::make_shared<Qwen3_5Model>(*qcfg, std::move(weights), exec, max_concurrent);
     }
 
     throw std::runtime_error("Unsupported model type: " + config->model_type);
