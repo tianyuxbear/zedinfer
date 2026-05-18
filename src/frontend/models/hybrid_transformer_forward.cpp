@@ -15,6 +15,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -235,11 +236,33 @@ static tensor_t forward_linear_attn_layer(const HybridForwardConfig& m, tensor_t
     sp.num_tokens = static_cast<int>(N);
     ops::mamba::ssu(sp);
 
-    // 6. RMSNorm on per-V-head value_head_dim axis.
+    // 6. RMSNorm on per-V-head value_head_dim axis. Qwen3.5 stores this norm
+    //    weight as fp32 (`mamba_ssm_dtype=float32`) while activations are bf16;
+    //    convert the weight to bf16 once per call so rms_norm's same-dtype
+    //    check passes. 128-element tensor → CPU cast + H2D is sub-µs vs the
+    //    layer kernel cost.
+    tensor_t norm_w = m.W(p + "norm.weight");
+    if (norm_w->dtype() != exec.data_type) {
+        const size_t W = norm_w->numel();
+        auto norm_w_cast = make({W});
+        std::vector<uint16_t> host_bf16(W);
+        std::vector<float> host_f32(W);
+        auto* api = device::getRuntimeAPI(exec.device_type);
+        api->memcpy_sync(host_f32.data(), norm_w->data(), W * sizeof(float), ZEDINFER_MEMCPY_D2H);
+        for (size_t i = 0; i < W; ++i) {
+            uint32_t u = 0;
+            std::memcpy(&u, &host_f32[i], sizeof(u));
+            host_bf16[i] = static_cast<uint16_t>(u >> 16); // truncate-to-bf16
+        }
+        api->memcpy_sync(norm_w_cast->data(), host_bf16.data(),
+                         W * sizeof(uint16_t), ZEDINFER_MEMCPY_H2D);
+        norm_w = norm_w_cast;
+    }
+
     auto y_normed = make({N, Hv_Dv});
     ops::rms_norm(y_normed->view({N * static_cast<size_t>(Hv), static_cast<size_t>(Dv)}),
                   y->view({N * static_cast<size_t>(Hv), static_cast<size_t>(Dv)}),
-                  m.W(p + "norm.weight"), m.config.rms_norm_eps);
+                  norm_w, m.config.rms_norm_eps);
 
     // 7. Output projection [Hv_Dv → hidden_size].
     auto out = make({N, m.config.hidden_size});

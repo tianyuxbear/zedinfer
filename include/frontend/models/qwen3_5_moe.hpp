@@ -24,6 +24,12 @@ public:
     std::string model_type() const override { return "qwen3_5_moe"; }
     size_t num_parameters() const override;
 
+    // Inject MoE-specific fields on top of the parent dense-style hybrid config.
+    // The outer loop in hybrid_transformer_forward consults is_moe_layer() to
+    // pick forward_moe_mlp vs forward_dense_mlp; without this override every
+    // layer routes to forward_dense_mlp and fails on the missing mlp.gate_proj.
+    HybridForwardConfig hybrid_forward_config_moe() const;
+
     const Qwen3_5MoEConfig& moe_config() const { return moe_config_; }
     ExpertPool& expert_pool() { return *expert_pool_; }
     const ExpertPool& expert_pool() const { return *expert_pool_; }

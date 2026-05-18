@@ -3,6 +3,7 @@
 #include "frontend/models/forward_config.hpp"
 #include "frontend/models/hybrid_transformer_forward.hpp"
 #include "frontend/models/qwen3_5.hpp"
+#include "frontend/models/qwen3_5_moe.hpp"
 #include "frontend/models/paged_forward_context.hpp"
 #include "utils/logging.hpp"
 #include "zedinfer/engine.hpp"
@@ -133,7 +134,12 @@ bool ServingLoop::step() {
             if (!req) {
                 throw std::runtime_error("[ServingLoop] hybrid model: empty batch (no request to forward)");
             }
-            auto hcfg = hybrid_model->hybrid_forward_config();
+            // MoE variant carries an ExpertPool + shared-expert config the dense
+            // forward config doesn't populate; downcast first so the right
+            // is_moe / num_experts / expert_pool fields are set.
+            const auto* moe_model = dynamic_cast<const model::Qwen3_5MoeModel*>(hybrid_model);
+            model::HybridForwardConfig hcfg = moe_model ? moe_model->hybrid_forward_config_moe()
+                                                          : hybrid_model->hybrid_forward_config();
             logits = model::hybrid_transformer_forward(hcfg, ctx, *req, engine_->exec_config(), scratch,
                                                          req->image_embeds());
         } else {

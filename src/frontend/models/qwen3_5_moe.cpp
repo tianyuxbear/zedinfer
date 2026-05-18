@@ -157,6 +157,35 @@ Qwen3_5MoeModel::Qwen3_5MoeModel(Qwen3_5MoEConfig config, std::unique_ptr<ModelW
 
 Qwen3_5MoeModel::~Qwen3_5MoeModel() = default;
 
+HybridForwardConfig Qwen3_5MoeModel::hybrid_forward_config_moe() const {
+    auto h = Qwen3_5Model::hybrid_forward_config();
+
+    h.is_moe = true;
+    h.num_experts = static_cast<size_t>(moe_config_.num_experts);
+    h.num_experts_per_tok = static_cast<size_t>(moe_config_.num_experts_per_tok);
+    h.moe_intermediate_size = static_cast<size_t>(moe_config_.moe_intermediate_size);
+    h.shared_expert_intermediate_size = static_cast<size_t>(moe_config_.shared_expert_intermediate_size);
+    h.decoder_sparse_step = static_cast<size_t>(moe_config_.decoder_sparse_step);
+    h.mlp_only_layers = moe_config_.mlp_only_layers;
+    h.has_shared_expert = h.shared_expert_intermediate_size > 0
+                          && (weights_->has_tensor("layers.0.mlp.shared_expert.gate_proj.weight")
+                              || weights_->has_tensor("layers.0.mlp.shared_expert.gate_proj.weight_packed"));
+    h.expert_pool = expert_pool_.get();
+
+    // Cache per-layer router weights for moe_layer_forward's compute_router_topk
+    // hot path (avoids string-keyed lookups per layer per step).
+    h.router_weights.resize(moe_config_.num_hidden_layers);
+    for (size_t l = 0; l < moe_config_.num_hidden_layers; ++l) {
+        const std::string name = h.router_weight_name(static_cast<int>(l));
+        h.router_weights[l] = weights_->has_tensor(name) ? weights_->get_tensor(name) : nullptr;
+    }
+
+    // Cache quant params used in every dispatch_expert_linear call.
+    h.expert_quant_num_bits = moe_config_.quant_config.weights.num_bits;
+    h.expert_quant_group_size = moe_config_.quant_config.weights.group_size;
+    return h;
+}
+
 size_t Qwen3_5MoeModel::num_parameters() const {
     // Count tensors still held by *weights_* (embeddings, attention, shared experts, LM head, ...).
     size_t total = 0;
