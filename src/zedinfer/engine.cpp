@@ -539,7 +539,25 @@ void InferenceEngine::init_block_pool() {
         LOGW << "[Engine] KV page pool reduced to " << try_blocks << " blocks after allocation retries";
     }
 
-    block_allocator_ = std::make_unique<kvcache::BlockAllocator>(*block_pool_, mc.num_hidden_layers);
+    // Number of KV-bearing layers: for hybrid models (Qwen3.5) only the full-attention
+    // layers contribute KV blocks; linear-attention layers carry SSM state in
+    // SSMStatePool instead and must NOT consume KV slots. For non-hybrid models all
+    // hidden layers carry KV → fall through to num_hidden_layers.
+    size_t num_kv_layers = mc.num_hidden_layers;
+    if (!mc.layer_types.empty()) {
+        size_t full_count = 0;
+        for (const auto& t : mc.layer_types) {
+            if (t == "full_attention") {
+                ++full_count;
+            }
+        }
+        if (full_count > 0 && full_count < mc.num_hidden_layers) {
+            num_kv_layers = full_count;
+            LOGI << "[Engine] Hybrid model: KV pool sized for " << full_count << " full-attention layers (of "
+                 << mc.num_hidden_layers << " total)";
+        }
+    }
+    block_allocator_ = std::make_unique<kvcache::BlockAllocator>(*block_pool_, num_kv_layers);
 }
 
 // ============================================================================
