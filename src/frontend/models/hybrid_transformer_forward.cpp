@@ -126,10 +126,33 @@ static tensor_t forward_full_attn_layer(const HybridForwardConfig& /*m*/, PagedF
                              + " not yet impl (P2-T14)");
 }
 
-static tensor_t forward_dense_mlp(const HybridForwardConfig& /*m*/, tensor_t /*h_post*/, size_t L,
-                                    const ExecutorConfig& /*exec*/) {
-    throw std::runtime_error("hybrid: forward_dense_mlp L=" + std::to_string(L)
-                             + " not yet impl (P2-T13)");
+static tensor_t forward_dense_mlp(const HybridForwardConfig& m, tensor_t h_post, size_t L,
+                                    const ExecutorConfig& exec) {
+    const size_t N = static_cast<size_t>(h_post->shape()[0]);
+    const size_t hidden = m.config.hidden_size;
+    const size_t inter = m.config.intermediate_size;
+    const auto p = m.prefix(L);
+
+    auto make = [&](std::vector<size_t> shape) {
+        return Tensor::create(std::move(shape), exec.data_type, exec.device_type, exec.device_id);
+    };
+
+    // gate / up projections — Qwen3.5 dense MLP is GPTQ Int4 (the loader
+    // already remapped *.qweight → *.weight_packed, so dispatch_linear
+    // routes to ops::linear_quantized automatically).
+    auto gate = make({N, inter});
+    auto up = make({N, inter});
+    m.dispatch_linear(gate, h_post, p + "mlp.gate_proj", nullptr);
+    m.dispatch_linear(up, h_post, p + "mlp.up_proj", nullptr);
+
+    // SwiGLU activation
+    auto act = make({N, inter});
+    ops::swiglu(act, gate, up);
+
+    // down projection back to hidden
+    auto down = make({N, hidden});
+    m.dispatch_linear(down, act, p + "mlp.down_proj", nullptr);
+    return down;
 }
 
 static tensor_t forward_moe_mlp(const HybridForwardConfig& /*m*/, tensor_t /*h_post*/, size_t L,
