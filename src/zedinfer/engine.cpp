@@ -4,6 +4,7 @@
 #include "backend/kvcache/block_pool.hpp"
 #include "frontend/models/forward_config.hpp"
 #include "frontend/models/paged_forward_context.hpp"
+#include "frontend/models/qwen3_5.hpp"
 #include "frontend/sampler/sampler.hpp"
 #include "frontend/tokenizer/hf_tokenizer.hpp"
 #include "utils/logging.hpp"
@@ -465,6 +466,16 @@ PerplexityStats InferenceEngine::evaluate_perplexity(const std::vector<std::stri
 // ============================================================================
 // Block Pool Initialization
 // ============================================================================
+
+model::SSMStatePool* InferenceEngine::ssm_state_pool() {
+    // Currently only Qwen3.5 dense and Qwen3.5-MoE own an SSMStatePool. Both
+    // derive from Qwen3_5Model, so a single downcast resolves either. Other
+    // models return nullptr — the scheduler keeps its single-pool behavior.
+    if (auto* q35 = dynamic_cast<model::Qwen3_5Model*>(model_.get())) {
+        return &q35->ssm_state_pool();
+    }
+    return nullptr;
+}
 
 void InferenceEngine::init_block_pool() {
     if (!scheduler_config_.use_paged_kvcache) {

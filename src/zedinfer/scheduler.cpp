@@ -1,6 +1,7 @@
 #include "zedinfer/scheduler.hpp"
 #include "backend/kvcache/block_pool.hpp"
 #include "backend/kvcache/prefix_cache.hpp"
+#include "frontend/models/ssm_state_pool.hpp"
 #include "frontend/sampler/sampler.hpp"
 #include "frontend/tokenizer/base.hpp"
 #include "utils/logging.hpp"
@@ -66,6 +67,14 @@ void Scheduler::cleanup_failed_requests() {
 }
 
 bool Scheduler::can_admit(const InferenceRequest& req) const {
+    // SSM slot check (hybrid models only): if the pool exists and the request
+    // does not already hold a slot, we need at least one free slot to admit.
+    if (ssm_state_pool_ != nullptr && req.ssm_slot_idx() < 0) {
+        if (ssm_state_pool_->num_free_slots() < 1) {
+            return false;
+        }
+    }
+
     if (!block_allocator_) {
         return true;
     }
@@ -90,11 +99,24 @@ bool Scheduler::can_admit(const InferenceRequest& req) const {
     return block_allocator_->available_blocks() >= blocks_needed;
 }
 
+void Scheduler::set_ssm_state_pool(model::SSMStatePool* pool) {
+    ssm_state_pool_ = pool;
+}
+
 // ============================================================================
 // Batched Scheduling
 // ============================================================================
 
 void Scheduler::allocate_blocks_for_request(InferenceRequest* req) {
+    // Acquire an SSM slot for hybrid models (Qwen3.5). Idempotent — re-admission
+    // of a request that already holds a slot is a no-op. The slot is released
+    // in complete_request().
+    if (ssm_state_pool_ != nullptr && req->ssm_slot_idx() < 0) {
+        const int slot = ssm_state_pool_->acquire_slot();
+        ssm_state_pool_->reset_slot(slot);
+        req->set_ssm_slot_idx(slot);
+    }
+
     if (!block_allocator_) {
         return;
     }
@@ -272,6 +294,13 @@ void Scheduler::complete_request(InferenceRequest& req) {
     // Uses release (not free) so cached prefix blocks stay in the pool.
     if (block_allocator_ && req.owns_block_table() && req.block_table().num_layers > 0) {
         block_allocator_->release_sequence(req.block_table());
+    }
+
+    // Release SSM slot for hybrid models. Safe even if no pool / no slot was
+    // ever acquired (ssm_slot_idx() == -1 short-circuits).
+    if (ssm_state_pool_ != nullptr && req.ssm_slot_idx() >= 0) {
+        ssm_state_pool_->release_slot(req.ssm_slot_idx());
+        req.set_ssm_slot_idx(-1);
     }
 
     GenerationResult result;

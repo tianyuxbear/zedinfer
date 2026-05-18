@@ -21,6 +21,9 @@ class KVCache;
 class BlockAllocator;
 class PrefixCache;
 } // namespace kvcache
+namespace model {
+class SSMStatePool;
+} // namespace model
 namespace sampler {
 class Sampler;
 }
@@ -60,6 +63,11 @@ public:
     // Set prefix cache (optional, enables prefix sharing across requests)
     void set_prefix_cache(kvcache::PrefixCache* cache);
 
+    // Wire an SSM state pool for hybrid models (Qwen3.5). When set, can_admit
+    // also checks pool availability; admission grabs a slot, completion releases it.
+    // Pass nullptr (the default) for non-hybrid models.
+    void set_ssm_state_pool(model::SSMStatePool* pool);
+
     /**
      * Submit a new request. Thread-safe (can be called from HTTP threads).
      */
@@ -90,6 +98,7 @@ private:
     SchedulerConfig config_;
     kvcache::BlockAllocator* block_allocator_ = nullptr;
     kvcache::PrefixCache* prefix_cache_ = nullptr;
+    model::SSMStatePool* ssm_state_pool_ = nullptr;
     std::mutex submit_mutex_;
 
     std::deque<std::unique_ptr<InferenceRequest>> waiting_queue_;

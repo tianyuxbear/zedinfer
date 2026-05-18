@@ -18,6 +18,12 @@ ServingLoop::ServingLoop(InferenceEngine& engine, SchedulerConfig sched_config)
     if (engine_->prefix_cache()) {
         scheduler_.set_prefix_cache(engine_->prefix_cache());
     }
+    // Wire SSMStatePool for hybrid models (Qwen3.5 / Qwen3.5-MoE). Non-hybrid
+    // models return nullptr from ssm_state_pool() and the scheduler keeps the
+    // pre-existing single-pool admission semantics.
+    if (auto* pool = engine_->ssm_state_pool()) {
+        scheduler_.set_ssm_state_pool(pool);
+    }
 }
 
 // ============================================================================

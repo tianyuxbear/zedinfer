@@ -88,6 +88,9 @@ public:
     kvcache::BlockAllocator* block_allocator() { return block_allocator_.get(); }
     kvcache::PrefixCache* prefix_cache() { return prefix_cache_.get(); }
     model::DecodeScratch* decode_scratch() { return decode_scratch_.get(); }
+    // Hybrid SSM state pool, if the loaded model owns one (Qwen3.5 / Qwen3.5-MoE).
+    // Returns nullptr for non-hybrid models so Scheduler keeps single-pool semantics.
+    model::SSMStatePool* ssm_state_pool();
     const std::string& model_name() const { return model_name_; }
 
     // Sub-component accessors (callers use these directly instead of delegation)
