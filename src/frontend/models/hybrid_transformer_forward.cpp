@@ -2,6 +2,7 @@
 
 #include "backend/ops/ops.hpp"
 #include "frontend/models/decode_scratch.hpp"
+#include "frontend/models/moe_forward.hpp"
 #include "frontend/models/paged_forward_context.hpp"
 #include "zedinfer/activation.hpp"
 #include "zedinfer/request.hpp"
@@ -155,10 +156,18 @@ static tensor_t forward_dense_mlp(const HybridForwardConfig& m, tensor_t h_post,
     return down;
 }
 
-static tensor_t forward_moe_mlp(const HybridForwardConfig& /*m*/, tensor_t /*h_post*/, size_t L,
-                                  const ExecutorConfig& /*exec*/, DecodeScratch* /*scratch*/) {
-    throw std::runtime_error("hybrid: forward_moe_mlp L=" + std::to_string(L)
-                             + " not yet impl (P2-T16)");
+static tensor_t forward_moe_mlp(const HybridForwardConfig& m, tensor_t h_post, size_t L,
+                                  const ExecutorConfig& exec, DecodeScratch* scratch) {
+    // 35B-A3B path: reuse v0.2.0 moe_layer_forward verbatim. HybridForwardConfig
+    // inherits ModelForwardConfig, so all the fields moe_layer_forward needs
+    // (num_experts, num_experts_per_tok, expert_pool, router_weights,
+    // expert_quant_*, has_shared_expert) are populated by Qwen3_5MoeModel's
+    // hybrid_forward_config(); no MoE-specific code lives here.
+    const size_t N = static_cast<size_t>(h_post->shape()[0]);
+    const size_t hidden = m.config.hidden_size;
+    auto out = Tensor::create({N, hidden}, exec.data_type, exec.device_type, exec.device_id);
+    moe_layer_forward(m, out, h_post, static_cast<int>(L), exec, scratch);
+    return out;
 }
 
 } // namespace zedinfer::model
