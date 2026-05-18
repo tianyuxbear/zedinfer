@@ -1,5 +1,8 @@
 #include "frontend/models/hybrid_transformer_forward.hpp"
 
+#include "backend/device/runtime_api.hpp"
+#include "backend/ops/attn_output_gate/attn_output_gate.hpp"
+#include "backend/ops/mrope/mrope_3d.hpp"
 #include "backend/ops/ops.hpp"
 #include "frontend/models/decode_scratch.hpp"
 #include "frontend/models/moe_forward.hpp"
@@ -8,8 +11,10 @@
 #include "zedinfer/request.hpp"
 
 #include <cmath>
+#include <cstdint>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace zedinfer::model {
 
@@ -26,8 +31,36 @@ static tensor_t forward_linear_attn_layer(const HybridForwardConfig& m,
 
 static tensor_t forward_full_attn_layer(const HybridForwardConfig& m,
                                           PagedForwardContext& ctx,
-                                          tensor_t h_in, size_t L,
+                                          tensor_t h_in, tensor_t pos_ids_thw,
+                                          size_t L,
                                           const ExecutorConfig& exec);
+
+// Build [3, N] int32 pos_ids_thw on the compute device. For text-only sequences
+// the three axes collapse to (idx, idx, idx); multimodal pipelines will pass
+// `req.pos_ids_thw()` here directly instead. Caller-owned tensor with one H2D
+// per forward call (cheap relative to per-layer kernels).
+static tensor_t build_pos_ids_thw_text_only(PagedForwardContext& ctx, const ExecutorConfig& exec) {
+    tensor_t ids_unused, pos_ids;
+    // prepare_inputs is idempotent here — outer loop already called it; calling
+    // again just rebuilds the same buffers. We only need pos_ids (1D int64).
+    ctx.prepare_inputs(ids_unused, pos_ids, exec);
+
+    const size_t N = static_cast<size_t>(pos_ids->numel());
+    // Round-trip pos_ids back to host once (small N) and broadcast into [3, N] int32.
+    std::vector<int64_t> host64(N);
+    auto* api = device::getRuntimeAPI(exec.device_type);
+    api->memcpy_sync(host64.data(), pos_ids->data(), N * sizeof(int64_t), ZEDINFER_MEMCPY_D2H);
+    std::vector<int32_t> host_thw(3 * N);
+    for (size_t i = 0; i < N; ++i) {
+        const int32_t p = static_cast<int32_t>(host64[i]);
+        host_thw[0 * N + i] = p; // t
+        host_thw[1 * N + i] = p; // h
+        host_thw[2 * N + i] = p; // w
+    }
+    auto thw = Tensor::create({3, N}, ZEDINFER_DTYPE_I32, exec.device_type, exec.device_id);
+    api->memcpy_sync(thw->data(), host_thw.data(), 3 * N * sizeof(int32_t), ZEDINFER_MEMCPY_H2D);
+    return thw;
+}
 
 static tensor_t forward_dense_mlp(const HybridForwardConfig& m,
                                     tensor_t h_post, size_t L,
@@ -69,6 +102,14 @@ tensor_t hybrid_transformer_forward(const HybridForwardConfig& m,
         ops::embedding(hidden, ids, m.W("embed_tokens.weight"));
     }
 
+    // Build 3D positional ids once per forward. Vision pipelines will pass
+    // req.pos_ids_thw() instead; text-only sequences get the (idx, idx, idx)
+    // broadcast from build_pos_ids_thw_text_only.
+    tensor_t pos_ids_thw = req.pos_ids_thw();
+    if (!pos_ids_thw) {
+        pos_ids_thw = build_pos_ids_thw_text_only(ctx, exec);
+    }
+
     for (size_t L = 0; L < cfg.num_hidden_layers; ++L) {
         const auto p = m.prefix(L);
 
@@ -79,7 +120,7 @@ tensor_t hybrid_transformer_forward(const HybridForwardConfig& m,
         // Dispatch attention by layer kind
         tensor_t attn_out = m.is_linear_attn_layer(L)
                               ? forward_linear_attn_layer(m, h_in, L, req, exec)
-                              : forward_full_attn_layer(m, ctx, h_in, L, exec);
+                              : forward_full_attn_layer(m, ctx, h_in, pos_ids_thw, L, exec);
 
         // Residual after attention
         auto h1 = make({N, hidden_size});
@@ -121,10 +162,79 @@ static tensor_t forward_linear_attn_layer(const HybridForwardConfig& /*m*/, tens
                              + " not yet impl (P2-T15)");
 }
 
-static tensor_t forward_full_attn_layer(const HybridForwardConfig& /*m*/, PagedForwardContext& /*ctx*/,
-                                          tensor_t /*h_in*/, size_t L, const ExecutorConfig& /*exec*/) {
-    throw std::runtime_error("hybrid: forward_full_attn_layer L=" + std::to_string(L)
-                             + " not yet impl (P2-T14)");
+static tensor_t forward_full_attn_layer(const HybridForwardConfig& m,
+                                          PagedForwardContext& ctx,
+                                          tensor_t h_in, tensor_t pos_ids_thw,
+                                          size_t L,
+                                          const ExecutorConfig& exec) {
+    const size_t N = static_cast<size_t>(h_in->shape()[0]);
+    const size_t Hq  = m.config.num_attention_heads;
+    const size_t Hkv = m.config.num_key_value_heads;
+    const size_t Dh  = m.config.head_dim > 0 ? m.config.head_dim : (m.config.hidden_size / Hq);
+    const size_t q_dim  = Hq  * Dh;
+    const size_t kv_dim = Hkv * Dh;
+    const auto p = m.prefix(L) + "self_attn.";
+
+    auto make = [&](std::vector<size_t> shape) {
+        return Tensor::create(std::move(shape), exec.data_type, exec.device_type, exec.device_id);
+    };
+
+    // q_proj has doubled output [2*q_dim, hidden_size] — first q_dim rows are
+    // the q projection, second q_dim rows are the output gate. Slice along
+    // dim 0 (outer-most) is contiguous, so we can call linear directly twice
+    // instead of one combined GEMM + materializing splits.
+    auto q_proj_w = m.W(p + "q_proj.weight");           // [2*q_dim, hidden]
+    auto w_q    = q_proj_w->slice(0, 0, q_dim);          // [q_dim, hidden]
+    auto w_gate = q_proj_w->slice(0, q_dim, 2 * q_dim);  // [q_dim, hidden]
+
+    auto q_raw = make({N, q_dim});
+    auto gate  = make({N, q_dim});
+    ops::linear(q_raw, h_in, w_q);
+    ops::linear(gate,  h_in, w_gate);
+
+    auto k_raw = make({N, kv_dim});
+    auto v     = make({N, kv_dim});
+    ops::linear(k_raw, h_in, m.W(p + "k_proj.weight"));
+    ops::linear(v,     h_in, m.W(p + "v_proj.weight"));
+
+    // Per-head RMSNorm on q / k (Qwen3 / Qwen3.5 family).
+    auto q_normed = make({N, q_dim});
+    auto k_normed = make({N, kv_dim});
+    ops::rms_norm(q_normed->view({N * Hq,  Dh}),
+                  q_raw->view({N * Hq,  Dh}),
+                  m.W(p + "q_norm.weight"), m.config.rms_norm_eps);
+    ops::rms_norm(k_normed->view({N * Hkv, Dh}),
+                  k_raw->view({N * Hkv, Dh}),
+                  m.W(p + "k_norm.weight"), m.config.rms_norm_eps);
+
+    // 3D MRoPE with partial_rotary_factor (Qwen3.5 = 0.25 → first 64 of 256
+    // head_dim rotated, rest pass-through). Rotation is in-place on the
+    // per-head view, so reshape to [N, H, Dh] first.
+    auto q_view = q_normed->view({N, Hq,  Dh});
+    auto k_view = k_normed->view({N, Hkv, Dh});
+    ops::mrope_3d(q_view, pos_ids_thw, m.mrope);
+    ops::mrope_3d(k_view, pos_ids_thw, m.mrope);
+
+    // Paged KV cache uses LOGICAL kv layer index: only full-attention layers
+    // contribute to the pool (linear-attention layers hold SSM state instead).
+    const int kv_idx = m.full_layer_index(L);
+    ctx.write_kv(kv_idx, k_normed, v);
+
+    // Paged attention. attend allocates and returns the attn output tensor.
+    const float scale = 1.0f / std::sqrt(static_cast<float>(Dh));
+    auto attn = ctx.attend(kv_idx, q_normed, scale, exec, Hq, Hkv, Dh, nullptr);
+
+    // Attention output gate: attn := attn * sigmoid(gate), in place.
+    // Both tensors are shape [N, Hq, Dh] — flatten matches because attn comes
+    // back from ctx.attend already shaped for the o_proj input.
+    ops::attn_output_gate(attn, gate);
+
+    // o_proj: [q_dim → hidden]. Input width is q_dim (NOT doubled — the gate
+    // was consumed in attn_output_gate). attn from ctx.attend already has
+    // the right layout for o_proj input.
+    auto out = make({N, m.config.hidden_size});
+    ops::linear(out, attn, m.W(p + "o_proj.weight"));
+    return out;
 }
 
 static tensor_t forward_dense_mlp(const HybridForwardConfig& m, tensor_t h_post, size_t L,
