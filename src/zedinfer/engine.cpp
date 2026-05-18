@@ -159,9 +159,20 @@ std::shared_ptr<InferenceEngine> InferenceEngine::create(const std::string& mode
     engine->profiler_ = std::make_unique<Profiler>(*engine);
     // Local debugging/profiling can skip engine warmup to isolate model correctness from the
     // startup benchmark pass. Normal runs keep warmup enabled.
-    if (std::getenv("ZEDINFER_DISABLE_WARMUP") == nullptr) {
+    //
+    // Hybrid Qwen3.5 models also skip warmup automatically: the warmup path drives
+    // transformer_forward (Qwen2/Qwen3 path) which can't dispatch the hybrid
+    // SSM+attention forward without a real InferenceRequest (for the SSM slot).
+    // Real generation goes through ServingLoop which acquires SSM slots and
+    // routes to hybrid_transformer_forward.
+    const bool is_hybrid_qwen3_5 = (engine->model_->model_type() == "qwen3_5"
+                                    || engine->model_->model_type() == "qwen3_5_moe");
+    if (std::getenv("ZEDINFER_DISABLE_WARMUP") == nullptr && !is_hybrid_qwen3_5) {
         LOG_VERBOSE_(utils::BOTH) << "[Engine] Performing warmup...";
         engine->profiler_->warmup();
+        LOG_VERBOSE_(utils::BOTH) << "[Engine] Ready";
+    } else if (is_hybrid_qwen3_5) {
+        LOG_VERBOSE_(utils::BOTH) << "[Engine] Warmup skipped (Qwen3.5 hybrid path requires per-request SSM slot)";
         LOG_VERBOSE_(utils::BOTH) << "[Engine] Ready";
     } else {
         LOG_VERBOSE_(utils::BOTH) << "[Engine] Warmup skipped by ZEDINFER_DISABLE_WARMUP";

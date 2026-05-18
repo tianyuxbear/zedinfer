@@ -1,6 +1,8 @@
 #include "zedinfer/serving_loop.hpp"
 #include "frontend/models/decode_scratch.hpp"
 #include "frontend/models/forward_config.hpp"
+#include "frontend/models/hybrid_transformer_forward.hpp"
+#include "frontend/models/qwen3_5.hpp"
 #include "frontend/models/paged_forward_context.hpp"
 #include "utils/logging.hpp"
 #include "zedinfer/engine.hpp"
@@ -118,8 +120,26 @@ bool ServingLoop::step() {
         // Use decode scratch for single-token decode (no prefill in batch)
         bool is_pure_decode = batch.prefill_requests.empty() && batch.decode_requests.size() == 1;
         auto* scratch = is_pure_decode ? engine_->decode_scratch() : nullptr;
-        tensor_t logits
-            = model::transformer_forward(engine_->model().forward_config(), ctx, engine_->exec_config(), scratch);
+
+        // Hybrid Qwen3.5 dispatch: SSU + paged-attn mixed path needs the
+        // request's SSM slot index, image embeds, and pos_ids_thw. Single-user
+        // M1 smoke assumes one request per batch — pick whichever phase is
+        // present. Multi-request batched hybrid is M5 territory.
+        tensor_t logits;
+        if (auto* hybrid_model = dynamic_cast<const model::Qwen3_5Model*>(&engine_->model())) {
+            InferenceRequest* req = !batch.decode_requests.empty()
+                                       ? batch.decode_requests[0]
+                                       : (!batch.prefill_requests.empty() ? batch.prefill_requests[0] : nullptr);
+            if (!req) {
+                throw std::runtime_error("[ServingLoop] hybrid model: empty batch (no request to forward)");
+            }
+            auto hcfg = hybrid_model->hybrid_forward_config();
+            logits = model::hybrid_transformer_forward(hcfg, ctx, *req, engine_->exec_config(), scratch,
+                                                         req->image_embeds());
+        } else {
+            logits = model::transformer_forward(engine_->model().forward_config(), ctx, engine_->exec_config(),
+                                                  scratch);
+        }
 
         auto t1 = std::chrono::high_resolution_clock::now();
         double step_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();

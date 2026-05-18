@@ -98,10 +98,13 @@ size_t Qwen3_5Model::num_parameters() const {
 }
 
 ModelForwardConfig Qwen3_5Model::forward_config() const {
-    // M0: forward pipeline lives in M1. The smoke load test (T13) checks for the
-    // exact substring "not implemented until M1" so it can recognize the stub
-    // and exit gracefully without erroring out the suite.
-    throw std::runtime_error("Qwen3_5Model::forward_config: not implemented until M1");
+    // M1: forward_config returns the hybrid config as its base slice. Callers
+    // that walk dispatch through ServingLoop/Profiler check for the hybrid
+    // subclass via dynamic_cast (`Qwen3_5Model*`) and route to
+    // hybrid_transformer_forward(); callers that only need ModelConfig fields
+    // (DecodeScratch sizing, KV pool init, etc.) get the slice and work
+    // unchanged.
+    return hybrid_forward_config();
 }
 
 HybridForwardConfig Qwen3_5Model::hybrid_forward_config() const {
