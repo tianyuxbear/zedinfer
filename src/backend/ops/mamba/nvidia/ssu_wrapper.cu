@@ -1,12 +1,30 @@
 #include "backend/ops/mamba/ssu.hpp"
 
+#include "backend/core/context/context.hpp"
+
+#include <cuda_runtime.h>
+
+namespace zedinfer::ops::mamba {
+
+void copy_strided_rows(tensor_t dst, tensor_t src,
+                        size_t src_offset_elems, size_t slice_width,
+                        size_t src_width, size_t rows, size_t elem_bytes) {
+    auto stream = reinterpret_cast<cudaStream_t>(core::context().runtime().stream());
+    cudaMemcpy2DAsync(dst->data(), slice_width * elem_bytes,
+                      reinterpret_cast<const char*>(src->data())
+                          + src_offset_elems * elem_bytes,
+                      src_width * elem_bytes,
+                      slice_width * elem_bytes, rows,
+                      cudaMemcpyDeviceToDevice, stream);
+}
+
+} // namespace zedinfer::ops::mamba
+
 #ifdef USE_FLASHINFER
 
-#include "backend/core/context/context.hpp"
 #include "backend/core/storage/storage.hpp"
 
 #include <cuda_bf16.h>
-#include <cuda_runtime.h>
 
 // FlashInfer's invoke_selective_state_update_mtp.cuh expects four `constexpr int`
 // globals and two index type aliases (cuSeqlensIndex_t / numAcceptedIndex_t).

@@ -61,4 +61,12 @@ struct SSUParams {
 //     on it (no separate sync needed by callers in the layer loop).
 void ssu(const SSUParams& params);
 
+// Extract a contiguous [N, slice_width] tile from a strided [N, src_width]
+// source buffer (e.g., split qkv into q / k / v after the depthwise causal
+// conv1d). Implemented on the runtime's compute stream via cudaMemcpy2DAsync.
+// `elem_bytes` is the per-element size of `dst`/`src` (e.g., 2 for bf16).
+void copy_strided_rows(tensor_t dst, tensor_t src,
+                        size_t src_offset_elems, size_t slice_width,
+                        size_t src_width, size_t rows, size_t elem_bytes);
+
 } // namespace zedinfer::ops::mamba

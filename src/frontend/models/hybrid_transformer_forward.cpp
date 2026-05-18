@@ -2,8 +2,11 @@
 
 #include "backend/device/runtime_api.hpp"
 #include "backend/ops/attn_output_gate/attn_output_gate.hpp"
+#include "backend/ops/mamba/causal_conv1d.hpp"
+#include "backend/ops/mamba/ssu.hpp"
 #include "backend/ops/mrope/mrope_3d.hpp"
 #include "backend/ops/ops.hpp"
+#include "utils/types.hpp"
 #include "frontend/models/decode_scratch.hpp"
 #include "frontend/models/moe_forward.hpp"
 #include "frontend/models/paged_forward_context.hpp"
@@ -156,10 +159,92 @@ tensor_t hybrid_transformer_forward(const HybridForwardConfig& m,
 // so the calling site sees exactly which sub-function is missing.
 // ============================================================================
 
-static tensor_t forward_linear_attn_layer(const HybridForwardConfig& /*m*/, tensor_t /*h_in*/, size_t L,
-                                            InferenceRequest& /*req*/, const ExecutorConfig& /*exec*/) {
-    throw std::runtime_error("hybrid: forward_linear_attn_layer L=" + std::to_string(L)
-                             + " not yet impl (P2-T15)");
+static tensor_t forward_linear_attn_layer(const HybridForwardConfig& m, tensor_t h_in,
+                                            size_t L, InferenceRequest& req,
+                                            const ExecutorConfig& exec) {
+    if (req.ssm_slot_idx() < 0) {
+        throw std::runtime_error("hybrid: forward_linear_attn_layer L=" + std::to_string(L)
+                                 + " — request has no SSM slot (scheduler did not call acquire_slot)");
+    }
+    if (!m.ssm_pool) {
+        throw std::runtime_error("hybrid: forward_linear_attn_layer L=" + std::to_string(L)
+                                 + " — HybridForwardConfig::ssm_pool is null");
+    }
+
+    const size_t N    = static_cast<size_t>(h_in->shape()[0]);
+    const int    Hv   = m.linear_attn.num_v_heads;
+    const int    Dv   = m.linear_attn.value_head_dim;
+    const int    Hk   = m.linear_attn.num_k_heads;
+    const int    Dk   = m.linear_attn.key_head_dim;
+    const size_t Hk_Dk = static_cast<size_t>(Hk) * static_cast<size_t>(Dk);
+    const size_t Hv_Dv = static_cast<size_t>(Hv) * static_cast<size_t>(Dv);
+    const size_t qkv_dim = 2 * Hk_Dk + Hv_Dv;
+
+    const auto p = m.prefix(L) + "linear_attn.";
+
+    auto make = [&](std::vector<size_t> shape) {
+        return Tensor::create(std::move(shape), exec.data_type, exec.device_type, exec.device_id);
+    };
+
+    // 1. Four input projections (all BF16; linear_attn is excluded from quantization
+    //    per Qwen3.5 dynamic rules).
+    auto qkv = make({N, qkv_dim});
+    auto z   = make({N, Hv_Dv});
+    auto a   = make({N, static_cast<size_t>(Hv)});
+    auto b   = make({N, static_cast<size_t>(Hv)});
+    ops::linear(qkv, h_in, m.W(p + "in_proj_qkv.weight"));
+    ops::linear(z,   h_in, m.W(p + "in_proj_z.weight"));
+    ops::linear(a,   h_in, m.W(p + "in_proj_a.weight"));
+    ops::linear(b,   h_in, m.W(p + "in_proj_b.weight"));
+
+    // 2. Depthwise causal conv1d (kernel=4) with conv state from SSMStatePool.
+    //    Kernel folds silu into its output, so qkv_conv = silu(conv1d(qkv)).
+    auto qkv_conv = make({N, qkv_dim});
+    ops::mamba::causal_conv1d(qkv_conv, qkv, m.W(p + "conv1d.weight"),
+                                m.ssm_pool->view(), req.ssm_slot_idx(),
+                                m.linear_layer_index(L));
+
+    // 3. Split qkv_conv [N, qkv_dim] into contiguous q [N, Hk_Dk], k [N, Hk_Dk],
+    //    v [N, Hv_Dv] for the SSU kernel. Strided copy lives in ops-nvidia.
+    auto q_ssm = make({N, Hk_Dk});
+    auto k_ssm = make({N, Hk_Dk});
+    auto v_ssm = make({N, Hv_Dv});
+    const size_t elt = utils::dsize(exec.data_type);
+    ops::mamba::copy_strided_rows(q_ssm, qkv_conv, 0,         Hk_Dk, qkv_dim, N, elt);
+    ops::mamba::copy_strided_rows(k_ssm, qkv_conv, Hk_Dk,     Hk_Dk, qkv_dim, N, elt);
+    ops::mamba::copy_strided_rows(v_ssm, qkv_conv, 2 * Hk_Dk, Hv_Dv, qkv_dim, N, elt);
+
+    // 4. SSU: in-place update of SSMStatePool slot's ssm buffer + write out y.
+    //    FlashInfer's selective_state_update applies the silu activation on z
+    //    internally as part of its gated SSM readout, so we pass raw z here.
+    //    (M2 byte-exact alignment will confirm or revise this placement.)
+    auto y = make({N, Hv_Dv});
+    ops::mamba::SSUParams sp;
+    sp.state_view = m.ssm_pool->view();
+    sp.slot_idx   = req.ssm_slot_idx();
+    sp.layer_idx  = m.linear_layer_index(L);
+    sp.q = q_ssm;
+    sp.k = k_ssm;
+    sp.v = v_ssm;
+    sp.a = a;
+    sp.b = b;
+    sp.A_log   = m.W(p + "A_log");
+    sp.dt_bias = m.W(p + "dt_bias");
+    sp.z = z;
+    sp.out = y;
+    sp.num_tokens = static_cast<int>(N);
+    ops::mamba::ssu(sp);
+
+    // 6. RMSNorm on per-V-head value_head_dim axis.
+    auto y_normed = make({N, Hv_Dv});
+    ops::rms_norm(y_normed->view({N * static_cast<size_t>(Hv), static_cast<size_t>(Dv)}),
+                  y->view({N * static_cast<size_t>(Hv), static_cast<size_t>(Dv)}),
+                  m.W(p + "norm.weight"), m.config.rms_norm_eps);
+
+    // 7. Output projection [Hv_Dv → hidden_size].
+    auto out = make({N, m.config.hidden_size});
+    ops::linear(out, y_normed, m.W(p + "out_proj.weight"));
+    return out;
 }
 
 static tensor_t forward_full_attn_layer(const HybridForwardConfig& m,
