@@ -144,3 +144,44 @@
 - All hybrid forward kernels link and execute on the real GPU (zero NaN/Inf across the 40-layer chain).
 - ServingLoop correctly routes Qwen3.5 to `hybrid_transformer_forward` and Qwen3 paths to `transformer_forward` (no regression on `Qwen3-30B-A3B-GPTQ-Int4`).
 - SSMStatePool slot lifecycle is enforced by Scheduler (acquire on admit, release on finish) — verified by the ping running through and exiting cleanly without slot leaks.
+
+## P3 — Calibration debug session (2026-05-18, critical finding)
+
+P3 was scoped as a calibration debug session to chase the "all `!`" generation bug. Instead of finding a numerical bug, P3 surfaced a hard architectural mismatch that invalidates the M1 SSU primitive choice.
+
+### Diagnostic trail
+
+1. **Logits dump** (`ZEDINFER_DEBUG_LOGITS` probe in `src/frontend/sampler/sampler.cpp`): 248320/248320 logits were NaN, not skewed toward token 0 — so it is not an argmax tie-break or a quantization saturation issue.
+2. **Per-layer hidden-state norm probe** (`ZEDINFER_DEBUG_HIDDEN` env var in `src/frontend/models/hybrid_transformer_forward.cpp`): clean through L=0 and L=1. At L=2 the **linear_attn output** has exactly 2048 NaN elements out of 24576 — one full row (2048 = `num_v_heads × value_head_dim`). NaN appears *inside* the linear-attn block (after SSU) and propagates from then on.
+3. **First repair attempt**: fixed the `SSUParams.B` mapping from `b` (per-V-head sigmoid gate, [N, num_v_heads]) to `k` (post-conv key, [N, num_k_heads × Dk]). FlashInfer's grouped-state SSU expects `B / C` shaped as `[N, ngroups, dstate]`, and Qwen3.5's `(k, q)` after the depthwise conv1d fits that layout with `ngroups = num_k_heads`. Added `SSUParams::num_groups` and wired it through. Did **not** fix the bug.
+4. **Re-read HF transformers v5.5.4 reference**: the Qwen3.5 linear-attn module class is `Qwen3_5MoeGatedDeltaNet` (in `models/qwen3_5_moe/modeling_qwen3_5_moe.py`). It uses **GatedDeltaNet**, not Mamba2 SSM. The recurrence is:
+
+   ```python
+   beta = b.sigmoid()
+   g    = -A_log.float().exp() * F.softplus(a.float() + dt_bias)
+   # then either chunk_gated_delta_rule (prefill) or
+   # recurrent_gated_delta_rule (decode):
+   S_t = g * (S - beta * outer(k, k @ S)) + beta * outer(v, k)
+   y   = q @ S_t
+   ```
+
+   This is **not** the Mamba2 selective-scan recurrence. The state update is a delta rule, not a diagonal SSM step. No reinterpretation of operand mappings can make FlashInfer SSU compute this.
+
+### Hardware constraint
+
+FlashInfer ships a `gdn_prefill_launcher.cu` that targets this exact recurrence — but it is gated behind `#if defined(FLASHINFER_SM90A_ENABLED)` (Hopper SM90 only). Our development box has A6000 (SM86 Ampere), so the FlashInfer GDN kernel does not compile for us.
+
+### Implications for M1 / M2
+
+- **M1's "hybrid forward chain runs end-to-end without crashing" is still true.** Every shape, dtype, pointer offset, and lifecycle is correct. The chain just computes the wrong math at the linear-attn step.
+- **M1's SSU-based linear-attn path must be replaced**, not patched. The Mamba2 selective-scan and GatedDeltaNet have different state semantics (`[Hv, Dv, dstate]` vs `[Hv, Dv, Dk]`) and different read/write rules. The SSMStatePool layout will need to be reshaped accordingly.
+- **M2 is no longer "byte-exact calibration".** M2 becomes "write a GatedDeltaNet kernel for Ampere SM86". Three candidate paths:
+  1. **Custom CUDA kernel for Ampere** (recommended long-term). Multi-week implementation. Aligns with project's "no Python in serving path" rule and zedinfer's existing kernel ownership pattern.
+  2. **Vendor fla-org/flash-linear-attention** (Triton). Triton kernels do run on Ampere, but invoking Triton from C++ requires either a Python subprocess or a Triton-AOT compilation step — adds complexity inconsistent with project rule #5 (no Python runtime dependency).
+  3. **Test on Hopper** (instant unblock if a Hopper machine is available). Doesn't solve the Ampere story.
+
+### Cleanup committed in this session
+
+- Debug probes removed from production paths (`sampler.cpp`, `hybrid_transformer_forward.cpp`). Their hook points (env-var gated) are recorded above for future re-use.
+- Partial SSU mapping fix kept (B=k, C=q, `ngroups=num_k_heads`) since it is the *correct* SSU mapping if/when Mamba2 SSU is needed for another model; the bug is that Qwen3.5 doesn't need SSU at all, not that the SSU mapping was wrong.
+- M2 entry condition revised: M2 needs a working GatedDeltaNet kernel before any byte-exact alignment work is meaningful.
