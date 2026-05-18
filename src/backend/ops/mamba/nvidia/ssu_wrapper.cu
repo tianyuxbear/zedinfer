@@ -111,7 +111,8 @@ void ssu(const SSUParams& p) {
     // varlen mode (see kernel_selective_state_update_mtp_simple.cuh).
     const int64_t hidden = static_cast<int64_t>(p.state_view.num_v_heads)
                          * static_cast<int64_t>(p.state_view.value_head_dim);
-    const int64_t bc_row = static_cast<int64_t>(1) * static_cast<int64_t>(p.state_view.d_state);
+    const int64_t ngroups = (p.num_groups > 0) ? p.num_groups : 1;
+    const int64_t bc_row = ngroups * static_cast<int64_t>(p.state_view.d_state);
     const int64_t dt_row = static_cast<int64_t>(p.state_view.num_v_heads);
 
     // State pointer is offset to (slot_idx, layer_idx). Per-batch state stride
@@ -123,7 +124,7 @@ void ssu(const SSUParams& p) {
     flashinfer::mamba::mtp::SelectiveStateMTPParams params{};
     params.batch = 1;
     params.nheads = static_cast<uint32_t>(p.state_view.num_v_heads);
-    params.ngroups = 1;
+    params.ngroups = static_cast<uint32_t>(ngroups);
     params.dim = static_cast<uint32_t>(p.state_view.value_head_dim);
     params.dstate = static_cast<uint32_t>(p.state_view.d_state);
     params.state_cache_size = 1;
@@ -133,7 +134,13 @@ void ssu(const SSUParams& p) {
     params.x        = p.v ? p.v->data() : nullptr;
     params.dt       = p.a ? p.a->data() : nullptr;
     params.A        = p.A_log ? p.A_log->data() : nullptr;
-    params.B        = p.b ? p.b->data() : nullptr;
+    // FlashInfer's grouped-state SSU expects B/C shaped as [N, ngroups, dstate].
+    // Qwen3.5's post-conv `k` and `q` are [N, num_k_heads * Dk] which matches
+    // [N, num_k_heads, dstate=Dk]. The per-V-head `b` from in_proj_b does not
+    // fit this layout; mapping it as B would silently misread group-dim slices.
+    // See forward_linear_attn_layer in hybrid_transformer_forward.cpp for the
+    // full mapping rationale.
+    params.B        = p.k ? p.k->data() : nullptr;
     params.C        = p.q ? p.q->data() : nullptr;
     params.D        = nullptr; // Qwen3.5 linear-attn block has no D skip-connect.
     params.z        = p.z ? p.z->data() : nullptr;

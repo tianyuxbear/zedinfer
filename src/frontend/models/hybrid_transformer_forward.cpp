@@ -216,24 +216,38 @@ static tensor_t forward_linear_attn_layer(const HybridForwardConfig& m, tensor_t
     ops::mamba::copy_strided_rows(v_ssm, qkv_conv, 2 * Hk_Dk, Hv_Dv, qkv_dim, N, elt);
 
     // 4. SSU: in-place update of SSMStatePool slot's ssm buffer + write out y.
-    //    FlashInfer's selective_state_update applies the silu activation on z
-    //    internally as part of its gated SSM readout, so we pass raw z here.
-    //    (M2 byte-exact alignment will confirm or revise this placement.)
+    //
+    // FlashInfer SSU mapping (post-debug, see P3 handoff):
+    //   x      ← v       (per-V-head value, [N, Hv*Dv])
+    //   dt     ← a       (per-V-head delta_t, [N, Hv]; softplus + dt_bias inside kernel)
+    //   B      ← k       (per-K-head input gate, reshaped as [N, ngroups=Hk, dstate=Dk])
+    //   C      ← q       (per-K-head output query, [N, ngroups=Hk, dstate=Dk])
+    //   z      ← z       (FlashInfer applies silu(z) internally; pass raw)
+    //   A_log  ← A_log   (per-V-head log-A, fp32)
+    //   dt_bias← dt_bias (per-V-head, bf16)
+    //
+    // The Qwen3.5 per-V-head `b` tensor ([N, Hv]) does not map onto FlashInfer's
+    // grouped-state SSU API (which expects B as [N, ngroups, dstate]); the
+    // closest match is the post-conv k. The unused `b` is a per-V-head modulation
+    // factor that may need to be folded into dt or applied externally in M2's
+    // byte-exact alignment pass. For now the smoke goal is "no NaN" rather than
+    // byte-exact, so we drop b and revisit when comparing against HF reference.
     auto y = make({N, Hv_Dv});
     ops::mamba::SSUParams sp;
     sp.state_view = m.ssm_pool->view();
     sp.slot_idx   = req.ssm_slot_idx();
     sp.layer_idx  = m.linear_layer_index(L);
-    sp.q = q_ssm;
-    sp.k = k_ssm;
-    sp.v = v_ssm;
-    sp.a = a;
-    sp.b = b;
+    sp.q = q_ssm;                      // FlashInfer C
+    sp.k = k_ssm;                      // FlashInfer B
+    sp.v = v_ssm;                      // FlashInfer x
+    sp.a = a;                          // FlashInfer dt (pre-softplus)
+    sp.b = b;                          // currently unused inside ssu() — TODO M2
     sp.A_log   = m.W(p + "A_log");
     sp.dt_bias = m.W(p + "dt_bias");
     sp.z = z;
     sp.out = y;
     sp.num_tokens = static_cast<int>(N);
+    sp.num_groups = Hk;                // Qwen3.5: ngroups = num_k_heads
     ops::mamba::ssu(sp);
 
     // 6. RMSNorm on per-V-head value_head_dim axis. Qwen3.5 stores this norm

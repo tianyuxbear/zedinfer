@@ -46,6 +46,11 @@ struct SSUParams {
     //   1   → decode STP path (single-token state update in place).
     //   >1  → prefill varlen path (FlashInfer cu_seqlens=[0,N]).
     int num_tokens = 0;
+
+    // Number of B/C groups. For Qwen3.5 family this equals num_k_heads:
+    // each K head is one B/C group shared by (num_v_heads / num_k_heads)
+    // V heads. The FlashInfer kernel reads B / C as [N, ngroups, dstate].
+    int num_groups = 1;
 };
 
 // Dispatch one SSU step against the pool slot.
