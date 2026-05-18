@@ -31,8 +31,17 @@ public:
     int num_tokens() const { return total_tokens_; }
     void prepare_inputs(tensor_t& ids, tensor_t& pos_ids, const ExecutorConfig& exec_config);
     void prepare_inputs_into(tensor_t ids, tensor_t pos_ids);
-    void write_kv(int layer, tensor_t k, tensor_t v);
-    tensor_t attend(int layer, tensor_t q_rope, float scale, const ExecutorConfig& exec_config, size_t nhead,
+    // Layer index semantics:
+    //   - For dense/MoE models (Qwen2 / Qwen3 / Qwen3-MoE) the parameter is just
+    //     the raw decoder layer index L ∈ [0, num_hidden_layers).
+    //   - For hybrid models (Qwen3.5) it is the **logical KV layer index** —
+    //     i.e. HybridForwardConfig::full_layer_index(L) ∈ [0, num_kv_layers),
+    //     because linear-attention layers do not contribute KV blocks. The KV
+    //     pool was sized with `num_kv_layers = count(layer_types=="full_attention")`
+    //     in init_block_pool, so block_table->num_layers already matches.
+    //   The PagedForwardContext itself is agnostic; the caller chooses the mapping.
+    void write_kv(int kv_layer_idx, tensor_t k, tensor_t v);
+    tensor_t attend(int kv_layer_idx, tensor_t q_rope, float scale, const ExecutorConfig& exec_config, size_t nhead,
                     size_t nkvhead, size_t head_dim, tensor_t pre_alloc_out = nullptr);
     void finalize();
 
