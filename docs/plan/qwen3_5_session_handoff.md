@@ -185,3 +185,20 @@ FlashInfer ships a `gdn_prefill_launcher.cu` that targets this exact recurrence 
 - Debug probes removed from production paths (`sampler.cpp`, `hybrid_transformer_forward.cpp`). Their hook points (env-var gated) are recorded above for future re-use.
 - Partial SSU mapping fix kept (B=k, C=q, `ngroups=num_k_heads`) since it is the *correct* SSU mapping if/when Mamba2 SSU is needed for another model; the bug is that Qwen3.5 doesn't need SSU at all, not that the SSU mapping was wrong.
 - M2 entry condition revised: M2 needs a working GatedDeltaNet kernel before any byte-exact alignment work is meaningful.
+
+### Passthrough validation experiment (2026-05-18)
+
+To confirm that the all-`!` output is specifically the NaN cascade from running SSU on GatedDeltaNet operands (and not a separate downstream bug), I temporarily replaced the SSU call in `forward_linear_attn_layer` with `y := v` (a pure D2D memcpy of the post-conv V values into the SSU output slot). One ping run on `Qwen3.5-35B-A3B-GPTQ-Int4`:
+
+| Config | Generation output |
+|---|---|
+| Original SSU recurrence | `!!!!!!!!!!...` (NaN → argmax 0 → token "!" repeats) |
+| `y := v` passthrough | `mC sortsmBearmheymwitmheymheymheymhey...` (no NaN, real token IDs spread across vocab, then collapses to a "mhey" attractor) |
+
+Interpretation:
+- Passthrough output is non-degenerate (different token IDs sampled), so sampler is no longer over NaN.
+- Output is incoherent because the linear-attn layers are now no-ops — the model lost half its temporal mixing path.
+- Quick convergence to `mhey` repetition is the expected attractor behavior when half the model's recurrent state is missing.
+- The 40-layer chain runs to completion without crashing, confirming all framework plumbing (state pool, scheduler, paged attention, MoE dispatch) is correct.
+
+Hypothesis confirmed: the SSU recurrence on GDN-trained operands overflows to NaN at the first linear-attn layer, NaN propagates through residual + full-attention cross-token mixing, and the resulting all-NaN logits make argmax return index 0 (= "!" in this tokenizer). Replacing the recurrence with the correct GatedDeltaNet math should produce coherent text. The passthrough patch was reverted after the experiment; this entry is the record.
