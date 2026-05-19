@@ -438,7 +438,7 @@ git commit -m "test(ops): GDN fixture generator + 3 reference binaries (decode_n
 
 This mirrors the `SSUParams` pattern from `ssu.hpp` so the integration call site in `hybrid_transformer_forward.cpp` only changes the param-struct construction.
 
-- [ ] **Step 1: Write the header**
+- [x] **Step 1: Write the header**
 
 Create `include/backend/ops/mamba/gdn.hpp`:
 
@@ -513,7 +513,7 @@ void gdn(const GDNParams& params);
 } // namespace zedinfer::ops::mamba
 ```
 
-- [ ] **Step 2: Verify it includes cleanly**
+- [x] **Step 2: Verify it includes cleanly**
 
 Run:
 ```bash
@@ -521,7 +521,7 @@ xmake build -j1 2>&1 | tail -3
 ```
 Expected: build ok (header is unused so far, only adds to the include surface; the include path resolves via existing `ssm_state_pool.hpp`).
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add include/backend/ops/mamba/gdn.hpp
