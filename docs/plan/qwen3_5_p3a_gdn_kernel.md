@@ -307,7 +307,7 @@ y_out = rms_norm(y) * silu(z)                          # z from in_proj_z, separ
 - Create: `tests/data/gdn_fixtures/prefill_n4.bin`
 - Create: `tests/data/gdn_fixtures/prefill_n12.bin`
 
-- [ ] **Step 1: Set up a torch venv for offline use**
+- [x] **Step 1: Set up a torch venv for offline use**
 
 Run:
 ```bash
@@ -318,7 +318,7 @@ python3 -c "import torch; print(torch.__version__)"
 ```
 Expected: torch version printed, no error. **This venv is OFFLINE-only for fixture generation. Per `CLAUDE.md` rule #5, Python is forbidden at serving time. The generated `.bin` fixtures are what's used by the C++ test.**
 
-- [ ] **Step 2: Write `gen_gdn_fixtures.py`**
+- [x] **Step 2: Write `gen_gdn_fixtures.py`**
 
 Create `tests/scripts/gen_gdn_fixtures.py`:
 
@@ -412,7 +412,7 @@ if __name__ == "__main__":
     gen(12, "prefill_n12.bin")
 ```
 
-- [ ] **Step 3: Run the generator**
+- [x] **Step 3: Run the generator**
 
 Run:
 ```bash
@@ -422,7 +422,7 @@ ls -la tests/data/gdn_fixtures/
 ```
 Expected: three `.bin` files printed, sizes roughly: decode_n1 ~340KB, prefill_n4 ~360KB, prefill_n12 ~400KB (state dominates; tokens are small).
 
-- [ ] **Step 4: Commit the script + the fixtures**
+- [x] **Step 4: Commit the script + the fixtures**
 
 ```bash
 git add tests/scripts/gen_gdn_fixtures.py tests/data/gdn_fixtures/
