@@ -778,7 +778,7 @@ git commit -m "feat(ops): GDN decode kernel (one CTA per V-head, warp-cooperativ
 
 Design: same kernel shape as decode (one CTA per V-head, 32 threads) but the outermost iteration is over tokens. The per-token math is identical; just loops `for t in [0..N)`. This is the **naive recurrent** prefill — correct but linear in N. A future task can replace with a chunked version, but ping-time prefill is N≤128 tokens, so this is fine.
 
-- [ ] **Step 1: Write the kernel and host launcher**
+- [x] **Step 1: Write the kernel and host launcher**
 
 Create `src/backend/ops/mamba/nvidia/gdn_prefill.cu`:
 
@@ -888,7 +888,7 @@ void gdn_prefill_launch(const GDNParams& p) {
 } // namespace zedinfer::ops::mamba
 ```
 
-- [ ] **Step 2: Build**
+- [x] **Step 2: Build**
 
 Run:
 ```bash
@@ -896,7 +896,7 @@ xmake build -j1 2>&1 | tail -3
 ```
 Expected: build ok.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add src/backend/ops/mamba/nvidia/gdn_prefill.cu
