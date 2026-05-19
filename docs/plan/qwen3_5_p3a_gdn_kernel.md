@@ -67,7 +67,7 @@ None. `include/backend/ops/mamba/ssu.hpp` and `src/backend/ops/mamba/nvidia/ssu_
 
 The math must be precise before any kernel coding. fla-org's `recurrent_gated_delta_rule` is the canonical reference; HF transformers v5.5.4 calls it through `torch_recurrent_gated_delta_rule`.
 
-- [ ] **Step 1: Pull fla-org reference source**
+- [x] **Step 1: Pull fla-org reference source**
 
 Run:
 ```bash
@@ -78,11 +78,11 @@ find fla -name "*.py" -path "*gated_delta*" -not -path "*test*"
 ```
 Expected: at least `fla/fla/ops/gated_delta_rule/naive.py` and `fla/fla/ops/gated_delta_rule/chunk.py`.
 
-- [ ] **Step 2: Extract the recurrent reference**
+- [x] **Step 2: Extract the recurrent reference**
 
 Open `fla/fla/ops/gated_delta_rule/naive.py` and locate the function named `naive_recurrent_gated_delta_rule` (or close). Copy its body verbatim into a fenced code block in this plan's "GDN Math Reference" section below, with a one-line comment per line explaining what it does in our variable names (`b → beta`, `a + dt_bias → softplus arg`, `A_log → log-decay base`).
 
-- [ ] **Step 3: Cross-check against HF**
+- [x] **Step 3: Cross-check against HF**
 
 Run:
 ```bash
@@ -98,11 +98,11 @@ Expected: matches for `Qwen3_5MoeGatedDeltaNet` class and calls into `torch_recu
   - `b_proj` / `a_proj` / `in_proj_qkv` produce raw `b`, `a` (not yet sigmoid/softplus'd)
   - silu(z) is applied to `o_norm` *after* the rule, not inside
 
-- [ ] **Step 4: Fill in the math reference section below with verbatim quoted code**
+- [x] **Step 4: Fill in the math reference section below with verbatim quoted code**
 
 Replace the placeholder block in "GDN Math Reference" section below with the actual fla-org / HF code, attributed by file + line.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add docs/plan/qwen3_5_p3a_gdn_kernel.md
@@ -113,30 +113,189 @@ git commit -m "docs(qwen3.5): document exact GDN recurrence from fla-org + HF re
 
 ### GDN Math Reference
 
-> **TO BE FILLED IN BY TASK 1, STEP 4** — replace this block with the verbatim fla-org `naive_recurrent_gated_delta_rule` body and HF call site. Until filled, the canonical reference is:
+#### fla-org canonical recurrent reference
 
-For one token step, per V-head (in our variable naming):
-```
-# Inputs:
-#   q[Dk], k[Dk] (post-conv key/query for this V-head's K-group)
-#   v[Dv], b (scalar, "beta input"), a (scalar, "gate input")
-#   A_log (scalar persistent weight, fp32), dt_bias (scalar persistent weight, bf16)
-#   S [Dv, Dk] fp32 (per-V-head state, in-place updated)
-# Output:
-#   y[Dv] (per-V-head pre-norm output, written by kernel)
-#   S [Dv, Dk] fp32 (in-place updated to S_t)
-#
-# Per-head scalars:
-beta  = sigmoid(b)                                         # in (0, 1)
-decay = exp( -exp(A_log) * softplus(a + dt_bias) )         # in (0, 1]
-#
-# State update (Yang et al. 2025 §3.1, "Gated Delta Rule"):
-delta_v = v - S @ k                                        # [Dv]; new content not in state
-S       = decay * S + beta * outer(delta_v, k)             # [Dv, Dk]
-y       = S @ q                                            # [Dv]
+Source: `fla/fla/ops/gated_delta_rule/naive.py`, function `naive_recurrent_gated_delta_rule`,
+commit `5aea42b7740f9968f6418c6c60b78ea785ce6140` in `fla-org/flash-linear-attention`.
+
+```python
+# Verbatim copy (no added annotations) — fla/fla/ops/gated_delta_rule/naive.py lines 13-64, commit 5aea42b
+def naive_recurrent_gated_delta_rule(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    beta: torch.Tensor,
+    g: torch.Tensor,
+    scale: float = None,
+    initial_state: torch.Tensor = None,
+    output_final_state: bool = False,
+):
+    """
+    Reference PyTorch implementation of recurrent gated delta rule.
+
+    Args:
+        q: [B, T, H, K]
+        k: [B, T, H, K]
+        v: [B, T, H, V]
+        beta: [B, T, H]
+        g: [B, T, H]
+        scale: float, optional
+        initial_state: [B, H, K, V], optional
+        output_final_state: bool
+
+    Returns:
+        o: [B, T, H, V]
+        final_state: [B, H, K, V] if output_final_state else None
+    """
+    q, k, v, beta, g = map(lambda x: x.transpose(1, 2).contiguous().to(torch.float32), [q, k, v, beta, g])
+    B, H, T, K, V = *k.shape, v.shape[-1]
+    o = torch.zeros(B, H, T, V).to(v)
+    h = torch.zeros(B, H, K, V).to(v)
+    if initial_state is not None:
+        h = initial_state.to(torch.float32)
+    if scale is None:
+        scale = 1 / (q.shape[-1] ** 0.5)
+    q = q * scale
+
+    for i in range(T):
+        b_q = q[:, :, i]
+        b_k = k[:, :, i]
+        b_v = v[:, :, i].clone()
+        h = h.clone() * g[:, :, i].exp()[..., None, None]
+        b_beta = beta[:, :, i]
+        b_v = b_v - (h.clone() * b_k[..., None]).sum(-2)
+        b_v = b_v * b_beta[..., None]
+        h = h.clone() + b_k.unsqueeze(-1) * b_v.unsqueeze(-2)
+        o[:, :, i] = torch.einsum('bhd,bhdm->bhm', b_q, h)
+
+    if not output_final_state:
+        h = None
+    o = o.transpose(1, 2).contiguous()
+    return o, h
 ```
 
-The Task 1 work confirms whether `decay` multiplies `S` before or after the `beta` term (some formulations decay the entire S including the new update), and the exact placement of `softplus` and `dt_bias` (kernel-side or pre-applied by caller).
+#### Variable mapping (fla → zedinfer)
+
+- `q, k` (fla `[B, T, H, K]`) → our `q, k` (per-token `[Dk]`)
+- `v` (fla `[B, T, H, V]`) → our `v` (per-token `[Dv]`)
+- `beta` (fla `[B, T, H]`) → our `beta = sigmoid(b)` from `in_proj_b`
+- `g` (fla `[B, T, H]`) → our log-decay; HF Qwen3.5 caller computes `g = -exp(A_log) * softplus(a + dt_bias)` before calling
+- `h` (fla state `[B, H, K, V]`) → our `S` (state `[Dv, Dk]` — same math, transposed layout)
+
+**Key observations from the verbatim code:**
+
+1. **`g` vs `A_log`/`dt_bias`:** The naive function receives `g` already computed (log-decay
+   in log-space). In the fla `GatedDeltaNet` layer (`gated_deltanet.py` line 266–296), `g` is
+   passed as `self.a_proj(hidden_states)` (raw `a`), then the kernel applies
+   `-exp(A_log) * softplus(a + dt_bias)` internally (`USE_GATE_IN_KERNEL=True`). In HF
+   Qwen3.5's `Qwen3_5MoeGatedDeltaNet.forward` (line 514), `g` is pre-computed by the *caller*:
+   ```python
+   g = -self.A_log.float().exp() * F.softplus(a.float() + self.dt_bias)
+   ```
+   The passed `g` is therefore already the final log-decay (a negative number). The recurrence
+   then uses `exp(g)` as the multiplicative gate, i.e. `decay = exp(g)`, which equals
+   `exp(-exp(A_log) * softplus(a + dt_bias))`. This confirms the plan's placeholder formula was
+   correct.
+
+2. **Decay applies to the FULL prior state before the new update:** Line
+   `h = h.clone() * g[:, :, i].exp()[..., None, None]` comes *before* the beta term is added.
+   The update is:
+   ```
+   S_t = exp(g_t) * S_{t-1}  +  outer(beta_t * (v_t - exp(g_t)*S_{t-1} @ k_t), k_t)
+       = decay * S_{t-1}     +  beta_t * outer(v_t - decay * S_{t-1} @ k_t, k_t)
+   ```
+   (Argument order: `outer(delta_v, k)` matches our `S [Dv, Dk]` row-major layout where each row
+   is one V-head value slot and each column is one K-head key slot. fla's `h [K, V]` uses the
+   transposed convention; the math is identical.)
+   This matches Yang et al. 2025 §3.1. The plan's placeholder had the correct form.
+
+3. **State layout:** fla uses `h [K, V]` (key-dim × value-dim). Our kernel uses `S [Dv, Dk]`
+   (value-dim × key-dim), i.e. the transpose. The math is identical; the kernel reads/writes
+   transposed relative to fla's convention.
+
+4. **beta:** Applied inside the loop as `b_v * b_beta[..., None]` — it scales the *error
+   (delta)* vector, not the outer product coefficient separately. This is equivalent to the
+   plan's `outer(delta_v, k)` formulation since `beta * outer(delta_v, k) = outer(beta*delta_v, k)`.
+
+#### HF Qwen3.5 call site
+
+Source: `src/transformers/models/qwen3_5_moe/modeling_qwen3_5_moe.py`,
+commit `0b25f8c49c37530ce9f8742d7a8c19ed8d254d7d` in `huggingface/transformers`.
+
+Relevant lines from `Qwen3_5MoeGatedDeltaNet.forward` (lines 456–554):
+
+```python
+# (1) q/k/v come from a single fused projection + causal conv1d:
+mixed_qkv = self.in_proj_qkv(hidden_states)    # [key_dim*2 + value_dim] split below
+# NOTE: there is NO q_proj that produces a (q, z) split.
+# The output gate z comes from a SEPARATE projection:
+z = self.in_proj_z(hidden_states)              # [value_dim] — the output gate
+
+# (2) b and a come from their own projections (raw, no sigmoid/softplus yet):
+b = self.in_proj_b(hidden_states)              # [num_v_heads]  — raw beta input
+a = self.in_proj_a(hidden_states)              # [num_v_heads]  — raw gate input
+
+# ... conv1d applied to mixed_qkv ...
+query, key, value = torch.split(mixed_qkv, [key_dim, key_dim, value_dim], dim=-1)
+
+# (3) Sigmoid for beta, full g formula applied by caller before passing to kernel:
+beta = b.sigmoid()                             # beta = sigmoid(b)   in (0,1)
+g = -self.A_log.float().exp() * F.softplus(a.float() + self.dt_bias)
+                                               # g = -exp(A_log) * softplus(a + dt_bias)   (log-decay, <=0)
+
+# (4) Recurrence kernel called with pre-computed g (NOT raw a):
+core_attn_out, last_recurrent_state = self.recurrent_gated_delta_rule(
+    query, key, value, g=g, beta=beta, ...)
+
+# (5) Output gate applied INSIDE norm (NOT as a separate silu-then-mul):
+core_attn_out = core_attn_out.reshape(-1, self.head_v_dim)
+z             = z.reshape(-1, self.head_v_dim)
+core_attn_out = self.norm(core_attn_out, z)    # norm is RMSNormGated: rms_norm(x) * silu(z)
+```
+
+The `Qwen3_5MoeRMSNormGated.forward` (lines 183–198) performs:
+```python
+hidden_states = hidden_states * torch.rsqrt(variance + eps)   # RMS normalize
+hidden_states = self.weight * hidden_states                    # learned scale
+hidden_states = hidden_states * F.silu(gate)                   # silu(z) gate applied here
+```
+
+**Implication for our kernel:** The silu(z) output gate is applied *inside* the norm operation in
+HF — not as a separate step after the norm. Our plan (Task 9) has it as a separate step
+(`ops::silu_mul` after `ops::rms_norm`), which produces the same result as long as the fused
+norm and the silu are applied together. The fused `FusedRMSNormGated` from fla modules is the
+fast path; if we split it into `rms_norm` then `silu_mul`, the math is equivalent.
+
+#### Confirmed recurrence formula (kernel-ready)
+
+For one token step, per V-head, with our `[Dv, Dk]` state layout:
+
+```
+# Inputs (all for this one token, this one V-head):
+#   q[Dk], k[Dk]  — post-conv, l2-normed (scale = 1/sqrt(Dk) applied to q)
+#   v[Dv]         — post-conv
+#   b (scalar)    — raw beta input (from in_proj_b)
+#   a (scalar)    — raw gate input (from in_proj_a)
+#   A_log (scalar, persistent weight, fp32)
+#   dt_bias (scalar, persistent weight, bf16)
+#   S [Dv, Dk]    — fp32 state, in-place updated
+#
+# Per-head scalars (computed in-kernel):
+beta  = sigmoid(b)                                     # in (0, 1)
+g     = -exp(A_log) * softplus(a + dt_bias)            # log-decay, <= 0
+decay = exp(g)                                         # in (0, 1]
+#
+# State update (confirmed: decay multiplies the FULL prior S before beta term):
+Sk      = S @ k                                        # [Dv];  key projection of state
+delta_v = v - Sk                                       # [Dv];  reconstruction error
+S       = decay * S + beta * outer(delta_v, k)         # [Dv, Dk];  state update
+#  (equivalent to fla's: h = exp(g)*h + outer(k, beta*(v - exp(g)*h @ k))
+#   with h transposed to our [Dv,Dk] convention)
+y       = S @ q                                        # [Dv];  readout (pre-norm)
+#
+# Output gate (applied AFTER kernel, in RMSNormGated):
+y_out = rms_norm(y) * silu(z)                          # z from in_proj_z, separate projection
+```
 
 ---
 
