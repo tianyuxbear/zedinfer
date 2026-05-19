@@ -968,7 +968,7 @@ git commit -m "feat(ops): GDN dispatch wrapper (decode vs prefill by num_tokens)
 
 This loads each `.bin` fixture, copies inputs to device, calls `ops::mamba::gdn`, and compares `out`/`S_T` against the expected outputs from the fixture. Tolerance: bf16 means we accept |a - b| < max(1e-2, 1e-2 * |b|). State is fp32; tolerance 1e-4.
 
-- [ ] **Step 1: Write the test**
+- [x] **Step 1: Write the test**
 
 Create `tests/ops/test_gdn.cu`:
 
@@ -1113,7 +1113,7 @@ int main(int argc, char** argv) {
 }
 ```
 
-- [ ] **Step 2: Add test target to xmake/tests.lua**
+- [x] **Step 2: Add test target to xmake/tests.lua**
 
 Open `xmake/tests.lua` and append (matching the style of existing `test-mamba-ssu`):
 
@@ -1133,7 +1133,7 @@ xmake clean && xmake build -j1 test-gdn 2>&1 | tail -5
 ```
 Expected: build ok, `test-gdn` binary produced.
 
-- [ ] **Step 3: Run tests**
+- [x] **Step 3: Run tests**
 
 Run:
 ```bash
@@ -1141,7 +1141,7 @@ xmake run test-gdn
 ```
 Expected: 3 tests, 3 PASS. If a fixture fails: dump per-element diffs by lowering tolerance temporarily, identify whether the bug is in the host launcher (param wiring) or the kernel math (probably the `decay` formula or the `Sk` reduction).
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add tests/ops/test_gdn.cu xmake/tests.lua
