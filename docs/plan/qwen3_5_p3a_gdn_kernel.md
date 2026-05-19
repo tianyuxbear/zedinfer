@@ -537,7 +537,7 @@ git commit -m "feat(ops): add ops::mamba::gdn header (GDNParams + entry declarat
 
 This holds device-side inline functions used by both decode and prefill kernels: per-head scalar gate/beta computation, and the per-V-head one-token state-step. Keeping this in a `.cuh` avoids duplicating math between decode and prefill, and gives unit-testable building blocks if we later add a tile test.
 
-- [ ] **Step 1: Write the .cuh**
+- [x] **Step 1: Write the .cuh**
 
 Create `src/backend/ops/mamba/nvidia/gdn_kernel.cuh`:
 
@@ -612,7 +612,7 @@ __device__ inline float readout_row(const float* S_row,
 } // namespace zedinfer::ops::mamba::gdn_device
 ```
 
-- [ ] **Step 2: Verify it parses with nvcc**
+- [x] **Step 2: Verify it parses with nvcc**
 
 Run:
 ```bash
@@ -620,7 +620,7 @@ xmake build -j1 2>&1 | tail -3
 ```
 Expected: build ok (header is not yet included by any .cu).
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add src/backend/ops/mamba/nvidia/gdn_kernel.cuh
