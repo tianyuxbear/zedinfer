@@ -636,7 +636,7 @@ git commit -m "feat(ops): GDN shared device math (prepare_scalars / dot_row / up
 
 Design: one CTA per V-head; 32 threads (one warp); each thread handles `Dk / 32 = 4` K-columns. The full Dv=128 (or 256) is iterated as an outer loop within the CTA. State row reads/writes hit GMEM directly (no SMEM staging — each row is only touched once per token).
 
-- [ ] **Step 1: Write the kernel and host launcher**
+- [x] **Step 1: Write the kernel and host launcher**
 
 Create `src/backend/ops/mamba/nvidia/gdn_decode.cu`:
 
@@ -754,7 +754,7 @@ void gdn_decode_launch(const GDNParams& p) {
 } // namespace zedinfer::ops::mamba
 ```
 
-- [ ] **Step 2: Build (kernel still has no caller, just needs to compile)**
+- [x] **Step 2: Build (kernel still has no caller, just needs to compile)**
 
 Run:
 ```bash
@@ -762,7 +762,7 @@ xmake build -j1 2>&1 | tail -5
 ```
 Expected: build ok. If linker complains about `gdn_decode_launch` being unused, that's fine (will be called from Task 7's wrapper).
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add src/backend/ops/mamba/nvidia/gdn_decode.cu
