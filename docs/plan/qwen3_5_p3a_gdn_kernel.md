@@ -912,7 +912,7 @@ git commit -m "feat(ops): GDN prefill kernel (naive sequential token loop, one C
 
 This is the public `ops::mamba::gdn` entry: validates the params, picks decode vs prefill, and invokes the right launcher. Mirrors the structure of `src/backend/ops/mamba/nvidia/ssu_wrapper.cu` (already in the repo).
 
-- [ ] **Step 1: Write the wrapper**
+- [x] **Step 1: Write the wrapper**
 
 Create `src/backend/ops/mamba/nvidia/gdn_wrapper.cu`:
 
@@ -943,7 +943,7 @@ void gdn(const GDNParams& p) {
 } // namespace zedinfer::ops::mamba
 ```
 
-- [ ] **Step 2: Build**
+- [x] **Step 2: Build**
 
 Run:
 ```bash
@@ -951,7 +951,7 @@ xmake build -j1 2>&1 | tail -3
 ```
 Expected: build ok; the `gdn` symbol is now visible to callers.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add src/backend/ops/mamba/nvidia/gdn_wrapper.cu
