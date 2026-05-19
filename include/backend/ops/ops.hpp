@@ -1,6 +1,7 @@
 #pragma once
 
 #include "backend/ops/attention_params.hpp"
+#include "backend/ops/silu_mul/silu_mul.hpp"
 #include "backend/tensor/tensor.hpp"
 
 namespace zedinfer::ops {

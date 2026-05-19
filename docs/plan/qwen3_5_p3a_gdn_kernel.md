@@ -1157,11 +1157,11 @@ git commit -m "test(ops): GDN fixture-driven unit tests (decode_n1, prefill_n4, 
 
 Replace the SSU call with the GDN call. Add the silu(z) gating step that GDN expects outside the kernel.
 
-- [ ] **Step 1: Locate the current SSU block**
+- [x] **Step 1: Locate the current SSU block**
 
 Read `src/frontend/models/hybrid_transformer_forward.cpp` around lines 235–252 — the `ops::mamba::SSUParams sp; … ops::mamba::ssu(sp);` block in `forward_linear_attn_layer`.
 
-- [ ] **Step 2: Replace SSU with GDN**
+- [x] **Step 2: Replace SSU with GDN**
 
 Replace the entire `ops::mamba::SSUParams sp; … ops::mamba::ssu(sp);` block with:
 
@@ -1186,7 +1186,7 @@ Replace the entire `ops::mamba::SSUParams sp; … ops::mamba::ssu(sp);` block wi
     ops::mamba::gdn(gp);
 ```
 
-- [ ] **Step 3: Update the include**
+- [x] **Step 3: Update the include**
 
 Find the `#include "backend/ops/mamba/ssu.hpp"` line near the top of `hybrid_transformer_forward.cpp` and add **next to it** (do not remove the SSU include — `copy_strided_rows` still lives there):
 
@@ -1194,7 +1194,7 @@ Find the `#include "backend/ops/mamba/ssu.hpp"` line near the top of `hybrid_tra
 #include "backend/ops/mamba/gdn.hpp"
 ```
 
-- [ ] **Step 4: Add the silu(z) output gate (between rms_norm and out_proj)**
+- [x] **Step 4: Add the silu(z) output gate (between rms_norm and out_proj)**
 
 Locate the block that does `ops::rms_norm(y_normed, …)` followed by `ops::linear(out, y_normed, …)`. **After `rms_norm` and before `linear`**, insert:
 
@@ -1222,7 +1222,7 @@ If `ops::silu_mul` doesn't exist yet (likely — check `include/backend/ops/ops.
 
 If neither `ops::silu` nor `ops::mul` exists, fall back to one-off in-place math via existing ops or add a tiny kernel. (`grep -rn "ops::silu\|ops::mul " include/ src/` to confirm; if missing, the smallest fix is a `silu_mul` op in `src/backend/ops/silu_mul/nvidia/silu_mul.cu` — analogous to `attn_output_gate.cu`. Spec the op: `y[i] = (1 / (1 + exp(-z[i]))) * z[i] * x[i]` for the silu-and-multiply fused form.)
 
-- [ ] **Step 5: Build**
+- [x] **Step 5: Build**
 
 Run:
 ```bash
@@ -1230,7 +1230,7 @@ xmake build -j1 2>&1 | tail -5
 ```
 Expected: build ok.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/frontend/models/hybrid_transformer_forward.cpp \
