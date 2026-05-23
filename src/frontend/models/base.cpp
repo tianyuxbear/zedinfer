@@ -865,7 +865,19 @@ static int detect_gptq_zero_point(const LayerGroup& group, int num_bits) {
     if (zp_env) {
         return std::atoi(zp_env);
     }
-    // AutoGPTQ convention: stored = actual - 1
+    // GPTQ on-disk conventions vary: AutoGPTQ historically stores `stored = actual - 1`
+    // (sym=true → stored=7 represents actual=8), while newer exporters (Qwen3.5 GPTQ
+    // packaging) store the actual value directly (`stored=8` represents actual=8).
+    // For sym=true int4 the actual zero-point is canonically 8 either way; detect
+    // which convention is in use by inspecting the stored nibble:
+    //   - stored = 7 → AutoGPTQ convention, actual = stored + 1 = 8
+    //   - stored = 8 → direct convention,   actual = stored     = 8
+    // Either path yields actual_zp = 8 for proper sym=true checkpoints. We keep
+    // the legacy +1 path for asymmetric or non-canonical stored values so we don't
+    // silently change behavior for arbitrary GPTQ variants.
+    if (stored_zp == actual_zero_point) {
+        return stored_zp;
+    }
     return stored_zp + 1;
 }
 
