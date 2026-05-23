@@ -2,6 +2,7 @@
 #include "backend/core/context/context.hpp"
 #include "backend/ops/moe/topk_softmax.hpp"
 #include "backend/ops/ops.hpp"
+#include "backend/ops/shared_expert_gate/shared_expert_gate.hpp"
 #include "frontend/models/decode_scratch.hpp"
 
 #include <algorithm>
@@ -296,6 +297,20 @@ static void apply_shared_expert(const ModelForwardConfig& model, tensor_t output
     model.dispatch_linear(sh_up, input, sp + "up_proj", nullptr);
     ops::swiglu(sh_act, sh_gate, sh_up);
     model.dispatch_linear(sh_down, sh_act, sp + "down_proj", nullptr);
+
+    // Qwen3.5: an additional per-token sigmoid gate scales the shared-expert
+    // output before it joins the routed-expert sum. The gate weight is
+    // layers.{L}.mlp.shared_expert_gate.weight of shape [1, hidden]; it is
+    // absent in Qwen3-30B-A3B (and earlier), so we detect it by tensor lookup
+    // and skip the gating when missing — matches the v0.2.0 behavior.
+    //
+    // HF: shared_expert_output = sigmoid(shared_expert_gate(hidden)) * shared_expert_output
+    const std::string gate_w_name = "layers." + std::to_string(layer_idx) + ".mlp.shared_expert_gate.weight";
+    if (model.weights.has_tensor(gate_w_name)) {
+        auto gate_logits = make({N, 1});
+        ops::linear(gate_logits, input, model.weights.get_tensor(gate_w_name), nullptr);
+        ops::shared_expert_gate(sh_down, gate_logits);
+    }
 
     ops::add(output, moe_output, sh_down);
 }

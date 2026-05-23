@@ -4,6 +4,7 @@
 #include "backend/ops/attn_output_gate/attn_output_gate.hpp"
 #include "backend/ops/mamba/causal_conv1d.hpp"
 #include "backend/ops/mamba/gdn.hpp"
+#include "backend/ops/mamba/qk_l2norm.hpp"
 #include "backend/ops/mamba/ssu.hpp"
 #include "backend/ops/mrope/mrope_3d.hpp"
 #include "backend/ops/ops.hpp"
@@ -215,6 +216,16 @@ static tensor_t forward_linear_attn_layer(const HybridForwardConfig& m, tensor_t
     ops::mamba::copy_strided_rows(q_ssm, qkv_conv, 0,         Hk_Dk, qkv_dim, N, elt);
     ops::mamba::copy_strided_rows(k_ssm, qkv_conv, Hk_Dk,     Hk_Dk, qkv_dim, N, elt);
     ops::mamba::copy_strided_rows(v_ssm, qkv_conv, 2 * Hk_Dk, Hv_Dv, qkv_dim, N, elt);
+
+    // 3b. L2-normalize q and k per (token, k-head) row; scale q by 1/sqrt(Dk).
+    //     HF Qwen3_5MoeGatedDeltaNet.forward calls recurrent_gated_delta_rule
+    //     with use_qk_l2norm_in_kernel=True (see modeling_qwen3_5_moe.py:528,539),
+    //     which inside torch_recurrent_gated_delta_rule applies l2norm(q, k,
+    //     eps=1e-6) and then scale = 1/sqrt(head_k_dim) to q. Our GDN kernel
+    //     consumes pre-normalized inputs (matches the fixture contract).
+    const float qk_scale_q = 1.0f / std::sqrt(static_cast<float>(Dk));
+    ops::mamba::qk_l2norm_inplace(q_ssm, Hk, Dk, qk_scale_q, 1e-6f);
+    ops::mamba::qk_l2norm_inplace(k_ssm, Hk, Dk, 1.0f,       1e-6f);
 
     // 4. GDN: in-place update of SSMStatePool slot's state buffer + write out y.
     //    Per P3 retrospective: Qwen3.5's linear-attn is GatedDeltaNet, not

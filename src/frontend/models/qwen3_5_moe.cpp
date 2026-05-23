@@ -167,6 +167,12 @@ HybridForwardConfig Qwen3_5MoeModel::hybrid_forward_config_moe() const {
     h.shared_expert_intermediate_size = static_cast<size_t>(moe_config_.shared_expert_intermediate_size);
     h.decoder_sparse_step = static_cast<size_t>(moe_config_.decoder_sparse_step);
     h.mlp_only_layers = moe_config_.mlp_only_layers;
+    // Qwen3_5MoeTopKRouter ALWAYS renormalizes the top-k probabilities so they
+    // sum to 1 (modeling_qwen3_5_moe.py:788). Equivalent to norm_topk_prob=true
+    // in the Qwen3 family. Without this, expert contributions are scaled down
+    // by the sum-of-top-k probability mass and the residual ends up dominating
+    // the MoE output, yielding context-independent degenerate generation.
+    h.norm_topk_prob = true;
     h.has_shared_expert = h.shared_expert_intermediate_size > 0
                           && (weights_->has_tensor("layers.0.mlp.shared_expert.gate_proj.weight")
                               || weights_->has_tensor("layers.0.mlp.shared_expert.gate_proj.weight_packed"));
