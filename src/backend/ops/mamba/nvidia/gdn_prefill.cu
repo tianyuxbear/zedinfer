@@ -50,13 +50,21 @@ __global__ void gdn_prefill_kernel(
         const __nv_bfloat16* v_vec = v + (size_t)t * Hv * Dv + vh * Dv;
         __nv_bfloat16*       y_vec = out + (size_t)t * Hv * Dv + vh * Dv;
 
+        // Per-row recurrence: decay row first, then compute Sk on the decayed
+        // row, then add beta * delta * k. Matches HF / fla naive semantics.
         for (int d = 0; d < Dv; ++d) {
             float* S_row = S_vh + (size_t)d * Dk;
-            float Sk     = gdn_device::dot_row(S_row, k_vec, Dk, lane, 32);
+            for (int j = lane; j < Dk; j += 32) {
+                S_row[j] *= decay;
+            }
+            float Sk = gdn_device::dot_row(S_row, k_vec, Dk, lane, 32);
             float delta_d;
             if (lane == 0) delta_d = __bfloat162float(v_vec[d]) - Sk;
             delta_d = __shfl_sync(0xffffffff, delta_d, 0);
-            gdn_device::update_row(S_row, k_vec, decay, beta, delta_d, Dk, lane, 32);
+            const float coef = beta * delta_d;
+            for (int j = lane; j < Dk; j += 32) {
+                S_row[j] += coef * __bfloat162float(k_vec[j]);
+            }
             float y_d = gdn_device::readout_row(S_row, q_vec, Dk, lane, 32);
             if (lane == 0) y_vec[d] = __float2bfloat16(y_d);
         }

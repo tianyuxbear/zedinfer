@@ -50,21 +50,38 @@ __global__ void gdn_decode_kernel(
     __nv_bfloat16*       y_vec = out + vh * Dv;
 
     // Iterate over Dv rows; one warp handles one row at a time.
+    //
+    // Per-row recurrence (matches HF torch_recurrent_gated_delta_rule and
+    // fla naive_recurrent_gated_delta_rule: state is decayed BEFORE the
+    // delta is computed, so delta = v - decay * (S_old @ k)):
+    //   S_row    *= decay                              // decay the row first
+    //   Sk        = dot(S_row, k)                      // on the decayed row
+    //   delta_d   = v[d] - Sk
+    //   S_row    += beta * delta_d * k                 // add outer-product update
+    //   y[d]      = dot(S_row, q)
     for (int d = 0; d < Dv; ++d) {
         float* S_row = S_vh + (size_t)d * Dk;
 
-        // 1) Sk[d] = dot(S[d, :], k)
+        // 1) Decay the row: S[d, :] *= decay.
+        for (int j = lane; j < Dk; j += 32) {
+            S_row[j] *= decay;
+        }
+
+        // 2) Sk[d] = dot(decayed S[d, :], k).
         float Sk = gdn_device::dot_row(S_row, k_vec, Dk, lane, 32);
 
-        // 2) delta_d = v[d] - Sk
+        // 3) delta_d = v[d] - Sk.
         float delta_d;
         if (lane == 0) delta_d = __bfloat162float(v_vec[d]) - Sk;
         delta_d = __shfl_sync(0xffffffff, delta_d, 0);
 
-        // 3) S[d, :] = decay * S[d, :] + beta * delta_d * k[:]
-        gdn_device::update_row(S_row, k_vec, decay, beta, delta_d, Dk, lane, 32);
+        // 4) S[d, :] += beta * delta_d * k[:]  (no extra decay — already applied).
+        const float coef = beta * delta_d;
+        for (int j = lane; j < Dk; j += 32) {
+            S_row[j] += coef * __bfloat162float(k_vec[j]);
+        }
 
-        // 4) y[d] = dot(S_new[d, :], q)
+        // 5) y[d] = dot(S_new[d, :], q)
         float y_d = gdn_device::readout_row(S_row, q_vec, Dk, lane, 32);
         if (lane == 0) y_vec[d] = __float2bfloat16(y_d);
     }

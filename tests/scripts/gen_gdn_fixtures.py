@@ -41,12 +41,14 @@ def naive_recurrent_gdn(q, k, v, b, a, A_log, dt_bias, S0):
         rep = Hv // Hk
         k_v = k[t].float().repeat_interleave(rep, dim=0)  # [Hv, Dk]
         q_v = q[t].float().repeat_interleave(rep, dim=0)  # [Hv, Dk]
-        # Per-V-head update
-        # S: [Hv, Dv, Dk]   ; S @ k: [Hv, Dv]
-        Sk    = torch.einsum('vdk,vk->vd', S, k_v)        # [Hv, Dv]
+        # Per-V-head update, matches HF torch_recurrent_gated_delta_rule and
+        # fla naive_recurrent_gated_delta_rule: state is decayed BEFORE the
+        # delta is computed, so delta = v - decay * (S_old @ k).
+        # S: [Hv, Dv, Dk]
+        S     = decay.view(Hv, 1, 1) * S                   # decay first
+        Sk    = torch.einsum('vdk,vk->vd', S, k_v)         # [Hv, Dv] on decayed S
         dv    = v[t].float() - Sk                          # [Hv, Dv]
-        S     = decay.view(Hv, 1, 1) * S \
-              + beta.view(Hv, 1, 1)  * torch.einsum('vd,vk->vdk', dv, k_v)
+        S     = S + beta.view(Hv, 1, 1) * torch.einsum('vd,vk->vdk', dv, k_v)
         y     = torch.einsum('vdk,vk->vd', S, q_v)         # [Hv, Dv]
         ys.append(y.to(torch.bfloat16))
     return torch.stack(ys, dim=0), S
