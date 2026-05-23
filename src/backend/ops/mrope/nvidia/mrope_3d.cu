@@ -15,7 +15,12 @@ namespace {
 
 // One thread per (token n, head hd, dim-pair pi). Each thread fully rotates
 // one bf16 pair (2*pi, 2*pi+1). The pi-axis assignment (t/h/w) is derived
-// from the (s0, s1) section split; the third section is implicit (= half - s0 - s1).
+// from the (s0, s1, s2) section split. `interleaved` selects between two layouts:
+//   - chunked   (interleaved=false): [T..., H..., W...] each chunk of length section[axis]
+//   - interleaved (interleaved=true):  matches HF Qwen3_5MoeTextRotaryEmbedding.
+//     apply_interleaved_mrope: T defaults everywhere, H overwrites pi in
+//     {1, 4, 7, ...} up to section[1]*3, W overwrites pi in {2, 5, 8, ...} up
+//     to section[2]*3. See modeling_qwen3_5_moe.py:165-180.
 //
 // freq = exp(-theta_log * (2*pi) / (2*half)) — equivalent to theta^(-(2*pi)/(2*half))
 // but cheaper because half is small and theta_log is precomputed on the host.
@@ -23,8 +28,8 @@ __global__ void mrope_3d_kernel(__nv_bfloat16* __restrict__ x,
                                 const int32_t* __restrict__ pos_t,
                                 const int32_t* __restrict__ pos_h,
                                 const int32_t* __restrict__ pos_w,
-                                int N, int H, int Dh, int half, int s0, int s1,
-                                float theta_log) {
+                                int N, int H, int Dh, int half, int s0, int s1, int s2,
+                                int interleaved, float theta_log) {
     const int idx   = blockIdx.x * blockDim.x + threadIdx.x;
     const int total = N * H * half;
     if (idx >= total) return;
@@ -34,7 +39,21 @@ __global__ void mrope_3d_kernel(__nv_bfloat16* __restrict__ x,
     const int hd  = tmp % H;
     const int n   = tmp / H;
 
-    const int axis = (pi < s0) ? 0 : (pi < s0 + s1) ? 1 : 2;
+    int axis;
+    if (interleaved) {
+        // HF interleaving: H overwrites pi % 3 == 1 (offset 1) up to s1*3;
+        //                  W overwrites pi % 3 == 2 (offset 2) up to s2*3;
+        //                  otherwise T owns the slot.
+        if ((pi % 3) == 1 && pi < s1 * 3) {
+            axis = 1;
+        } else if ((pi % 3) == 2 && pi < s2 * 3) {
+            axis = 2;
+        } else {
+            axis = 0;
+        }
+    } else {
+        axis = (pi < s0) ? 0 : (pi < s0 + s1) ? 1 : 2;
+    }
     const int pos_val = (axis == 0) ? pos_t[n]
                                     : (axis == 1) ? pos_h[n]
                                                   : pos_w[n];
@@ -100,7 +119,8 @@ void mrope_3d(tensor_t x, tensor_t pos_ids_thw, const model::MRoPEConfig& cfg) {
     // theta <= 1e7, but using logf keeps the float pipeline consistent.
     const float theta_log = std::log(cfg.theta);
     mrope_3d_kernel<<<grid, block, 0, stream>>>(x_ptr, pos_t, pos_h, pos_w, N, H, Dh, half,
-                                                cfg.section[0], cfg.section[1], theta_log);
+                                                cfg.section[0], cfg.section[1], cfg.section[2],
+                                                cfg.interleaved ? 1 : 0, theta_log);
 
     const auto err = cudaGetLastError();
     if (err != cudaSuccess) {
