@@ -32,6 +32,16 @@ int main(int argc, char* argv[]) {
         .help("Prompt text for single-turn generation")
         .default_value(std::string("Who are you?"));
 
+    program.add_argument("--max-new-tokens")
+        .help("Maximum number of new tokens to generate")
+        .default_value(512)
+        .scan<'i', int>();
+
+    program.add_argument("--stream")
+        .help("Stream tokens to stdout as they are generated")
+        .default_value(false)
+        .implicit_value(true);
+
     try {
         program.parse_args(argc, argv);
     } catch (const std::exception& err) {
@@ -76,9 +86,15 @@ int main(int argc, char* argv[]) {
 
     GenerationConfig gen_config;
     gen_config.gen_mode = GenerationMode::PING;
-    gen_config.max_new_tokens = 512;
+    gen_config.max_new_tokens = program.get<int>("--max-new-tokens");
     gen_config.verbose = true;
     gen_config.print_stats = true;
+    if (program.get<bool>("--stream")) {
+        gen_config.stream = true;
+        gen_config.stream_callback = [](const std::string& tok) {
+            std::cout << tok << std::flush;
+        };
+    }
 
     auto prompt = program.get<std::string>("--prompt");
     try {
