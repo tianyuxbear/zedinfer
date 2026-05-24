@@ -57,15 +57,35 @@ ChatTemplate ChatTemplate::default_qwen_chatml() {
 }
 
 ChatTemplate ChatTemplate::default_qwen3_5_chatml() {
-    // Same shell as ChatML, but the model is trained so an assistant turn
-    // must open with `<think>\n` (reasoning prefix). Without it, generation
-    // drifts and the model emits a fake `user:` line before answering. See
-    // chat_template.jinja in any Qwen3.5 release — the add_generation_prompt
-    // branch emits `<|im_start|>assistant\n<think>\n` by default (thinking
-    // mode), with `<think>\n\n</think>\n\n` only when `enable_thinking=False`.
+    // Qwen3.5's chat_template.jinja exposes two assistant-prompt variants:
+    //
+    //   enable_thinking=true  (jinja default):  "<|im_start|>assistant\n<think>\n"
+    //                          → model produces a long reasoning chain then the answer.
+    //   enable_thinking=false                  "<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    //                          → model closes the empty think block immediately and
+    //                            emits a direct answer.
+    //
+    // We default to the enable_thinking=false form for two reasons:
+    //
+    //   1. UX: interactive callers (ping, chat, REPL-style serve) typically want a
+    //      direct answer, not a multi-hundred-token internal monologue.
+    //
+    //   2. Quality: under GPTQ-Int4 quantization, long generations inside an open
+    //      <think> block on the 35B-A3B model drift after roughly 100 tokens — the
+    //      output stays in English but loses logical coherence (random number runs,
+    //      fake "user:" inserts, etc.). enable_thinking=false keeps generations short
+    //      enough that we never hit the drift window. Diagnosed by toggling the two
+    //      generation_prompt variants on the same prompt/seed: the closed-think form
+    //      gives a clean self-identification ("I am Qwen3.5, a large language model
+    //      developed by Tongyi Lab..."), the open-think form drifts. Same forward
+    //      path, same sampler — the only difference is generation length.
+    //
+    // The root cause of the long-generation drift (suspected numerical precision
+    // accumulation in GDN state and/or paged KV at long sequences) is a separate
+    // issue and not in scope here.
     ChatTemplate t = default_qwen_chatml();
-    t.generation_prompt = "<|im_start|>assistant\n<think>\n";
-    t.output_prefix = "<think>\n";
+    t.generation_prompt = "<|im_start|>assistant\n<think>\n\n</think>\n\n";
+    t.output_prefix = "";
     return t;
 }
 
