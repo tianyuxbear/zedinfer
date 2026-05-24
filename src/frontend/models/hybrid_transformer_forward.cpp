@@ -24,6 +24,70 @@
 
 namespace zedinfer::model {
 
+// Persistent per-thread scratch for N=1 decode through forward_linear_attn_layer.
+// 30 of the 40 layers in Qwen3.5-A3B run this path, and the original code did 11
+// Tensor::create() calls per layer against the populated MoE pool; folding them
+// into a thread_local growable struct eliminates 330 pool round-trips per token.
+//
+// Shapes depend on the model's linear-attn config (Hk, Dk, Hv, Dv) which is
+// constant across layers; we (re)allocate when the cached shape differs.
+struct LinearAttnDecodeScratch {
+    // Activations / projection outputs
+    tensor_t qkv;        // {1, qkv_dim}
+    tensor_t z;          // {1, Hv*Dv}
+    tensor_t a;          // {1, Hv}
+    tensor_t b;          // {1, Hv}
+    tensor_t qkv_conv;   // {1, qkv_dim}
+    tensor_t q_ssm;      // {1, Hk*Dk}
+    tensor_t k_ssm;      // {1, Hk*Dk}
+    tensor_t v_ssm;      // {1, Hv*Dv}
+    tensor_t y;          // {1, Hv*Dv}
+    tensor_t y_normed;   // {1, Hv*Dv}
+    tensor_t y_gated;    // {1, Hv*Dv}
+    tensor_t out;        // {1, hidden}
+
+    // Cached shape signature; on mismatch (e.g., different model loaded on the
+    // same thread, or prefill drops into this path), reallocate.
+    int Hk = -1, Dk = -1, Hv = -1, Dv = -1;
+    size_t hidden = 0;
+    zedinferDeviceType_t device_type = ZEDINFER_DEVICE_CPU;
+    int device_id = -1;
+    zedinferDataType_t dtype = ZEDINFER_DTYPE_F32;
+};
+
+static thread_local LinearAttnDecodeScratch s_la_scratch;
+
+static void ensure_la_scratch(const ExecutorConfig& exec, int Hk, int Dk, int Hv, int Dv, size_t hidden) {
+    auto& s = s_la_scratch;
+    if (s.Hk == Hk && s.Dk == Dk && s.Hv == Hv && s.Dv == Dv && s.hidden == hidden
+        && s.device_type == exec.device_type && s.device_id == exec.device_id && s.dtype == exec.data_type && s.qkv) {
+        return;
+    }
+    const size_t Hk_Dk = static_cast<size_t>(Hk) * static_cast<size_t>(Dk);
+    const size_t Hv_Dv = static_cast<size_t>(Hv) * static_cast<size_t>(Dv);
+    const size_t qkv_dim = 2 * Hk_Dk + Hv_Dv;
+    auto mk = [&](std::vector<size_t> shape) {
+        return Tensor::create(std::move(shape), exec.data_type, exec.device_type, exec.device_id);
+    };
+    s.qkv      = mk({1, qkv_dim});
+    s.z        = mk({1, Hv_Dv});
+    s.a        = mk({1, static_cast<size_t>(Hv)});
+    s.b        = mk({1, static_cast<size_t>(Hv)});
+    s.qkv_conv = mk({1, qkv_dim});
+    s.q_ssm    = mk({1, Hk_Dk});
+    s.k_ssm    = mk({1, Hk_Dk});
+    s.v_ssm    = mk({1, Hv_Dv});
+    s.y        = mk({1, Hv_Dv});
+    s.y_normed = mk({1, Hv_Dv});
+    s.y_gated  = mk({1, Hv_Dv});
+    s.out      = mk({1, hidden});
+    s.Hk = Hk; s.Dk = Dk; s.Hv = Hv; s.Dv = Dv;
+    s.hidden = hidden;
+    s.device_type = exec.device_type;
+    s.device_id = exec.device_id;
+    s.dtype = exec.data_type;
+}
+
 // Forward declarations of the per-layer-kind helpers. Each is implemented in
 // its own subsequent commit (T13 = dense_mlp, T14 = full_attn, T15 = linear_attn,
 // T16 = moe_mlp). Until then they throw a clearly-tagged exception so the
@@ -213,12 +277,20 @@ static tensor_t forward_linear_attn_layer(const HybridForwardConfig& m, tensor_t
         return Tensor::create(std::move(shape), exec.data_type, exec.device_type, exec.device_id);
     };
 
+    // For N=1 decode reuse the thread_local persistent scratch (12 buffers
+    // sized to this model's linear-attn shape). For prefill (N > 1) fall back
+    // to per-call alloc — those tensors scale with N and aren't shared.
+    const bool use_la_scratch = (N == 1);
+    if (use_la_scratch) {
+        ensure_la_scratch(exec, Hk, Dk, Hv, Dv, m.config.hidden_size);
+    }
+
     // 1. Four input projections (all BF16; linear_attn is excluded from quantization
     //    per Qwen3.5 dynamic rules).
-    auto qkv = make({N, qkv_dim});
-    auto z   = make({N, Hv_Dv});
-    auto a   = make({N, static_cast<size_t>(Hv)});
-    auto b   = make({N, static_cast<size_t>(Hv)});
+    auto qkv = use_la_scratch ? s_la_scratch.qkv : make({N, qkv_dim});
+    auto z   = use_la_scratch ? s_la_scratch.z   : make({N, Hv_Dv});
+    auto a   = use_la_scratch ? s_la_scratch.a   : make({N, static_cast<size_t>(Hv)});
+    auto b   = use_la_scratch ? s_la_scratch.b   : make({N, static_cast<size_t>(Hv)});
     ops::linear(qkv, h_in, m.W(p + "in_proj_qkv.weight"));
     ops::linear(z,   h_in, m.W(p + "in_proj_z.weight"));
     ops::linear(a,   h_in, m.W(p + "in_proj_a.weight"));
@@ -226,16 +298,16 @@ static tensor_t forward_linear_attn_layer(const HybridForwardConfig& m, tensor_t
 
     // 2. Depthwise causal conv1d (kernel=4) with conv state from SSMStatePool.
     //    Kernel folds silu into its output, so qkv_conv = silu(conv1d(qkv)).
-    auto qkv_conv = make({N, qkv_dim});
+    auto qkv_conv = use_la_scratch ? s_la_scratch.qkv_conv : make({N, qkv_dim});
     ops::mamba::causal_conv1d(qkv_conv, qkv, m.W(p + "conv1d.weight"),
                                 m.ssm_pool->view(), req.ssm_slot_idx(),
                                 m.linear_layer_index(L));
 
     // 3. Split qkv_conv [N, qkv_dim] into contiguous q [N, Hk_Dk], k [N, Hk_Dk],
     //    v [N, Hv_Dv] for the SSU kernel. Strided copy lives in ops-nvidia.
-    auto q_ssm = make({N, Hk_Dk});
-    auto k_ssm = make({N, Hk_Dk});
-    auto v_ssm = make({N, Hv_Dv});
+    auto q_ssm = use_la_scratch ? s_la_scratch.q_ssm : make({N, Hk_Dk});
+    auto k_ssm = use_la_scratch ? s_la_scratch.k_ssm : make({N, Hk_Dk});
+    auto v_ssm = use_la_scratch ? s_la_scratch.v_ssm : make({N, Hv_Dv});
     const size_t elt = utils::dsize(exec.data_type);
     ops::mamba::copy_strided_rows(q_ssm, qkv_conv, 0,         Hk_Dk, qkv_dim, N, elt);
     ops::mamba::copy_strided_rows(k_ssm, qkv_conv, Hk_Dk,     Hk_Dk, qkv_dim, N, elt);
@@ -257,7 +329,7 @@ static tensor_t forward_linear_attn_layer(const HybridForwardConfig& m, tensor_t
     //    the delta-rule recurrence S = decay * S + beta * outer(v - S k, k).
     //    The silu(z) output gate is applied separately below (Step 7), not
     //    inside the kernel.
-    auto y = make({N, Hv_Dv});
+    auto y = use_la_scratch ? s_la_scratch.y : make({N, Hv_Dv});
     ops::mamba::GDNParams gp;
     gp.state_view = m.ssm_pool->view();
     gp.slot_idx   = req.ssm_slot_idx();
@@ -277,7 +349,7 @@ static tensor_t forward_linear_attn_layer(const HybridForwardConfig& m, tensor_t
     //    per-call D2H+H2D.
     tensor_t norm_w = m.W(p + "norm.weight");
 
-    auto y_normed = make({N, Hv_Dv});
+    auto y_normed = use_la_scratch ? s_la_scratch.y_normed : make({N, Hv_Dv});
     ops::rms_norm(y_normed->view({N * static_cast<size_t>(Hv), static_cast<size_t>(Dv)}),
                   y->view({N * static_cast<size_t>(Hv), static_cast<size_t>(Dv)}),
                   norm_w, m.config.rms_norm_eps);
@@ -286,13 +358,13 @@ static tensor_t forward_linear_attn_layer(const HybridForwardConfig& m, tensor_t
     //    Performed externally because the kernel only emits the delta-rule
     //    readout; Qwen3.5 applies silu(z) * o_norm before out_proj.
     {
-        auto y_gated = make({N, Hv_Dv});
+        auto y_gated = use_la_scratch ? s_la_scratch.y_gated : make({N, Hv_Dv});
         ops::silu_mul(y_gated, z, y_normed);
         y_normed = y_gated;
     }
 
     // 8. Output projection [Hv_Dv → hidden_size].
-    auto out = make({N, m.config.hidden_size});
+    auto out = use_la_scratch ? s_la_scratch.out : make({N, m.config.hidden_size});
     ops::linear(out, y_normed, m.W(p + "out_proj.weight"));
     return out;
 }
