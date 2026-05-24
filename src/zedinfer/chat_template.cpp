@@ -56,6 +56,19 @@ ChatTemplate ChatTemplate::default_qwen_chatml() {
     return t;
 }
 
+ChatTemplate ChatTemplate::default_qwen3_5_chatml() {
+    // Same shell as ChatML, but the model is trained so an assistant turn
+    // must open with `<think>\n` (reasoning prefix). Without it, generation
+    // drifts and the model emits a fake `user:` line before answering. See
+    // chat_template.jinja in any Qwen3.5 release — the add_generation_prompt
+    // branch emits `<|im_start|>assistant\n<think>\n` by default (thinking
+    // mode), with `<think>\n\n</think>\n\n` only when `enable_thinking=False`.
+    ChatTemplate t = default_qwen_chatml();
+    t.generation_prompt = "<|im_start|>assistant\n<think>\n";
+    t.output_prefix = "<think>\n";
+    return t;
+}
+
 // Extract token string from either a plain string or AddedToken object {"content": "..."}
 static std::string extract_token_string(const json& j, const std::string& key) {
     if (!j.contains(key)) {
@@ -129,6 +142,14 @@ ChatTemplate ChatTemplate::load(const std::string& model_path, const std::string
         }
         LOGI << "[ChatTemplate] Using ChatML template for model_type=" << model_type;
         return default_qwen_chatml();
+    }
+
+    // Qwen3.5 / Qwen3.5-MoE are reasoning models — same ChatML conversation
+    // shell as Qwen3, but the assistant turn must open with `<think>\n` (see
+    // default_qwen3_5_chatml).
+    if (model_type == "qwen3_5" || model_type == "qwen3_5_moe") {
+        LOGI << "[ChatTemplate] Using Qwen3.5 reasoning ChatML template for model_type=" << model_type;
+        return default_qwen3_5_chatml();
     }
 
     LOGW << "[ChatTemplate] Unknown model_type=" << model_type << "; using ChatML template as fallback";

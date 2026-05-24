@@ -41,6 +41,11 @@ struct ChatTemplate {
     // Built-in default for standard Qwen models (ChatML format)
     static ChatTemplate default_qwen_chatml();
 
+    // Built-in default for Qwen3.5 (reasoning model: assistant turn must start
+    // with `<think>\n`, otherwise the model drifts and hallucinates a fake
+    // user message before responding).
+    static ChatTemplate default_qwen3_5_chatml();
+
     // Format an OpenAI-style messages array into a prompt string.
     // Each pair is (role, content) where role is "system", "user", or "assistant".
     // If add_generation_prompt is true, appends generation_prompt at the end.
