@@ -536,33 +536,38 @@ tensor_t Tensor::to(zedinferDeviceType_t device_type, int device_id) const {
         core::context().setDevice(src_device_type, src_device_id);
     }
 
-    // Copy data synchronously
+    // Copy data synchronously. The source pointer must be `data()` (which adds
+    // `_offset` to the storage base) rather than `_storage->memory()` so that
+    // sliced views — e.g., the per-row last-token slice produced by
+    // Sampler::getLastLogits — read from the correct row instead of always
+    // reading from row 0. Before this fix, GeneralSampler's `to(CPU)` /
+    // `to(F32)` returned the FIRST prompt token's logits regardless of which
+    // slice the caller passed in, so it always sampled from p("next token
+    // after <|im_start|>") and emitted role-tag tokens ("user", "system")
+    // instead of the model's actual top-k predictions for the current step.
     if (src_device_type == ZEDINFER_DEVICE_CPU && device_type == ZEDINFER_DEVICE_CPU) {
         // H2H: Both on CPU — use standard memcpy via CPU runtime
         core::context().runtime().api()->memcpy_sync(new_storage->memory(), // dst: host memory
-                                                     _storage->memory(),    // src: host memory
+                                                     data(),                 // src: host memory (offset-aware)
                                                      total_bytes, ZEDINFER_MEMCPY_H2H);
 
     } else if (src_device_type == ZEDINFER_DEVICE_CPU && device_type != ZEDINFER_DEVICE_CPU) {
         // H2D: Source is CPU, destination is GPU — must be executed by GPU runtime
-        // Switch context to target device (GPU) to perform the copy
         core::context().setDevice(device_type, device_id);
         core::context().runtime().api()->memcpy_sync(new_storage->memory(), // dst: device memory (GPU)
-                                                     _storage->memory(),    // src: host memory (CPU)
+                                                     data(),                 // src: host memory (offset-aware)
                                                      total_bytes, ZEDINFER_MEMCPY_H2D);
 
     } else if (src_device_type != ZEDINFER_DEVICE_CPU && device_type == ZEDINFER_DEVICE_CPU) {
         // D2H: Source is GPU, destination is CPU — must be executed by GPU runtime
-        // Already in source (GPU) context — safe to invoke D2H
         core::context().runtime().api()->memcpy_sync(new_storage->memory(), // dst: host memory (CPU)
-                                                     _storage->memory(),    // src: device memory (GPU)
+                                                     data(),                 // src: device memory (offset-aware)
                                                      total_bytes, ZEDINFER_MEMCPY_D2H);
 
     } else {
         // D2D: Source and destination are both non-CPU devices (e.g., GPU->GPU)
-        // Execute on source device context (assumes peer-to-peer support if needed)
         core::context().runtime().api()->memcpy_sync(new_storage->memory(), // dst: target device memory
-                                                     _storage->memory(),    // src: source device memory
+                                                     data(),                 // src: source device memory (offset-aware)
                                                      total_bytes, ZEDINFER_MEMCPY_D2D);
     }
 
