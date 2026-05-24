@@ -57,6 +57,51 @@ struct LinearAttnDecodeScratch {
 
 static thread_local LinearAttnDecodeScratch s_la_scratch;
 
+// Same idea for the 10 Qwen3.5 full-attention layers: 6 fresh Tensor::create
+// calls per decode token (q_raw, gate, k_raw, v, q_normed, k_normed, out) all
+// hit the populated pool. attn itself is allocated inside ctx.attend (paged
+// attention manages its own buffer), so we don't capture it here.
+struct FullAttnDecodeScratch {
+    tensor_t q_raw;     // {1, q_dim}
+    tensor_t gate;      // {1, q_dim}
+    tensor_t k_raw;     // {1, kv_dim}
+    tensor_t v;         // {1, kv_dim}
+    tensor_t q_normed;  // {1, q_dim}
+    tensor_t k_normed;  // {1, kv_dim}
+    tensor_t out;       // {1, hidden}
+
+    size_t Hq = 0, Hkv = 0, Dh = 0, hidden = 0;
+    zedinferDeviceType_t device_type = ZEDINFER_DEVICE_CPU;
+    int device_id = -1;
+    zedinferDataType_t dtype = ZEDINFER_DTYPE_F32;
+};
+
+static thread_local FullAttnDecodeScratch s_fa_scratch;
+
+static void ensure_fa_scratch(const ExecutorConfig& exec, size_t Hq, size_t Hkv, size_t Dh, size_t hidden) {
+    auto& s = s_fa_scratch;
+    if (s.Hq == Hq && s.Hkv == Hkv && s.Dh == Dh && s.hidden == hidden && s.device_type == exec.device_type
+        && s.device_id == exec.device_id && s.dtype == exec.data_type && s.q_raw) {
+        return;
+    }
+    const size_t q_dim  = Hq * Dh;
+    const size_t kv_dim = Hkv * Dh;
+    auto mk = [&](std::vector<size_t> shape) {
+        return Tensor::create(std::move(shape), exec.data_type, exec.device_type, exec.device_id);
+    };
+    s.q_raw    = mk({1, q_dim});
+    s.gate     = mk({1, q_dim});
+    s.k_raw    = mk({1, kv_dim});
+    s.v        = mk({1, kv_dim});
+    s.q_normed = mk({1, q_dim});
+    s.k_normed = mk({1, kv_dim});
+    s.out      = mk({1, hidden});
+    s.Hq = Hq; s.Hkv = Hkv; s.Dh = Dh; s.hidden = hidden;
+    s.device_type = exec.device_type;
+    s.device_id = exec.device_id;
+    s.dtype = exec.data_type;
+}
+
 static void ensure_la_scratch(const ExecutorConfig& exec, int Hk, int Dk, int Hv, int Dv, size_t hidden) {
     auto& s = s_la_scratch;
     if (s.Hk == Hk && s.Dk == Dk && s.Hv == Hv && s.Dv == Dv && s.hidden == hidden
@@ -386,6 +431,11 @@ static tensor_t forward_full_attn_layer(const HybridForwardConfig& m,
         return Tensor::create(std::move(shape), exec.data_type, exec.device_type, exec.device_id);
     };
 
+    const bool use_fa_scratch = (N == 1);
+    if (use_fa_scratch) {
+        ensure_fa_scratch(exec, Hq, Hkv, Dh, m.config.hidden_size);
+    }
+
     // q_proj has doubled output [2*q_dim, hidden_size] — first q_dim rows are
     // the q projection, second q_dim rows are the output gate. Slice along
     // dim 0 (outer-most) is contiguous, so we can call linear directly twice
@@ -394,19 +444,19 @@ static tensor_t forward_full_attn_layer(const HybridForwardConfig& m,
     auto w_q    = q_proj_w->slice(0, 0, q_dim);          // [q_dim, hidden]
     auto w_gate = q_proj_w->slice(0, q_dim, 2 * q_dim);  // [q_dim, hidden]
 
-    auto q_raw = make({N, q_dim});
-    auto gate  = make({N, q_dim});
+    auto q_raw = use_fa_scratch ? s_fa_scratch.q_raw : make({N, q_dim});
+    auto gate  = use_fa_scratch ? s_fa_scratch.gate  : make({N, q_dim});
     ops::linear(q_raw, h_in, w_q);
     ops::linear(gate,  h_in, w_gate);
 
-    auto k_raw = make({N, kv_dim});
-    auto v     = make({N, kv_dim});
+    auto k_raw = use_fa_scratch ? s_fa_scratch.k_raw : make({N, kv_dim});
+    auto v     = use_fa_scratch ? s_fa_scratch.v     : make({N, kv_dim});
     ops::linear(k_raw, h_in, m.W(p + "k_proj.weight"));
     ops::linear(v,     h_in, m.W(p + "v_proj.weight"));
 
     // Per-head RMSNorm on q / k (Qwen3 / Qwen3.5 family).
-    auto q_normed = make({N, q_dim});
-    auto k_normed = make({N, kv_dim});
+    auto q_normed = use_fa_scratch ? s_fa_scratch.q_normed : make({N, q_dim});
+    auto k_normed = use_fa_scratch ? s_fa_scratch.k_normed : make({N, kv_dim});
     ops::rms_norm(q_normed->view({N * Hq,  Dh}),
                   q_raw->view({N * Hq,  Dh}),
                   m.W(p + "q_norm.weight"), m.config.rms_norm_eps);
@@ -439,7 +489,7 @@ static tensor_t forward_full_attn_layer(const HybridForwardConfig& m,
     // o_proj: [q_dim → hidden]. Input width is q_dim (NOT doubled — the gate
     // was consumed in attn_output_gate). attn from ctx.attend already has
     // the right layout for o_proj input.
-    auto out = make({N, m.config.hidden_size});
+    auto out = use_fa_scratch ? s_fa_scratch.out : make({N, m.config.hidden_size});
     ops::linear(out, attn, m.W(p + "o_proj.weight"));
     return out;
 }
