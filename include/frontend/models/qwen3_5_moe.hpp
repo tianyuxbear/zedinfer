@@ -30,6 +30,13 @@ public:
     // layer routes to forward_dense_mlp and fails on the missing mlp.gate_proj.
     HybridForwardConfig hybrid_forward_config_moe() const;
 
+    // Return the MoE-aware hybrid config sliced to the base ModelForwardConfig.
+    // Without this override, DecodeScratch::create (which receives a base
+    // ModelForwardConfig) sees is_moe=false and skips the router_logits /
+    // expert_* / shared_* buffers, forcing the forward path to allocate them
+    // per layer per token through the populated ALL_GPU pool.
+    ModelForwardConfig forward_config() const override { return hybrid_forward_config_moe(); }
+
     const Qwen3_5MoEConfig& moe_config() const { return moe_config_; }
     ExpertPool& expert_pool() { return *expert_pool_; }
     const ExpertPool& expert_pool() const { return *expert_pool_; }

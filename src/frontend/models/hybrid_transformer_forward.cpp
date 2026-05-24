@@ -81,7 +81,7 @@ tensor_t hybrid_transformer_forward(const HybridForwardConfig& m,
                                      PagedForwardContext& ctx,
                                      InferenceRequest& req,
                                      const ExecutorConfig& exec,
-                                     DecodeScratch* /*scratch*/,
+                                     DecodeScratch* scratch,
                                      tensor_t input_embeds) {
     const auto& cfg = m.config;
     const size_t N = static_cast<size_t>(ctx.num_tokens());
@@ -136,9 +136,16 @@ tensor_t hybrid_transformer_forward(const HybridForwardConfig& m,
         auto h_post = make({N, hidden_size});
         ops::rms_norm(h_post, h1, m.W(p + "post_attention_layernorm.weight"), cfg.rms_norm_eps);
 
-        // Dispatch MLP by sparsity
+        // Dispatch MLP by sparsity. DecodeScratch is only safe to forward when
+        // it was actually allocated for the MoE shape (router_logits + expert_*
+        // + shared_*); we forward unconditionally because Qwen3_5MoeModel now
+        // returns a MoE-aware ModelForwardConfig from forward_config(), so the
+        // engine-side DecodeScratch::create populated those fields. For pure-
+        // decode N=1 this routes moe_layer_forward into the moe_decode fast
+        // path; for prefill the inner use_scratch guard (N == 1) keeps the
+        // prefill bucket/scatter logic in charge.
         tensor_t mlp_out = m.is_moe_layer(L)
-                              ? forward_moe_mlp(m, h_post, L, exec, nullptr)
+                              ? forward_moe_mlp(m, h_post, L, exec, scratch)
                               : forward_dense_mlp(m, h_post, L, exec);
 
         // Residual after MLP — overwrite hidden for the next layer
