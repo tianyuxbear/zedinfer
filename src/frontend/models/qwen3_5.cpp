@@ -132,6 +132,53 @@ void reorder_q_proj_weight(tensor_t w, int Hq, int Dh, int hidden) {
     api->memcpy_sync(w->data(), reord.data(), N * sizeof(uint16_t), ZEDINFER_MEMCPY_H2D);
 }
 
+// Replace an fp32 weight tensor with a freshly-allocated bf16 tensor of the
+// same shape, holding the truncate-to-bf16 conversion of the original values.
+// The new tensor is registered back into ModelWeights under the same key so
+// every later W(name) lookup transparently sees bf16. Used to pre-bake
+// linear_attn.norm.weight (stored fp32 per mamba_ssm_dtype, but rms_norm
+// requires same-dtype activations) once at load time so the forward path
+// doesn't do D2H+H2D every linear-attention layer every decode step.
+void cast_fp32_weight_to_bf16(ModelWeights& weights, const std::string& name) {
+    if (!weights.has_tensor(name)) return;
+    tensor_t orig = weights.get_tensor(name);
+    if (!orig || orig->dtype() != ZEDINFER_DTYPE_F32) return;
+
+    const size_t W = orig->numel();
+    auto*        api = device::getRuntimeAPI(orig->deviceType());
+
+    std::vector<float>    host_f32(W);
+    std::vector<uint16_t> host_bf16(W);
+    api->memcpy_sync(host_f32.data(), orig->data(), W * sizeof(float), ZEDINFER_MEMCPY_D2H);
+    for (size_t i = 0; i < W; ++i) {
+        uint32_t u = 0;
+        std::memcpy(&u, &host_f32[i], sizeof(u));
+        host_bf16[i] = static_cast<uint16_t>(u >> 16); // truncate-to-bf16
+    }
+
+    auto replacement = Tensor::create(orig->shape(), ZEDINFER_DTYPE_BF16, orig->deviceType(), orig->deviceId());
+    api->memcpy_sync(replacement->data(), host_bf16.data(), W * sizeof(uint16_t), ZEDINFER_MEMCPY_H2D);
+    weights.add_tensor(name, replacement);
+}
+
+// Walk linear-attention layers and convert their .norm.weight tensors from
+// fp32 to bf16 once. The on-disk dtype is fp32 per `mamba_ssm_dtype=float32`,
+// but ops::rms_norm requires the weight to match the activation dtype (bf16).
+// Doing this cast once at load saves a D2H+H2D pair per decode step per
+// linear-attention layer (30 layers × 2 syncs = ~2 ms / token on Qwen3.5).
+void fixup_qwen3_5_linear_attn_norm_weights(ModelWeights& weights, const Qwen3_5Config& cfg) {
+    int count = 0;
+    for (size_t L = 0; L < cfg.layer_types.size(); ++L) {
+        if (cfg.layer_types[L] != "linear_attention") continue;
+        const std::string name = "layers." + std::to_string(L) + ".linear_attn.norm.weight";
+        if (weights.has_tensor(name) && weights.get_tensor(name)->dtype() == ZEDINFER_DTYPE_F32) {
+            cast_fp32_weight_to_bf16(weights, name);
+            ++count;
+        }
+    }
+    LOGI.printf("[Qwen3_5Model] Pre-cast %d linear_attn.norm.weight tensors from fp32 to bf16", count);
+}
+
 // Walk full-attention layers and reorder their q_proj weights.
 void fixup_qwen3_5_q_proj_weights(ModelWeights& weights, const Qwen3_5Config& cfg) {
     const int Hq     = static_cast<int>(cfg.num_attention_heads);
@@ -170,6 +217,11 @@ Qwen3_5Model::Qwen3_5Model(Qwen3_5Config config, std::unique_ptr<ModelWeights> w
     // forward path assumes (contiguous [query | gate] blocks instead of the
     // HF [q_h0, g_h0, q_h1, g_h1, ...] per-head interleaving).
     fixup_qwen3_5_q_proj_weights(*weights_, config_);
+
+    // Pre-cast linear_attn.norm.weight (stored as fp32) to bf16 so the rms_norm
+    // dtype check inside forward_linear_attn_layer is satisfied without a
+    // per-call D2H+H2D pair per linear-attention layer.
+    fixup_qwen3_5_linear_attn_norm_weights(*weights_, config_);
 
     // Count linear-attention layers and compute the QKV concat width used by
     // the SSM conv-state buffer. Width matches the in_proj_b output layout:
