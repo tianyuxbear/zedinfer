@@ -16,8 +16,11 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <limits>
+#include <nlohmann/json.hpp>
 #include <plog/Log.h>
 #include <sstream>
 #include <stdexcept>
@@ -25,6 +28,59 @@
 namespace zedinfer {
 
 namespace {
+
+// Construct a sampler from the model's generation_config.json (HuggingFace
+// convention). When `do_sample=true` and the parsed params validate, return a
+// GeneralSampler so generations follow the model author's recommended decoding
+// (temperature / top_k / top_p). Otherwise fall back to ARGMAX greedy.
+//
+// Greedy decoding on reasoning-style models is prone to deterministic loops
+// once probability mass is concentrated on a small set of near-tied tokens
+// (e.g. CoT "Wait, ..." patterns); honoring the model's own do_sample=true is
+// the canonical fix.
+std::shared_ptr<sampler::Sampler> create_sampler_from_generation_config(const std::string& model_path,
+                                                                       const ExecutorConfig& exec_config) {
+    namespace fs = std::filesystem;
+    fs::path gen_cfg_path = fs::path(model_path) / "generation_config.json";
+    if (!fs::exists(gen_cfg_path)) {
+        LOGI << "[Sampler] No generation_config.json at " << gen_cfg_path.string()
+             << "; defaulting to ARGMAX (greedy)";
+        return sampler::createSampler(exec_config, sampler::SamplerType::ARGMAX);
+    }
+    try {
+        std::ifstream file(gen_cfg_path);
+        nlohmann::json j;
+        file >> j;
+
+        const bool do_sample = j.value("do_sample", false);
+        if (!do_sample) {
+            LOGI << "[Sampler] generation_config.json has do_sample=false; using ARGMAX (greedy)";
+            return sampler::createSampler(exec_config, sampler::SamplerType::ARGMAX);
+        }
+
+        sampler::SamplerParams params;
+        params.temperature = j.value("temperature", params.temperature);
+        params.top_k = j.value("top_k", params.top_k);
+        params.top_p = j.value("top_p", params.top_p);
+        // generation_config rarely sets a fixed seed; honor it if present, else 0
+        // (createSampler will seed from std::random_device).
+        params.seed = j.value("seed", 0u);
+
+        if (!params.validate()) {
+            LOGW << "[Sampler] generation_config.json params failed validation ("
+                 << params.info() << "); falling back to ARGMAX";
+            return sampler::createSampler(exec_config, sampler::SamplerType::ARGMAX);
+        }
+
+        LOGI.printf("[Sampler] Using GeneralSampler from generation_config.json: temperature=%.3f top_k=%d top_p=%.3f",
+                    params.temperature, params.top_k, params.top_p);
+        return sampler::createSampler(exec_config, sampler::SamplerType::GENERAL, params);
+    } catch (const std::exception& e) {
+        LOGW << "[Sampler] Failed to parse " << gen_cfg_path.string() << ": " << e.what()
+             << "; defaulting to ARGMAX";
+        return sampler::createSampler(exec_config, sampler::SamplerType::ARGMAX);
+    }
+}
 
 double read_tensor_scalar(const std::byte* data, zedinferDataType_t dtype, size_t index) {
     switch (dtype) {
@@ -125,7 +181,7 @@ std::shared_ptr<InferenceEngine> InferenceEngine::create(const std::string& mode
     exec_config.data_type = utils::str_to_dtype(model->config().torch_dtype);
     exec_config.max_seq_len = tokenizer->get_config().model_max_length;
 
-    auto sampler = sampler::createSampler(exec_config, sampler::SamplerType::ARGMAX);
+    auto sampler = create_sampler_from_generation_config(model_path, exec_config);
     auto chat_template = ChatTemplate::load(model_path, model->model_type());
 
     auto engine = std::shared_ptr<InferenceEngine>(new InferenceEngine(

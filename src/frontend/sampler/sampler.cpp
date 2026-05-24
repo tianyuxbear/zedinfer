@@ -149,6 +149,16 @@ int GeneralSampler::sample(tensor_t logits) {
     tensor_t last_logits = getLastLogits(logits);
     last_logits = ensureCPU(last_logits);
 
+    // Convert to F32 before raw-pointer read. Model logits live in the model's
+    // working dtype (bf16 / f16 for the Qwen family); a bare reinterpret_cast
+    // would treat 2-byte values as halves of a 4-byte float and produce garbage,
+    // which makes the GeneralSampler emit token-id noise. ArgmaxSampler avoids
+    // this by going through a dtype-aware ops::argmax kernel; we have no
+    // equivalent CPU kernel here, so convert in place.
+    if (last_logits->dtype() != ZEDINFER_DTYPE_F32) {
+        last_logits = last_logits->to(ZEDINFER_DTYPE_F32);
+    }
+
     size_t vocab_size = last_logits->numel();
     const float* logits_ptr = reinterpret_cast<const float*>(last_logits->data());
 
