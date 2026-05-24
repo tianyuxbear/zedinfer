@@ -23,10 +23,11 @@ constexpr const char* to_string(SamplerType type) {
 
 // Sampling configuration parameters
 struct SamplerParams {
-    float temperature = 1.0f; // Scale logits (1.0 = no scaling)
-    int top_k = 0;            // Keep top-k tokens (0 = disabled)
-    float top_p = 1.0f;       // Nucleus sampling threshold (1.0 = disabled)
-    unsigned int seed = 0;    // Random seed (0 = random device)
+    float temperature = 1.0f;        // Scale logits (1.0 = no scaling)
+    int top_k = 0;                   // Keep top-k tokens (0 = disabled)
+    float top_p = 1.0f;              // Nucleus sampling threshold (1.0 = disabled)
+    float repetition_penalty = 1.0f; // HF CTRL-style penalty (1.0 = disabled)
+    unsigned int seed = 0;           // Random seed (0 = random device)
 
     SamplerParams() = default;
     SamplerParams(float temp, int k = 0, float p = 1.0f, unsigned int s = 0)
@@ -41,8 +42,11 @@ class Sampler {
 public:
     virtual ~Sampler() = default;
 
-    // Sample next token from logits [seq_len, vocab_size] or [vocab_size]
-    virtual int sample(tensor_t logits) = 0;
+    // Sample next token from logits [seq_len, vocab_size] or [vocab_size].
+    // `recent_tokens` (when non-null) is the list of previously-generated token
+    // ids; samplers that support repetition penalty use it to suppress repeated
+    // tokens. ArgmaxSampler ignores it.
+    virtual int sample(tensor_t logits, const std::vector<int>* recent_tokens = nullptr) = 0;
 
     // Set random seed for reproducibility
     virtual void setSeed(unsigned int seed) = 0;
@@ -60,7 +64,7 @@ class ArgmaxSampler : public Sampler {
 public:
     ArgmaxSampler(ExecutorConfig exec_config) : exec_config_(exec_config){};
 
-    int sample(tensor_t logits) override;
+    int sample(tensor_t logits, const std::vector<int>* recent_tokens = nullptr) override;
     void setSeed(unsigned int /*seed*/) override {} // No randomness needed
     std::string name() const override { return "Argmax"; }
 
@@ -80,7 +84,7 @@ class GeneralSampler : public Sampler {
 public:
     explicit GeneralSampler(const SamplerParams& params = SamplerParams());
 
-    int sample(tensor_t logits) override;
+    int sample(tensor_t logits, const std::vector<int>* recent_tokens = nullptr) override;
     void setSeed(unsigned int seed) override;
     std::string name() const override { return "General"; }
 
@@ -96,6 +100,7 @@ private:
     std::mt19937 rng_;
 
     void applyTemperature(float* logits, size_t size);
+    void applyRepetitionPenalty(float* logits, size_t size, const std::vector<int>* recent_tokens);
     void applySoftmax(float* probs, const float* logits, size_t size);
     void applyTopK(std::vector<std::pair<float, int>>& indexed_probs);
     void applyTopP(std::vector<std::pair<float, int>>& indexed_probs);

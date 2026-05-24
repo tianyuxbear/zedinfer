@@ -232,9 +232,13 @@ void Scheduler::process_results(ScheduledBatch& batch, tensor_t logits, sampler:
             continue;
         }
 
-        // Pass [offset : offset+1] to sampler — single row, no double-slice issue
+        // Pass [offset : offset+1] to sampler — single row, no double-slice issue.
+        // Hand the generated history (req->output_ids) to the sampler so the
+        // repetition penalty in GeneralSampler can demote already-seen tokens
+        // and prevent the model from collapsing into a "Wait, the user is
+        // asking ..." attractor during long generations.
         auto req_logits = logits->slice(0, offset, offset + 1);
-        int token = sampler.sample(req_logits);
+        int token = sampler.sample(req_logits, &req->output_ids);
 
         req->output_ids.push_back(token);
         req->last_token = token;
@@ -265,7 +269,8 @@ void Scheduler::process_results(ScheduledBatch& batch, tensor_t logits, sampler:
             }
 
             auto req_logits = logits->slice(0, offset, offset + chunk);
-            int token = sampler.sample(req_logits);
+            // First sampled token of a request: no generated history yet.
+            int token = sampler.sample(req_logits, &req->output_ids);
 
             req->output_ids.push_back(token);
             req->last_token = token;

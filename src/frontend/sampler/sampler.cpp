@@ -25,6 +25,9 @@ bool SamplerParams::validate() const {
     if (top_p <= 0.0f || top_p > 1.0f) {
         return false;
     }
+    if (repetition_penalty <= 0.0f) {
+        return false;
+    }
     return true;
 }
 
@@ -34,6 +37,7 @@ std::string SamplerParams::info() const {
         << "    temperature: " << temperature << "\n"
         << "    top_k: " << top_k << "\n"
         << "    top_p: " << top_p << "\n"
+        << "    repetition_penalty: " << repetition_penalty << "\n"
         << "    seed: " << seed;
     return oss.str();
 }
@@ -63,7 +67,7 @@ tensor_t Sampler::ensureCPU(tensor_t tensor) {
 // ============================================================================
 // ArgmaxSampler
 // ============================================================================
-int ArgmaxSampler::sample(tensor_t logits) {
+int ArgmaxSampler::sample(tensor_t logits, const std::vector<int>* /*recent_tokens*/) {
     tensor_t last_logits = getLastLogits(logits);
 
     // Lazy-init pre-allocated buffers on first call
@@ -144,7 +148,7 @@ void GeneralSampler::setTopP(float top_p) {
     params_.top_p = top_p;
 }
 
-int GeneralSampler::sample(tensor_t logits) {
+int GeneralSampler::sample(tensor_t logits, const std::vector<int>* recent_tokens) {
     // Extract and ensure logits are on CPU
     tensor_t last_logits = getLastLogits(logits);
     last_logits = ensureCPU(last_logits);
@@ -162,8 +166,12 @@ int GeneralSampler::sample(tensor_t logits) {
     size_t vocab_size = last_logits->numel();
     const float* logits_ptr = reinterpret_cast<const float*>(last_logits->data());
 
-    // Apply temperature scaling
+    // Working copy. We modify in place: repetition penalty first (operates on
+    // RAW logits so the multiply/divide stays on the original scale), then
+    // temperature, then softmax. Order matters: HF's GenerationMixin applies
+    // repetition_penalty BEFORE temperature for exactly this reason.
     std::vector<float> scaled_logits(logits_ptr, logits_ptr + vocab_size);
+    applyRepetitionPenalty(scaled_logits.data(), vocab_size, recent_tokens);
     applyTemperature(scaled_logits.data(), vocab_size);
 
     // Compute softmax probabilities
@@ -201,6 +209,44 @@ int GeneralSampler::sample(tensor_t logits) {
 void GeneralSampler::applyTemperature(float* logits, size_t size) {
     if (params_.temperature != 1.0f) {
         for (size_t i = 0; i < size; ++i) { logits[i] /= params_.temperature; }
+    }
+}
+
+// HF / CTRL (Keskar et al. 2019) repetition penalty.
+//
+// For each previously emitted token t:
+//   logit[t] = logit[t] / penalty   if logit[t] > 0
+//   logit[t] = logit[t] * penalty   if logit[t] < 0
+//
+// I.e., positive logits get pushed toward 0 (relatively less likely), negative
+// logits get pushed further from 0 (also less likely). This is a multiplicative
+// version of "make any token we already said less attractive next time".
+//
+// Why this matters: under temp+top_k+top_p sampling, when the model state
+// drifts into a degenerate attractor the per-step distribution can become
+// extremely peaked on a tiny rotating set (e.g. "Wait, the user is asking ...").
+// Even sampling with top_p=0.95 picks essentially the same tokens because the
+// nucleus is one token wide. Demoting the recently-seen tokens forces the
+// nucleus to widen, breaks the loop, and keeps generation coherent under the
+// model's recommended generation_config parameters.
+//
+// Apply to ALL recent tokens (prompt + previously generated) in the caller's
+// list. For zedinfer the scheduler passes req->output_ids — i.e., only the
+// generated tokens, not the prompt. Penalizing only generated tokens is a
+// common middle ground that doesn't trigger on benign prompt repeats (e.g.
+// quoted text in the user's question).
+void GeneralSampler::applyRepetitionPenalty(float* logits, size_t size,
+                                            const std::vector<int>* recent_tokens) {
+    if (params_.repetition_penalty == 1.0f || !recent_tokens || recent_tokens->empty()) {
+        return;
+    }
+    const float penalty = params_.repetition_penalty;
+    for (int tid : *recent_tokens) {
+        if (tid < 0 || static_cast<size_t>(tid) >= size) {
+            continue;
+        }
+        const float lv = logits[tid];
+        logits[tid] = lv > 0.0f ? (lv / penalty) : (lv * penalty);
     }
 }
 

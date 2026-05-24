@@ -62,6 +62,16 @@ std::shared_ptr<sampler::Sampler> create_sampler_from_generation_config(const st
         params.temperature = j.value("temperature", params.temperature);
         params.top_k = j.value("top_k", params.top_k);
         params.top_p = j.value("top_p", params.top_p);
+        // Repetition penalty: honor the value from generation_config.json if present;
+        // otherwise apply a mild default of 1.1. Without this default, long
+        // generations under the Qwen recommended params (temp=1.0, top_k=20,
+        // top_p=0.95) collapse into degenerate "Wait, the user is asking ..." loops
+        // when the per-step distribution becomes peaked enough that top_p selects a
+        // single token. HF transformers also defaults repetition_penalty=1.0 (off),
+        // but their generation_config files for reasoning-quality runs typically
+        // specify a value; we pick 1.1 as a conservative middle ground that prevents
+        // collapse without hurting fluency.
+        params.repetition_penalty = j.value("repetition_penalty", 1.1f);
         // generation_config rarely sets a fixed seed; honor it if present, else 0
         // (createSampler will seed from std::random_device).
         params.seed = j.value("seed", 0u);
@@ -72,8 +82,9 @@ std::shared_ptr<sampler::Sampler> create_sampler_from_generation_config(const st
             return sampler::createSampler(exec_config, sampler::SamplerType::ARGMAX);
         }
 
-        LOGI.printf("[Sampler] Using GeneralSampler from generation_config.json: temperature=%.3f top_k=%d top_p=%.3f",
-                    params.temperature, params.top_k, params.top_p);
+        LOGI.printf("[Sampler] Using GeneralSampler from generation_config.json: "
+                    "temperature=%.3f top_k=%d top_p=%.3f repetition_penalty=%.3f",
+                    params.temperature, params.top_k, params.top_p, params.repetition_penalty);
         return sampler::createSampler(exec_config, sampler::SamplerType::GENERAL, params);
     } catch (const std::exception& e) {
         LOGW << "[Sampler] Failed to parse " << gen_cfg_path.string() << ": " << e.what()

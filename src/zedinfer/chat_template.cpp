@@ -57,35 +57,23 @@ ChatTemplate ChatTemplate::default_qwen_chatml() {
 }
 
 ChatTemplate ChatTemplate::default_qwen3_5_chatml() {
-    // Qwen3.5's chat_template.jinja exposes two assistant-prompt variants:
+    // Match Qwen3.5's chat_template.jinja default: enable_thinking=true emits
+    // `<|im_start|>assistant\n<think>\n`, so the model produces a reasoning
+    // chain followed by the answer. This is the format Qwen3.5 was trained on
+    // for the assistant turn — closing the think block early
+    // (`<think>\n\n</think>\n\n`) drops the model into a less-trained branch
+    // that hallucinates a fake `user:` prefix or otherwise drifts.
     //
-    //   enable_thinking=true  (jinja default):  "<|im_start|>assistant\n<think>\n"
-    //                          → model produces a long reasoning chain then the answer.
-    //   enable_thinking=false                  "<|im_start|>assistant\n<think>\n\n</think>\n\n"
-    //                          → model closes the empty think block immediately and
-    //                            emits a direct answer.
-    //
-    // We default to the enable_thinking=false form for two reasons:
-    //
-    //   1. UX: interactive callers (ping, chat, REPL-style serve) typically want a
-    //      direct answer, not a multi-hundred-token internal monologue.
-    //
-    //   2. Quality: under GPTQ-Int4 quantization, long generations inside an open
-    //      <think> block on the 35B-A3B model drift after roughly 100 tokens — the
-    //      output stays in English but loses logical coherence (random number runs,
-    //      fake "user:" inserts, etc.). enable_thinking=false keeps generations short
-    //      enough that we never hit the drift window. Diagnosed by toggling the two
-    //      generation_prompt variants on the same prompt/seed: the closed-think form
-    //      gives a clean self-identification ("I am Qwen3.5, a large language model
-    //      developed by Tongyi Lab..."), the open-think form drifts. Same forward
-    //      path, same sampler — the only difference is generation length.
-    //
-    // The root cause of the long-generation drift (suspected numerical precision
-    // accumulation in GDN state and/or paged KV at long sequences) is a separate
-    // issue and not in scope here.
+    // The long-generation degeneration that previously appeared inside open
+    // <think> blocks (the model collapsing into "Wait, the user is asking ..."
+    // loops after ~80 tokens) is now suppressed by the repetition_penalty=1.1
+    // default applied in GeneralSampler. The penalty demotes already-emitted
+    // tokens enough to keep the nucleus diverse even when the per-step
+    // distribution becomes peaked, so the model stays out of the degenerate
+    // attractor and the reasoning chain completes normally.
     ChatTemplate t = default_qwen_chatml();
-    t.generation_prompt = "<|im_start|>assistant\n<think>\n\n</think>\n\n";
-    t.output_prefix = "";
+    t.generation_prompt = "<|im_start|>assistant\n<think>\n";
+    t.output_prefix = "<think>\n";
     return t;
 }
 
