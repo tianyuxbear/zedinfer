@@ -4,6 +4,7 @@
 #include "backend/ops/ops.hpp"
 #include "backend/ops/shared_expert_gate/shared_expert_gate.hpp"
 #include "frontend/models/decode_scratch.hpp"
+#include "utils/types.hpp"
 
 #include <algorithm>
 #include <functional>
@@ -71,6 +72,41 @@ static void ensure_prefill_scratch(size_t needed, zedinferDeviceType_t device_ty
     s_prefill_scratch.device_id = device_id;
 }
 
+// Persistent host scratch for the router D2H + F32 conversion. Per call,
+// router_logits_buf is small (num_experts × elem_size for N=1, larger for prefill).
+// The previous implementation chained two Tensor::to() calls which each invoked
+// cudaMallocHost (pinned host allocator, ~50–500 µs per call) and a synchronous
+// memcpy_sync; for 40 MoE layers per decode token that pinned-allocator traffic
+// alone burns several milliseconds per token. We pre-allocate a pinned D2H staging
+// buffer and a plain f32 working buffer once per thread, sized to the largest N
+// seen, and reuse them.
+struct RouterHostScratch {
+    std::vector<std::byte> raw;     // pinned host bytes for the D2H copy (bf16/f16/f32 input)
+    std::vector<float> as_f32;      // F32-converted view consumed by topk_softmax
+    size_t raw_capacity = 0;        // in bytes
+    size_t f32_capacity = 0;        // in floats
+    void* pinned_ptr = nullptr;
+};
+
+static thread_local RouterHostScratch s_router_host;
+
+// Grow the pinned D2H staging buffer if needed. Uses cudaMallocHost via the runtime's
+// host allocator so the buffer is DMA-pinned (matches the prior cudaMallocHost behavior
+// of Tensor::to(CPU)). Freed on growth via cudaFreeHost.
+static void ensure_router_pinned(size_t bytes) {
+    if (s_router_host.pinned_ptr && s_router_host.raw_capacity >= bytes) {
+        return;
+    }
+    auto* api = core::context().runtime().api();
+    if (s_router_host.pinned_ptr) {
+        api->free_host(s_router_host.pinned_ptr);
+        s_router_host.pinned_ptr = nullptr;
+    }
+    const size_t new_cap = std::max(bytes, s_router_host.raw_capacity * 2);
+    s_router_host.pinned_ptr = api->malloc_host(new_cap);
+    s_router_host.raw_capacity = new_cap;
+}
+
 // Compute router logits on device, then bring them to host as F32 for top-k selection.
 static ops::moe::TopKResult compute_router_topk(const ModelForwardConfig& model, tensor_t input, int layer_idx,
                                                 tensor_t router_logits_buf, size_t top_k) {
@@ -87,20 +123,45 @@ static ops::moe::TopKResult compute_router_topk(const ModelForwardConfig& model,
         model.dispatch_linear(router_logits_buf, input, gate_prefix, nullptr);
     }
 
-    // D2H + dtype-to-F32 for CPU top-k (N * num_experts is small enough).
-    //
-    // PERF-TODO: this D2H copy forces a cudaDeviceSynchronize per MoE layer. For 48 layers
-    // in decode this adds up. A GPU-side top-k kernel writing expert_ids/weights directly
-    // to a pinned host buffer would eliminate the serialization point.
-    tensor_t cpu = router_logits_buf;
-    if (cpu->deviceType() != ZEDINFER_DEVICE_CPU) {
-        cpu = cpu->to(ZEDINFER_DEVICE_CPU, 0);
+    const size_t total_elems = N * num_experts;
+    const zedinferDataType_t src_dtype = router_logits_buf->dtype();
+    const size_t src_bytes = total_elems * utils::dsize(src_dtype);
+    auto* api = core::context().runtime().api();
+
+    // D2H into thread_local pinned scratch. memcpy_sync still drains the compute stream
+    // before initiating the copy, so this remains a per-layer serialization point — but
+    // we no longer pay cudaMallocHost / cudaFreeHost on every call.
+    if (router_logits_buf->deviceType() != ZEDINFER_DEVICE_CPU) {
+        ensure_router_pinned(src_bytes);
+        api->memcpy_sync(s_router_host.pinned_ptr, router_logits_buf->data(), src_bytes, ZEDINFER_MEMCPY_D2H);
+    } else {
+        // CPU runtime: data already host-side; skip the copy and dtype-convert in place if needed.
+        ensure_router_pinned(src_bytes);
+        std::memcpy(s_router_host.pinned_ptr, router_logits_buf->data(), src_bytes);
     }
-    if (cpu->dtype() != ZEDINFER_DTYPE_F32) {
-        cpu = cpu->to(ZEDINFER_DTYPE_F32);
+
+    // Materialize F32 view consumed by topk_softmax. If router_logits are already F32,
+    // reinterpret the pinned buffer; otherwise convert into the persistent f32 vector.
+    const float* logits_f32 = nullptr;
+    if (src_dtype == ZEDINFER_DTYPE_F32) {
+        logits_f32 = reinterpret_cast<const float*>(s_router_host.pinned_ptr);
+    } else {
+        if (s_router_host.f32_capacity < total_elems) {
+            s_router_host.as_f32.resize(total_elems);
+            s_router_host.f32_capacity = total_elems;
+        }
+        if (src_dtype == ZEDINFER_DTYPE_BF16) {
+            utils::bf16_to_fp32_batch(s_router_host.as_f32.data(),
+                                      reinterpret_cast<const bf16_t*>(s_router_host.pinned_ptr), total_elems);
+        } else if (src_dtype == ZEDINFER_DTYPE_F16) {
+            utils::fp16_to_fp32_batch_f16c(s_router_host.as_f32.data(),
+                                           reinterpret_cast<const fp16_t*>(s_router_host.pinned_ptr), total_elems);
+        } else {
+            throw std::runtime_error("compute_router_topk: unsupported router_logits dtype");
+        }
+        logits_f32 = s_router_host.as_f32.data();
     }
-    return ops::moe::topk_softmax(reinterpret_cast<const float*>(cpu->data()), N, num_experts, top_k,
-                                  model.norm_topk_prob);
+    return ops::moe::topk_softmax(logits_f32, N, num_experts, top_k, model.norm_topk_prob);
 }
 
 // Execute the N=1 decode path: loop over top-k experts, weighted accumulation into moe_output.
