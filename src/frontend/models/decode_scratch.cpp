@@ -68,6 +68,9 @@ std::unique_ptr<DecodeScratch> DecodeScratch::create(const ModelConfig& cfg, con
             s->shared_up = mkf({1, shared_inter});
             s->shared_act = mkf({1, shared_inter});
             s->shared_down = mkf({1, H});
+            // Per-token shared-expert sigmoid gate logit (Qwen3.5 only; absent
+            // tensor on Qwen3 simply leaves this slot unused).
+            s->shared_gate_logits = mkf({1, 1});
         }
     }
 

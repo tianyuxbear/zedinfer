@@ -368,7 +368,7 @@ static void apply_shared_expert(const ModelForwardConfig& model, tensor_t output
     // HF: shared_expert_output = sigmoid(shared_expert_gate(hidden)) * shared_expert_output
     const std::string gate_w_name = "layers." + std::to_string(layer_idx) + ".mlp.shared_expert_gate.weight";
     if (model.weights.has_tensor(gate_w_name)) {
-        auto gate_logits = make({N, 1});
+        auto gate_logits = (use_scratch && scratch->shared_gate_logits) ? scratch->shared_gate_logits : make({N, 1});
         ops::linear(gate_logits, input, model.weights.get_tensor(gate_w_name), nullptr);
         ops::shared_expert_gate(sh_down, gate_logits);
     }
