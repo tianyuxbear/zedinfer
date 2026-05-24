@@ -68,6 +68,7 @@ struct FullAttnDecodeScratch {
     tensor_t v;         // {1, kv_dim}
     tensor_t q_normed;  // {1, q_dim}
     tensor_t k_normed;  // {1, kv_dim}
+    tensor_t attn;      // {1, Hq, Dh} — pre-alloc passed into ctx.attend
     tensor_t out;       // {1, hidden}
 
     size_t Hq = 0, Hkv = 0, Dh = 0, hidden = 0;
@@ -95,6 +96,7 @@ static void ensure_fa_scratch(const ExecutorConfig& exec, size_t Hq, size_t Hkv,
     s.v        = mk({1, kv_dim});
     s.q_normed = mk({1, q_dim});
     s.k_normed = mk({1, kv_dim});
+    s.attn     = mk({1, Hq, Dh});
     s.out      = mk({1, hidden});
     s.Hq = Hq; s.Hkv = Hkv; s.Dh = Dh; s.hidden = hidden;
     s.device_type = exec.device_type;
@@ -280,10 +282,10 @@ tensor_t hybrid_transformer_forward(const HybridForwardConfig& m,
     }
 
     // Final norm + lm_head projection
-    auto final_normed = make({N, hidden_size});
+    auto final_normed = use_scratch ? scratch->final_normed : make({N, hidden_size});
     ops::rms_norm(final_normed, hidden, m.W("norm.weight"), cfg.rms_norm_eps);
 
-    auto logits = make({N, cfg.vocab_size});
+    auto logits = use_scratch ? scratch->logits : make({N, cfg.vocab_size});
     m.dispatch_linear(logits, final_normed, "lm_head", nullptr);
 
     ctx.finalize();
@@ -477,9 +479,12 @@ static tensor_t forward_full_attn_layer(const HybridForwardConfig& m,
     const int kv_idx = m.full_layer_index(L);
     ctx.write_kv(kv_idx, k_normed, v);
 
-    // Paged attention. attend allocates and returns the attn output tensor.
+    // Paged attention. attend allocates and returns the attn output tensor;
+    // for N=1 decode reuse the persistent attn buffer (shape [1, Hq, Dh])
+    // so the per-layer alloc doesn't hit the populated pool.
     const float scale = 1.0f / std::sqrt(static_cast<float>(Dh));
-    auto attn = ctx.attend(kv_idx, q_normed, scale, exec, Hq, Hkv, Dh, nullptr);
+    auto attn = ctx.attend(kv_idx, q_normed, scale, exec, Hq, Hkv, Dh,
+                           use_fa_scratch ? s_fa_scratch.attn : nullptr);
 
     // Attention output gate: attn := attn * sigmoid(gate), in place.
     // Both tensors are shape [N, Hq, Dh] — flatten matches because attn comes
@@ -532,7 +537,14 @@ static tensor_t forward_moe_mlp(const HybridForwardConfig& m, tensor_t h_post, s
     // hybrid_forward_config(); no MoE-specific code lives here.
     const size_t N = static_cast<size_t>(h_post->shape()[0]);
     const size_t hidden = m.config.hidden_size;
-    auto out = Tensor::create({N, hidden}, exec.data_type, exec.device_type, exec.device_id);
+    // For N=1 decode reuse scratch->down as the per-layer output buffer (it's
+    // the dense/MoE MLP result slot already pre-allocated at engine init).
+    // moe_layer_forward writes the full output (routed sum + optional shared
+    // expert) into this buffer; the caller's ops::add reads it immediately
+    // before the next layer's call reuses the same slot.
+    tensor_t out = (scratch != nullptr && N == 1)
+                       ? scratch->down
+                       : Tensor::create({N, hidden}, exec.data_type, exec.device_type, exec.device_id);
     moe_layer_forward(m, out, h_post, static_cast<int>(L), exec, scratch);
     return out;
 }
