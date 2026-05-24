@@ -91,11 +91,23 @@ tensor_t hybrid_transformer_forward(const HybridForwardConfig& m,
         return Tensor::create(std::move(shape), exec.data_type, exec.device_type, exec.device_id);
     };
 
+    // Pure decode (N == 1) can reuse the engine-wide DecodeScratch hidden-size
+    // buffers for every layer's intermediate state. Without this each layer
+    // does four make({1, hidden}) calls against the populated MoE pool, costing
+    // 4 × 40 = 160 BestFitMemoryPool round-trips per token.
+    const bool use_scratch = (scratch != nullptr && N == 1 && !input_embeds);
+
     // Prepare token ids + position ids. For the hybrid path the pos_ids carry
     // (t, h, w) — but the outer loop only consumes them via PagedForwardContext;
     // the per-layer kernels read pos_ids_thw from req when they need 3D mrope.
     tensor_t ids, pos_ids;
-    ctx.prepare_inputs(ids, pos_ids, exec);
+    if (use_scratch) {
+        ids = scratch->ids;
+        pos_ids = scratch->pos_ids;
+        ctx.prepare_inputs_into(ids, pos_ids);
+    } else {
+        ctx.prepare_inputs(ids, pos_ids, exec);
+    }
 
     // Layer-0 hidden state. Vision pipelines pass input_embeds (already
     // shaped [N, hidden_size] with vision-tower embeddings scattered over
@@ -104,7 +116,7 @@ tensor_t hybrid_transformer_forward(const HybridForwardConfig& m,
     if (input_embeds) {
         hidden = input_embeds;
     } else {
-        hidden = make({N, hidden_size});
+        hidden = use_scratch ? scratch->hidden : make({N, hidden_size});
         ops::embedding(hidden, ids, m.W("embed_tokens.weight"));
     }
 
@@ -120,7 +132,7 @@ tensor_t hybrid_transformer_forward(const HybridForwardConfig& m,
         const auto p = m.prefix(L);
 
         // Pre-attention norm
-        auto h_in = make({N, hidden_size});
+        auto h_in = use_scratch ? scratch->normed : make({N, hidden_size});
         ops::rms_norm(h_in, hidden, m.W(p + "input_layernorm.weight"), cfg.rms_norm_eps);
 
         // Dispatch attention by layer kind
@@ -129,11 +141,11 @@ tensor_t hybrid_transformer_forward(const HybridForwardConfig& m,
                               : forward_full_attn_layer(m, ctx, h_in, pos_ids_thw, L, exec);
 
         // Residual after attention
-        auto h1 = make({N, hidden_size});
+        auto h1 = use_scratch ? scratch->h1 : make({N, hidden_size});
         ops::add(h1, hidden, attn_out);
 
         // Post-attention norm
-        auto h_post = make({N, hidden_size});
+        auto h_post = use_scratch ? scratch->normed_post : make({N, hidden_size});
         ops::rms_norm(h_post, h1, m.W(p + "post_attention_layernorm.weight"), cfg.rms_norm_eps);
 
         // Dispatch MLP by sparsity. DecodeScratch is only safe to forward when
@@ -148,9 +160,14 @@ tensor_t hybrid_transformer_forward(const HybridForwardConfig& m,
                               ? forward_moe_mlp(m, h_post, L, exec, scratch)
                               : forward_dense_mlp(m, h_post, L, exec);
 
-        // Residual after MLP — overwrite hidden for the next layer
-        hidden = make({N, hidden_size});
-        ops::add(hidden, h1, mlp_out);
+        // Residual after MLP — ping-pong between scratch->hidden and scratch->hidden_out
+        // so the previous layer's input (still aliased by `hidden` above) is not
+        // clobbered until rms_norm has already read it into h_in. For non-scratch
+        // (prefill) just alloc fresh as before.
+        tensor_t next_hidden = use_scratch ? (hidden == scratch->hidden ? scratch->hidden_out : scratch->hidden)
+                                           : make({N, hidden_size});
+        ops::add(next_hidden, h1, mlp_out);
+        hidden = next_hidden;
     }
 
     // Final norm + lm_head projection
