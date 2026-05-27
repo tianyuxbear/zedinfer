@@ -195,7 +195,8 @@ tensor_t hybrid_transformer_forward(const HybridForwardConfig& m,
                                      InferenceRequest& req,
                                      const ExecutorConfig& exec,
                                      DecodeScratch* scratch,
-                                     tensor_t input_embeds) {
+                                     tensor_t input_embeds,
+                                     tensor_t* hidden_out) {
     const auto& cfg = m.config;
     const size_t N = static_cast<size_t>(ctx.num_tokens());
     const size_t hidden_size = cfg.hidden_size;
@@ -287,6 +288,20 @@ tensor_t hybrid_transformer_forward(const HybridForwardConfig& m,
                                            : make({N, hidden_size});
         ops::add(next_hidden, h1, mlp_out);
         hidden = next_hidden;
+    }
+
+    // MTP head consumes the residual stream BEFORE the final norm. Snapshot
+    // it now into a fresh tensor (the live `hidden` buffer is either the
+    // engine-wide scratch ping-pong or about to fall out of scope), so the
+    // caller can hold onto it across the rest of this forward + sampling.
+    // Skipped when hidden_out is null (most callers don't need MTP).
+    if (hidden_out != nullptr) {
+        auto snap = make({N, hidden_size});
+        auto* api = device::getRuntimeAPI(exec.device_type);
+        api->memcpy_sync(snap->data(), hidden->data(),
+                         N * hidden_size * utils::dsize(exec.data_type),
+                         ZEDINFER_MEMCPY_D2D);
+        *hidden_out = std::move(snap);
     }
 
     // Final norm + lm_head projection — Qwen3_5MoeRMSNorm uses (1.0 + weight).

@@ -41,15 +41,27 @@ public:
     MTPModule(const MTPModule&) = delete;
     MTPModule& operator=(const MTPModule&) = delete;
 
-    // Stage A stub: throws std::runtime_error("MTPModule::forward not yet
-    // implemented"). Stage B will fill this with the math above and KV
-    // cache management.
+    // Stage B.1: single-token, no past KV — predicts t+2 given main's
+    // residual stream at position t and the token main just sampled at t+1.
     //
-    // hidden_at_t: [1, hidden_size] (last token's hidden from main model,
-    //              BEFORE the final RMSNorm — i.e. the residual stream).
-    // next_token_id: the token id sampled at position t+1 by the main model.
-    // Returns logits [1, vocab_size] over the t+2 prediction.
-    tensor_t forward(tensor_t hidden_at_t, int next_token_id, const ExecutorConfig& exec);
+    // The attention block is simplified: with an empty MTP KV cache it
+    // attends only to the current position, so softmax is degenerate
+    // (uniform-1 over the single token). Multi-step KV cache and the
+    // proper prefill path (filling MTP's K/V across the whole prompt)
+    // land in Stage C with the speculative-decode scheduler.
+    //
+    // Args:
+    //   hidden_at_t:       [1, hidden_size] — main's PRE-final-norm residual
+    //   next_token_id:     id sampled by main at position t+1
+    //   embed_tokens_w:    main embed_tokens.weight [vocab, hidden] — reused
+    //   lm_head_w:         main lm_head.weight [vocab, hidden] — reused
+    //   exec:              compute device + dtype
+    //
+    // Returns: logits [1, vocab] — model's guess for token t+2.
+    // Throws if !ready().
+    tensor_t forward(tensor_t hidden_at_t, int next_token_id,
+                     tensor_t embed_tokens_w, tensor_t lm_head_w,
+                     const ExecutorConfig& exec) const;
 
     // True iff a full MTP weight set was found at ctor time. False for
     // models that don't ship MTP (e.g. Qwen3 base, DeepSeek-R1 distill).
