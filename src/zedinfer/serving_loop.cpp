@@ -223,10 +223,31 @@ bool ServingLoop::step() {
                                         ? w.get_tensor("lm_head.weight") : nullptr;
                     if (embed_w && lmhead_w) {
                         const size_t N = mtp_hidden_last->shape()[0];
-                        auto last_row = mtp_hidden_last->slice(0, N - 1, N);
-
-                        auto mtp_logits = mtp_owner->mtp_module()->forward(
-                            last_row, req->last_token, embed_w, lmhead_w, engine_->exec_config());
+                        tensor_t mtp_logits;
+                        if (N > 1) {
+                            // Stage C.2 prefill path: feed all P positions of
+                            // main's residual through MTP, with the "next
+                            // tokens" series being prompt[1..P-1] then the
+                            // just-sampled token (= main's t_P). This fills
+                            // MTP's K/V cache so subsequent decode steps have
+                            // proper context — closes the 0% -> ~50%+ accept
+                            // rate gap Stage C.1 was bounded by.
+                            std::vector<int> next_tokens;
+                            next_tokens.reserve(N);
+                            for (size_t i = 1; i < req->input_ids.size() && next_tokens.size() < N - 1; ++i) {
+                                next_tokens.push_back(req->input_ids[i]);
+                            }
+                            // last slot = the token sampler just picked
+                            next_tokens.push_back(req->last_token);
+                            mtp_logits = mtp_owner->mtp_module()->prefill(
+                                mtp_hidden_last, next_tokens, embed_w, lmhead_w,
+                                engine_->exec_config());
+                        } else {
+                            auto last_row = mtp_hidden_last->slice(0, N - 1, N);
+                            mtp_logits = mtp_owner->mtp_module()->forward(
+                                last_row, req->last_token, embed_w, lmhead_w,
+                                engine_->exec_config());
+                        }
 
                         // Top-1 via ops::argmax (small extra D2H copy).
                         const size_t vocab = mtp_logits->shape()[1];

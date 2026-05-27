@@ -174,6 +174,34 @@ MTPModule::MTPModule(const Qwen3_5MoEConfig& main_cfg, ModelWeights& weights, co
 
 MTPModule::~MTPModule() = default;
 
+tensor_t MTPModule::prefill(tensor_t hidden_main_seq,
+                            const std::vector<int>& next_tokens,
+                            tensor_t embed_tokens_w, tensor_t lm_head_w,
+                            const ExecutorConfig& exec) const {
+    if (!ready_) {
+        throw std::runtime_error("[MTPModule] prefill called but module not ready");
+    }
+    if (!hidden_main_seq || hidden_main_seq->ndim() != 2) {
+        throw std::runtime_error("[MTPModule] prefill expects 2-D hidden_main_seq [P, hidden]");
+    }
+    const size_t P = hidden_main_seq->shape()[0];
+    if (next_tokens.size() != P) {
+        throw std::runtime_error("[MTPModule] prefill: next_tokens.size()="
+                                 + std::to_string(next_tokens.size())
+                                 + " does not match P=" + std::to_string(P));
+    }
+    // Loop forward() per position. Each call advances past_seq_len_ by 1.
+    // Intermediate logits are discarded; only the final (P-1) prediction
+    // gets returned. Sequential — fine for correctness validation. Stage
+    // D will batch this into a single attention call with seqlen_q = P.
+    tensor_t last_logits;
+    for (size_t i = 0; i < P; ++i) {
+        auto row = hidden_main_seq->slice(0, i, i + 1);
+        last_logits = forward(row, next_tokens[i], embed_tokens_w, lm_head_w, exec);
+    }
+    return last_logits;
+}
+
 namespace {
 
 // Single-token decode attention for MTP with a growing K/V cache.

@@ -7,6 +7,7 @@
 #include "zedinfer/activation.hpp"   // ExecutorConfig (struct definition)
 
 #include <memory>
+#include <vector>
 
 namespace zedinfer::model {
 
@@ -62,6 +63,25 @@ public:
     // Returns: logits [1, vocab] — model's guess for token t+2.
     // Throws if !ready() OR if the cache is full (past >= max_kv_len_).
     tensor_t forward(tensor_t hidden_at_t, int next_token_id,
+                     tensor_t embed_tokens_w, tensor_t lm_head_w,
+                     const ExecutorConfig& exec) const;
+
+    // Stage C.2: prefill MTP K/V across the prompt.
+    //
+    // After main prefill of a P-token prompt, the caller gives us:
+    //   hidden_main_seq: [P, hidden] — main's residuals at positions 0..P-1
+    //   next_tokens:     size P, where next_tokens[i] is the token at
+    //                    position i+1 (i.e. prompt[i+1] for i in 0..P-2,
+    //                    and main's just-sampled t_P for i=P-1).
+    //
+    // We loop the per-position forward P times so each call advances the
+    // internal K/V cache by 1. Sequential — Stage D will batch this into
+    // a single attention call with seqlen_q=P (~10x faster on the prompt).
+    //
+    // Returns the LAST-position logits [1, vocab], i.e. MTP's prediction
+    // for token t_{P+1}. Intermediate logits are computed and discarded.
+    tensor_t prefill(tensor_t hidden_main_seq,
+                     const std::vector<int>& next_tokens,
                      tensor_t embed_tokens_w, tensor_t lm_head_w,
                      const ExecutorConfig& exec) const;
 
