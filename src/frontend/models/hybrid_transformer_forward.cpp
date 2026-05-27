@@ -17,6 +17,8 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <stdexcept>
 #include <string>
@@ -205,8 +207,11 @@ tensor_t hybrid_transformer_forward(const HybridForwardConfig& m,
     // Pure decode (N == 1) can reuse the engine-wide DecodeScratch hidden-size
     // buffers for every layer's intermediate state. Without this each layer
     // does four make({1, hidden}) calls against the populated MoE pool, costing
-    // 4 × 40 = 160 BestFitMemoryPool round-trips per token.
-    const bool use_scratch = (scratch != nullptr && N == 1 && !input_embeds);
+    // 4 x 40 = 160 BestFitMemoryPool round-trips per token.
+    bool use_scratch = (scratch != nullptr && N == 1 && !input_embeds);
+    if (use_scratch && std::getenv("ZEDINFER_DISABLE_SCRATCH") != nullptr) {
+        use_scratch = false;
+    }
 
     // Prepare token ids + position ids. For the hybrid path the pos_ids carry
     // (t, h, w) — but the outer loop only consumes them via PagedForwardContext;
@@ -242,9 +247,11 @@ tensor_t hybrid_transformer_forward(const HybridForwardConfig& m,
     for (size_t L = 0; L < cfg.num_hidden_layers; ++L) {
         const auto p = m.prefix(L);
 
-        // Pre-attention norm
+        // Pre-attention norm — Qwen3_5MoeRMSNorm uses (1.0 + weight), applied
+        // in fp32 inside the kernel to match HF precision (see ops.hpp).
         auto h_in = use_scratch ? scratch->normed : make({N, hidden_size});
-        ops::rms_norm(h_in, hidden, m.W(p + "input_layernorm.weight"), cfg.rms_norm_eps);
+        ops::rms_norm(h_in, hidden, m.W(p + "input_layernorm.weight"), cfg.rms_norm_eps,
+                      /*add_one_to_weight=*/true);
 
         // Dispatch attention by layer kind
         tensor_t attn_out = m.is_linear_attn_layer(L)
@@ -255,9 +262,10 @@ tensor_t hybrid_transformer_forward(const HybridForwardConfig& m,
         auto h1 = use_scratch ? scratch->h1 : make({N, hidden_size});
         ops::add(h1, hidden, attn_out);
 
-        // Post-attention norm
+        // Post-attention norm — Qwen3_5MoeRMSNorm uses (1.0 + weight).
         auto h_post = use_scratch ? scratch->normed_post : make({N, hidden_size});
-        ops::rms_norm(h_post, h1, m.W(p + "post_attention_layernorm.weight"), cfg.rms_norm_eps);
+        ops::rms_norm(h_post, h1, m.W(p + "post_attention_layernorm.weight"), cfg.rms_norm_eps,
+                      /*add_one_to_weight=*/true);
 
         // Dispatch MLP by sparsity. DecodeScratch is only safe to forward when
         // it was actually allocated for the MoE shape (router_logits + expert_*
@@ -281,9 +289,10 @@ tensor_t hybrid_transformer_forward(const HybridForwardConfig& m,
         hidden = next_hidden;
     }
 
-    // Final norm + lm_head projection
+    // Final norm + lm_head projection — Qwen3_5MoeRMSNorm uses (1.0 + weight).
     auto final_normed = use_scratch ? scratch->final_normed : make({N, hidden_size});
-    ops::rms_norm(final_normed, hidden, m.W("norm.weight"), cfg.rms_norm_eps);
+    ops::rms_norm(final_normed, hidden, m.W("norm.weight"), cfg.rms_norm_eps,
+                  /*add_one_to_weight=*/true);
 
     auto logits = use_scratch ? scratch->logits : make({N, cfg.vocab_size});
     m.dispatch_linear(logits, final_normed, "lm_head", nullptr);
@@ -456,15 +465,17 @@ static tensor_t forward_full_attn_layer(const HybridForwardConfig& m,
     ops::linear(k_raw, h_in, m.W(p + "k_proj.weight"));
     ops::linear(v,     h_in, m.W(p + "v_proj.weight"));
 
-    // Per-head RMSNorm on q / k (Qwen3 / Qwen3.5 family).
+    // Per-head RMSNorm on q / k (Qwen3.5 uses Qwen3_5MoeRMSNorm with (1+w)).
     auto q_normed = use_fa_scratch ? s_fa_scratch.q_normed : make({N, q_dim});
     auto k_normed = use_fa_scratch ? s_fa_scratch.k_normed : make({N, kv_dim});
     ops::rms_norm(q_normed->view({N * Hq,  Dh}),
                   q_raw->view({N * Hq,  Dh}),
-                  m.W(p + "q_norm.weight"), m.config.rms_norm_eps);
+                  m.W(p + "q_norm.weight"), m.config.rms_norm_eps,
+                  /*add_one_to_weight=*/true);
     ops::rms_norm(k_normed->view({N * Hkv, Dh}),
                   k_raw->view({N * Hkv, Dh}),
-                  m.W(p + "k_norm.weight"), m.config.rms_norm_eps);
+                  m.W(p + "k_norm.weight"), m.config.rms_norm_eps,
+                  /*add_one_to_weight=*/true);
 
     // 3D MRoPE with partial_rotary_factor (Qwen3.5 = 0.25 → first 64 of 256
     // head_dim rotated, rest pass-through). Rotation is in-place on the
@@ -492,10 +503,13 @@ static tensor_t forward_full_attn_layer(const HybridForwardConfig& m,
     ops::attn_output_gate(attn, gate);
 
     // o_proj: [q_dim → hidden]. Input width is q_dim (NOT doubled — the gate
-    // was consumed in attn_output_gate). attn from ctx.attend already has
-    // the right layout for o_proj input.
+    // was consumed in attn_output_gate). attn from ctx.attend has shape
+    // [N, Hq, Dh]; view it as [N, q_dim] so ops::linear reads K=q_dim from
+    // in->dim(1) rather than the (3-D) middle dimension Hq, which would
+    // collapse the o_proj GEMM to a 16-channel reduction and produce a
+    // ~100x attenuated residual that drifted from HF after a single layer.
     auto out = use_fa_scratch ? s_fa_scratch.out : make({N, m.config.hidden_size});
-    ops::linear(out, attn, m.W(p + "o_proj.weight"));
+    ops::linear(out, attn->view({N, q_dim}), m.W(p + "o_proj.weight"));
     return out;
 }
 

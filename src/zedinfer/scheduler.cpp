@@ -8,6 +8,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <plog/Log.h>
 #include <stdexcept>
 
@@ -318,6 +320,10 @@ void Scheduler::process_results(ScheduledBatch& batch, tensor_t logits, sampler:
         int token = sampler.sample(req_logits, &req->output_ids);
         token = apply_think_budget(req, token);
 
+        if (const char* env = std::getenv("ZEDINFER_DUMP_TOKEN_IDS"); env && env[0] == '1') {
+            fprintf(stderr, "[zedinfer-tok] step=%d id=%d\n", req->generated_count, token);
+        }
+
         req->output_ids.push_back(token);
         req->last_token = token;
         req->generated_count++;
@@ -362,6 +368,10 @@ void Scheduler::process_results(ScheduledBatch& batch, tensor_t logits, sampler:
             // First sampled token of a request: no generated history yet.
             int token = sampler.sample(req_logits, &req->output_ids);
             token = apply_think_budget(req, token);
+
+            if (const char* env = std::getenv("ZEDINFER_DUMP_TOKEN_IDS"); env && env[0] == '1') {
+                fprintf(stderr, "[zedinfer-tok] step=0 id=%d (prefill)\n", token);
+            }
 
             req->output_ids.push_back(token);
             req->last_token = token;

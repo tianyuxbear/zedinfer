@@ -61,31 +61,20 @@ void add_one_to_norm_weight(tensor_t t) {
     }
 }
 
-// Apply the (1 + weight) compensation to every Qwen3_5MoeRMSNorm tensor.
-// linear_attn.norm.weight is NOT included — it backs Qwen3_5MoeRMSNormGated,
-// which uses the plain `weight * x` form.
+// (1 + weight) compensation for Qwen3_5MoeRMSNorm is now applied at kernel
+// time (ops::rms_norm with add_one_to_weight=true) so the +1.0f shift happens
+// in fp32 against the bf16-precision weight, matching HF's
+// `output * (1.0 + weight.float())`. Pre-baking (1+w) back into a bf16 buffer
+// at load time lost ~6x precision (bf16 mantissa is much coarser around 1.0
+// than around 0.0, where typical Qwen3.5 weights live) and caused the model
+// to drift from HF after ~16 generated tokens under greedy decoding. The
+// fixup helper is intentionally kept as a no-op so the call site doesn't
+// need to change; remove fully once we're confident no other path depends
+// on it.
 void fixup_qwen3_5_rmsnorm_weights(ModelWeights& weights, int num_layers) {
-    int count = 0;
-    for (int L = 0; L < num_layers; ++L) {
-        const std::string p = "layers." + std::to_string(L) + ".";
-        const std::vector<std::string> names = {
-            p + "input_layernorm.weight",
-            p + "post_attention_layernorm.weight",
-            p + "self_attn.q_norm.weight",   // full-attention layers only
-            p + "self_attn.k_norm.weight",   // full-attention layers only
-        };
-        for (const auto& n : names) {
-            if (weights.has_tensor(n)) {
-                add_one_to_norm_weight(weights.get_tensor(n));
-                ++count;
-            }
-        }
-    }
-    if (weights.has_tensor("norm.weight")) {
-        add_one_to_norm_weight(weights.get_tensor("norm.weight"));
-        ++count;
-    }
-    LOGI.printf("[Qwen3_5Model] Applied (1+w) compensation to %d RMSNorm tensors", count);
+    (void)weights;
+    (void)num_layers;
+    LOGI.printf("[Qwen3_5Model] (1+w) compensation deferred to kernel-time (no pre-bake)");
 }
 
 // Reorder full-attention `q_proj.weight` so that the first Hq*Dh rows are all

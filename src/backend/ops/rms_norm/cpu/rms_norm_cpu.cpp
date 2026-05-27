@@ -12,7 +12,8 @@
 namespace zedinfer::ops::cpu {
 
 template <typename T>
-void rms_norm_(T* output, const T* input, const T* weight, float eps, size_t seq_len, size_t hidden_size) {
+void rms_norm_(T* output, const T* input, const T* weight, float eps, size_t seq_len, size_t hidden_size,
+               bool add_one_to_weight) {
     if constexpr (std::is_same_v<T, float>) {
         // FP32 path: no conversion needed
 #pragma omp parallel for
@@ -23,7 +24,10 @@ void rms_norm_(T* output, const T* input, const T* weight, float eps, size_t seq
             float sq_sum = sdot(in_row, in_row, hidden_size);
             float rstd = 1.0f / std::sqrt(sq_sum / static_cast<float>(hidden_size) + eps);
 
-            for (size_t j = 0; j < hidden_size; ++j) { out_row[j] = weight[j] * in_row[j] * rstd; }
+            const float w_off = add_one_to_weight ? 1.0f : 0.0f;
+            for (size_t j = 0; j < hidden_size; ++j) {
+                out_row[j] = (weight[j] + w_off) * in_row[j] * rstd;
+            }
         }
     } else {
         // BF16/FP16 path: pre-allocate per-thread conversion buffers
@@ -35,12 +39,19 @@ void rms_norm_(T* output, const T* input, const T* weight, float eps, size_t seq
             thread_out[t].resize(hidden_size);
         }
 
-        // Convert weight once (shared, read-only)
+        // Convert weight once (shared, read-only). When add_one_to_weight is
+        // set, bake the +1.0f shift here in fp32 so the per-row loop stays a
+        // tight FMA. The shift happens in fp32 against the bf16-precision
+        // weight; equivalent to HF's `(1.0 + weight.float())` and avoids the
+        // ~6x precision loss of pre-baking (1+w) back into bf16 storage.
         std::vector<float> weight_f32(hidden_size);
         if constexpr (std::is_same_v<T, zedinfer::bf16_t>) {
             zedinfer::utils::bf16_to_fp32_batch(weight_f32.data(), weight, hidden_size);
         } else {
             zedinfer::utils::fp16_to_fp32_batch_f16c(weight_f32.data(), weight, hidden_size);
+        }
+        if (add_one_to_weight) {
+            for (size_t j = 0; j < hidden_size; ++j) weight_f32[j] += 1.0f;
         }
 
 #pragma omp parallel for
@@ -73,19 +84,21 @@ void rms_norm_(T* output, const T* input, const T* weight, float eps, size_t seq
 }
 
 void rms_norm(std::byte* output, const std::byte* input, const std::byte* weight, float eps, zedinferDataType_t type,
-              size_t seq_len, size_t hidden_size) {
+              size_t seq_len, size_t hidden_size, bool add_one_to_weight) {
     switch (type) {
         case ZEDINFER_DTYPE_F32:
             return rms_norm_(reinterpret_cast<float*>(output), reinterpret_cast<const float*>(input),
-                             reinterpret_cast<const float*>(weight), eps, seq_len, hidden_size);
+                             reinterpret_cast<const float*>(weight), eps, seq_len, hidden_size, add_one_to_weight);
         case ZEDINFER_DTYPE_F16:
             return rms_norm_(reinterpret_cast<zedinfer::fp16_t*>(output),
                              reinterpret_cast<const zedinfer::fp16_t*>(input),
-                             reinterpret_cast<const zedinfer::fp16_t*>(weight), eps, seq_len, hidden_size);
+                             reinterpret_cast<const zedinfer::fp16_t*>(weight), eps, seq_len, hidden_size,
+                             add_one_to_weight);
         case ZEDINFER_DTYPE_BF16:
             return rms_norm_(reinterpret_cast<zedinfer::bf16_t*>(output),
                              reinterpret_cast<const zedinfer::bf16_t*>(input),
-                             reinterpret_cast<const zedinfer::bf16_t*>(weight), eps, seq_len, hidden_size);
+                             reinterpret_cast<const zedinfer::bf16_t*>(weight), eps, seq_len, hidden_size,
+                             add_one_to_weight);
         default:
             EXCEPTION_UNSUPPORTED_DATATYPE(type);
     }

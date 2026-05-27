@@ -542,44 +542,6 @@ same weights (`Here's a thinking process:\n\n1.  **Analyze User Input:**`).
 The pre-fix output started with a different token at step 0 and never
 agreed with HF.
 
-### Residual drift after token ~16 (open follow-up)
-
-With the mrope fix in, short prompts in non-thinking mode produce clean
-correct answers (`"2 + 2 = 4"` on the bf16 reference weights). Long
-open-`<think>` generations still diverge from HF after ~16 matching tokens
-and eventually degenerate into a repetition collapse:
-
-| Prompt | First 16 tokens (match HF) | After ~30 tokens |
-|---|---|---|
-| "What is 2+2?" | "Here's a thinking process:\n\n1.  **Analyze User Input:**" | "...User input: \"2+2\"... user is asking for 2+2+2+1+1+1+..." |
-| "Translate 'hello' to French." | same opening | clean for ~40 tok then "2. ** 3. ** 4. **..." |
-| "Name three primary colors." | same opening | "Three" repeating |
-
-HF on the same weights stays coherent through 200 tokens, reaches
-`</think>`, emits the answer, and hits `<|im_end|>` cleanly. So at least
-one more drift source remains. Suspects, in priority order:
-
-1. **bf16 vs fp32 precision in RMSNormGated (linear-attn output norm).**
-   HF computes `weight * x.to(bf16)` then `* F.silu(gate.fp32)` (the second
-   mul auto-promotes to fp32); zedinfer's `silu_mul` may stay in bf16
-   throughout. 30 linear-attn layers × hundreds of decode steps amplifies
-   even tiny per-step bias.
-2. **`(1 + weight)` RMSNorm pre-bake.** zedinfer stores `(1+w)` truncated
-   to bf16 at load time; HF computes `(1.0 + weight.float())` fresh in
-   fp32 each forward. Precision loss is ~1/256 per weight; could matter
-   over many layers.
-3. **GDN state accumulation in fp32 in-place.** Per-layer state is fp32
-   (matches HF) but the read/update cycle goes through bf16 q/k/v inputs.
-   Any kernel-level rounding bias would compound across decode steps.
-4. **Paged attention vs eager attention numerics.** HF reference used
-   `attn_implementation="eager"`; zedinfer uses paged. The KV scatter
-   and partition reductions differ in summation order.
-
-Localizing the residual is a layer-by-layer logit diff against HF: load
-the same bf16 weights into both, feed the same prompt, dump per-layer
-hidden states, compare. Skipped this session since the mrope fix already
-landed the biggest correctness gain.
-
 ### Files touched (this update)
 
 - `src/backend/ops/mrope/nvidia/mrope_3d.cu`
@@ -588,3 +550,127 @@ landed the biggest correctness gain.
 - `tests/fixtures/mrope_3d/x_out_ref.bin` (regenerated)
 - `tests/fixtures/mrope_3d/x_in.bin` (regenerated; same RNG seed, just
   re-emitted bytes)
+
+## Update 2026-05-27: o_proj called with 3-D `attn`, K collapsed to 16
+
+After landing the mrope fix above, zedinfer matched HF for the first ~16
+generated tokens then diverged. The o_proj_output magnitude was off by
+10-165x relative to HF (e.g. zedinfer 0.05 vs HF 0.41 at layer 3, 0.05 vs
+8.28 at layer 35, 0.30 vs 5.72 at layer 39). All upstream intermediates
+matched HF closely:
+
+```
+                 zedinfer    HF
+q_raw            49.76       48.92    (L=3)
+gate            285.77      275.09
+q_normed         78.93       77.98
+v                 8.70        8.21
+attn_pre_gate    19.30       18.62
+attn_post_gate    0.49        0.55
+o_proj_out        0.05        0.41    <- diverges
+```
+
+### Root cause
+
+The paged attention kernel returns `attn` with shape `[N, Hq, Dh]`.
+Forward then called
+
+```cpp
+ops::linear(out, attn, m.W(p + "o_proj.weight"));
+```
+
+with `attn` left as a 3-D tensor. `ops::linear` reads `K = in->dim(1)` —
+the middle dimension — which is `Hq = 16` rather than the actual
+`q_dim = Hq*Dh = 4096`. The cuBLAS GEMM then reduces over only 16
+channels, reading the first 16 columns of `o_proj.weight` for each output
+row. Roughly 99.6% of the attention output and 99.6% of the o_proj
+weight were unused, so o_proj produced a near-zero residual contribution
+on every full-attention layer (10 of 40 in Qwen3.5). The residual stream
+quietly collapsed to ~14% of its correct magnitude by the final norm,
+and the LM head still happened to produce the same argmax for the first
+~16 tokens before drift overcame the gap to second-best.
+
+### Fix
+
+```cpp
+ops::linear(out, attn->view({N, q_dim}), m.W(p + "o_proj.weight"));
+```
+
+One-line change in `forward_full_attn_layer` in
+`src/frontend/models/hybrid_transformer_forward.cpp`. With it, zedinfer
+matches HF eager byte-for-byte on the first 30+ tokens under greedy
+decoding on the bf16 reference weights, and produces clean coherent
+output on the GPTQ-Int4 model for both `--thinking` and `--no-thinking`
+modes.
+
+### Why the unit test didn't catch it
+
+The mrope unit test exercised mrope in isolation. There was no
+end-to-end test that compared zedinfer's full forward against HF on a
+real model, so the o_proj shape mistake — which only matters when the
+attention output happens to be 3-D — went unnoticed.
+
+### Secondary precision cleanup
+
+Same session also landed a precision improvement that didn't change the
+end-to-end argmax but matches HF more closely on per-element values:
+
+- `(1 + weight)` compensation for `Qwen3_5MoeRMSNorm` was previously
+  pre-baked into a bf16 buffer at load time, losing ~6x precision
+  because the bf16 mantissa around 1.0 is much coarser than around 0.0.
+  Now `ops::rms_norm` accepts an `add_one_to_weight` flag and computes
+  the +1.0f shift in fp32 inside the kernel, matching HF's
+  `output * (1.0 + weight.float())`.
+- `fixup_qwen3_5_rmsnorm_weights` is now a no-op (kept as a function
+  stub to avoid touching the model-load call site).
+- All Qwen3.5 RMSNorm callers in `hybrid_transformer_forward.cpp` pass
+  `add_one_to_weight=true` (input_layernorm, post_attention_layernorm,
+  q_norm, k_norm, final norm). `linear_attn.norm.weight` keeps
+  `add_one_to_weight=false` (RMSNormGated has no +1).
+
+### Verification (B200, bf16 Qwen3.6, ARGMAX, 30 tokens, "What is 2+2?")
+
+zedinfer and HF generate the same 30 token IDs:
+`[8160, 579, 264, 7047, 1817, 25, 271, 16, 13, 220, 2972, 2014, 53983,
+2570, 5396, 64700, 561, 1156, 16561, 328, 3710, 369, 220, 17, 10, 17,
+7285, 198, 17, 13]` → "Here's a thinking process:\n\n1.  **Analyze User
+Input:** The user asks "What is 2+2?"\n2."
+
+GPTQ-Int4 ARGMAX (with `--thinking`) now produces coherent thinking +
+answer on representative prompts:
+
+- "What is 2+2?" → reasoning steps → "2 + 2 = 4."
+- "Hello there." → reasoning steps → friendly greeting
+- "Name three primary colors." → distinguishes RGB / RYB / CMY → "Red,
+  Yellow, Blue"
+- "Write a haiku about autumn." → "Leaves turn red and gold / Wind
+  blows cold across the field / Winter comes soon now"
+
+### Debug env knobs introduced this session
+
+Kept in tree because they're useful for future correctness work:
+
+- `ZEDINFER_DUMP_TOKEN_IDS=1` — scheduler logs each sampled token id per
+  step (prefill + decode).
+- `ZEDINFER_DUMP_TOP_LOGITS=1` — sampler logs top-5 logits + the chosen
+  id per step.
+- `ZEDINFER_KV_BLOCK_SIZE=<N>` — `ping` override for KV cache block size
+  (default 16); useful for testing block-boundary sensitivity.
+- `ZEDINFER_DISABLE_SCRATCH=1` — disables the thread-local DecodeScratch
+  in `hybrid_transformer_forward`; lets you rule out scratch-buffer
+  staleness as a forward-bug source.
+
+### Files touched (this update)
+
+- `src/frontend/models/hybrid_transformer_forward.cpp` — the one-line
+  o_proj view fix + `add_one_to_weight=true` at all Qwen3.5 RMSNorm
+  callers + `ZEDINFER_DISABLE_SCRATCH` env knob.
+- `src/frontend/models/qwen3_5.cpp` — `fixup_qwen3_5_rmsnorm_weights`
+  reduced to a no-op (compensation now lives in the kernel).
+- `include/backend/ops/ops.hpp`,
+  `include/backend/ops/rms_norm/{cpu,nvidia}/*.{hpp,cuh}`,
+  `src/backend/ops/rms_norm/{cpu,nvidia,op.cpp}` — plumb
+  `add_one_to_weight` through `ops::rms_norm`.
+- `src/zedinfer/scheduler.cpp` — `ZEDINFER_DUMP_TOKEN_IDS` env knob.
+- `src/frontend/sampler/sampler.cpp` — `ZEDINFER_DUMP_TOP_LOGITS` env knob.
+- `examples/ping.cpp` — `ZEDINFER_KV_BLOCK_SIZE` env knob.

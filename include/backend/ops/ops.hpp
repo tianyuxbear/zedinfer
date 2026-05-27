@@ -13,7 +13,16 @@ void linear(tensor_t out, tensor_t in, tensor_t weight, tensor_t bias = nullptr)
 void linear_quantized(tensor_t out, tensor_t in, tensor_t weight, tensor_t bias, tensor_t scale, tensor_t g_idx,
                       int num_bits, int group_size);
 void rearrange(tensor_t out, tensor_t in);
-void rms_norm(tensor_t out, tensor_t in, tensor_t weight, float eps);
+// add_one_to_weight=true matches HF Qwen3_5MoeRMSNorm:
+//   output = (x * rsqrt(mean(x^2) + eps)) * (1.0 + weight)
+// where the (1.0 + weight) is computed in fp32 inside the kernel rather than
+// pre-baked into a bf16 buffer at load time. Pre-baking loses ~6x precision
+// because bf16's mantissa around 1.0 (step ~2^-7 = 7.8e-3) is much coarser
+// than around 0.0 (where typical Qwen3.5 weights live). The precision loss
+// compounds across 40 layers and causes the model to drift from HF after
+// ~16 generated tokens under greedy decoding.
+void rms_norm(tensor_t out, tensor_t in, tensor_t weight, float eps,
+              bool add_one_to_weight = false);
 void rope(tensor_t out, tensor_t in, tensor_t pos_ids, float theta);
 void rope_qk(tensor_t q_out, tensor_t k_out, tensor_t q_in, tensor_t k_in, tensor_t pos_ids, float theta);
 void swiglu(tensor_t out, tensor_t gate, tensor_t up);

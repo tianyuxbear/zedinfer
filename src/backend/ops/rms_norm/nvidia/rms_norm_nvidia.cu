@@ -138,7 +138,7 @@ __global__ void rmsnorm_kernel_warp_reduce(T* output, const T* input, const T* w
 // ----------------------------------------------------------------------
 template <typename T>
 __global__ void rmsnorm_kernel_warp_reduce_packed(T* output, const T* input, const T* weight, const float eps,
-                                                  size_t hidden_size) {
+                                                  size_t hidden_size, bool add_one_to_weight) {
     __shared__ float s_warp_sums[MAX_NUM_WARPS];
 
     const int tid = threadIdx.x;
@@ -203,12 +203,14 @@ __global__ void rmsnorm_kernel_warp_reduce_packed(T* output, const T* input, con
         float4 vec_weights = load_128b(&weight[idx]);
         float4 vec_res; // Result accumulator
 
-        // Process based on type (Manual SIMD unrolling)
+        // Process based on type (Manual SIMD unrolling).
+        // add_one_to_weight=true matches HF Qwen3_5MoeRMSNorm — see ops.hpp.
         if constexpr (std::is_same_v<T, float>) {
-            vec_res.x = vec_vals.x * vec_weights.x * rstd;
-            vec_res.y = vec_vals.y * vec_weights.y * rstd;
-            vec_res.z = vec_vals.z * vec_weights.z * rstd;
-            vec_res.w = vec_vals.w * vec_weights.w * rstd;
+            const float w_off = add_one_to_weight ? 1.0f : 0.0f;
+            vec_res.x = vec_vals.x * (vec_weights.x + w_off) * rstd;
+            vec_res.y = vec_vals.y * (vec_weights.y + w_off) * rstd;
+            vec_res.z = vec_vals.z * (vec_weights.z + w_off) * rstd;
+            vec_res.w = vec_vals.w * (vec_weights.w + w_off) * rstd;
         } else {
             // Half / BFloat16 handling via type punning
             // Simplified for clarity: reinterpret as array of T to iterate
@@ -220,6 +222,7 @@ __global__ void rmsnorm_kernel_warp_reduce_packed(T* output, const T* input, con
             for (int k = 0; k < PackSize; ++k) {
                 float v = to_float(vals_arr[k]);
                 float w = to_float(w_arr[k]);
+                if (add_one_to_weight) w += 1.0f;
                 res_arr[k] = from_float<T>(v * w * rstd);
             }
         }
@@ -230,12 +233,13 @@ __global__ void rmsnorm_kernel_warp_reduce_packed(T* output, const T* input, con
     for (size_t i = offset + tid; i < hidden_size; i += blockDim.x) {
         float val = to_float(row_input[i]);
         float w = to_float(weight[i]);
+        if (add_one_to_weight) w += 1.0f;
         row_output[i] = from_float<T>(val * w * rstd);
     }
 }
 
 void rms_norm(std::byte* output, const std::byte* input, const std::byte* weight, float eps, zedinferDataType_t type,
-              size_t seq_len, size_t hidden_size) {
+              size_t seq_len, size_t hidden_size, bool add_one_to_weight) {
     dim3 block(BLOCK_SIZE);
     dim3 grid(seq_len);
 
@@ -243,15 +247,15 @@ void rms_norm(std::byte* output, const std::byte* input, const std::byte* weight
         case ZEDINFER_DTYPE_F32:
             return rmsnorm_kernel_warp_reduce_packed<<<grid, block>>>(
                 reinterpret_cast<float*>(output), reinterpret_cast<const float*>(input),
-                reinterpret_cast<const float*>(weight), eps, hidden_size);
+                reinterpret_cast<const float*>(weight), eps, hidden_size, add_one_to_weight);
         case ZEDINFER_DTYPE_F16:
             return rmsnorm_kernel_warp_reduce_packed<<<grid, block>>>(
                 reinterpret_cast<half*>(output), reinterpret_cast<const half*>(input),
-                reinterpret_cast<const half*>(weight), eps, hidden_size);
+                reinterpret_cast<const half*>(weight), eps, hidden_size, add_one_to_weight);
         case ZEDINFER_DTYPE_BF16:
             return rmsnorm_kernel_warp_reduce_packed<<<grid, block>>>(
                 reinterpret_cast<cuda_bfloat16*>(output), reinterpret_cast<const cuda_bfloat16*>(input),
-                reinterpret_cast<const cuda_bfloat16*>(weight), eps, hidden_size);
+                reinterpret_cast<const cuda_bfloat16*>(weight), eps, hidden_size, add_one_to_weight);
         default:
             EXCEPTION_UNSUPPORTED_DATATYPE(type);
     }

@@ -6,7 +6,7 @@
 #include "utils/check.hpp"
 
 namespace zedinfer::ops {
-void rms_norm(tensor_t out, tensor_t in, tensor_t weight, float eps) {
+void rms_norm(tensor_t out, tensor_t in, tensor_t weight, float eps, bool add_one_to_weight) {
     CHECK_SAME_DEVICE(out, in, weight);
     // Only support contiguous inputs with same shape for now.
     CHECK_SAME_SHAPE(out->shape(), in->shape());
@@ -16,18 +16,20 @@ void rms_norm(tensor_t out, tensor_t in, tensor_t weight, float eps) {
 
     // always support cpu calculation
     if (out->deviceType() == ZEDINFER_DEVICE_CPU) {
-        return cpu::rms_norm(out->data(), in->data(), weight->data(), eps, out->dtype(), out->dim(0), out->dim(1));
+        return cpu::rms_norm(out->data(), in->data(), weight->data(), eps, out->dtype(),
+                             out->dim(0), out->dim(1), add_one_to_weight);
     }
 
     zedinfer::core::context().setDevice(out->deviceType(), out->deviceId());
 
     switch (out->deviceType()) {
         case ZEDINFER_DEVICE_CPU:
-            return cpu::rms_norm(out->data(), in->data(), weight->data(), eps, out->dtype(), out->dim(0), out->dim(1));
+            return cpu::rms_norm(out->data(), in->data(), weight->data(), eps, out->dtype(),
+                                 out->dim(0), out->dim(1), add_one_to_weight);
 #ifdef ENABLE_NVIDIA_API
         case ZEDINFER_DEVICE_NVIDIA:
-            return nvidia::rms_norm(out->data(), in->data(), weight->data(), eps, out->dtype(), out->dim(0),
-                                    out->dim(1));
+            return nvidia::rms_norm(out->data(), in->data(), weight->data(), eps, out->dtype(),
+                                    out->dim(0), out->dim(1), add_one_to_weight);
 #endif
         default:
             EXCEPTION_UNSUPPORTED_DEVICE;

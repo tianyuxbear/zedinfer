@@ -6,9 +6,13 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <sstream>
 #include <stdexcept>
+#include <utility>
+#include <vector>
 
 namespace zedinfer::sampler {
 
@@ -86,13 +90,43 @@ int ArgmaxSampler::sample(tensor_t logits, const std::vector<int>* /*recent_toke
     ops::argmax(max_idx_dev_, max_val_dev_, last_logits);
 
     // Copy result to CPU: reuse pinned host buffer, only memcpy
+    int chosen = -1;
     if (max_idx_host_) {
         core::context().runtime().api()->memcpy_sync(max_idx_host_->data(), max_idx_dev_->data(), sizeof(int64_t),
                                                      ZEDINFER_MEMCPY_D2H);
-        return static_cast<int>(*reinterpret_cast<const int64_t*>(max_idx_host_->data()));
+        chosen = static_cast<int>(*reinterpret_cast<const int64_t*>(max_idx_host_->data()));
+    } else {
+        chosen = static_cast<int>(*reinterpret_cast<const int64_t*>(max_idx_dev_->data()));
     }
-    // CPU path: read directly
-    return static_cast<int>(*reinterpret_cast<const int64_t*>(max_idx_dev_->data()));
+
+    if (const char* env = std::getenv("ZEDINFER_DUMP_TOP_LOGITS"); env && env[0] == '1') {
+        // Copy full logits to host (fp32 path: getLastLogits may have already converted).
+        const size_t vocab = static_cast<size_t>(last_logits->numel());
+        std::vector<float> host(vocab);
+        if (last_logits->dtype() == ZEDINFER_DTYPE_F32) {
+            core::context().runtime().api()->memcpy_sync(host.data(), last_logits->data(),
+                                                         vocab * sizeof(float), ZEDINFER_MEMCPY_D2H);
+        } else if (last_logits->dtype() == ZEDINFER_DTYPE_BF16) {
+            std::vector<uint16_t> bf16_host(vocab);
+            core::context().runtime().api()->memcpy_sync(bf16_host.data(), last_logits->data(),
+                                                         vocab * sizeof(uint16_t), ZEDINFER_MEMCPY_D2H);
+            for (size_t i = 0; i < vocab; ++i) {
+                uint32_t u = static_cast<uint32_t>(bf16_host[i]) << 16;
+                std::memcpy(&host[i], &u, sizeof(float));
+            }
+        }
+        std::vector<std::pair<int, float>> idx_val(vocab);
+        for (size_t i = 0; i < vocab; ++i) idx_val[i] = {static_cast<int>(i), host[i]};
+        std::partial_sort(idx_val.begin(), idx_val.begin() + 5, idx_val.end(),
+                          [](const auto& a, const auto& b) { return a.second > b.second; });
+        fprintf(stderr, "[zedinfer-logits] chose=%d top5:", chosen);
+        for (int k = 0; k < 5; ++k) {
+            fprintf(stderr, " #%d=%d(logit=%.4f)", k, idx_val[k].first, idx_val[k].second);
+        }
+        fprintf(stderr, "\n");
+    }
+
+    return chosen;
 }
 
 // ============================================================================

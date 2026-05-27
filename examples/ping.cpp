@@ -9,6 +9,7 @@
 #include "zedinfer/version.hpp"
 #include <argparse/argparse.hpp>
 #include <chrono>
+#include <cstdlib>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -73,6 +74,10 @@ int main(int argc, char* argv[]) {
 
     SchedulerConfig sched_config;
     sched_config.gpu_memory_utilization = program.get<float>("--gpu-memory-utilization");
+    if (const char* env = std::getenv("ZEDINFER_KV_BLOCK_SIZE")) {
+        sched_config.kv_block_size = std::atoi(env);
+        printf("[ping] Using kv_block_size=%d from env\n", sched_config.kv_block_size);
+    }
 
     auto t0 = std::chrono::high_resolution_clock::now();
     std::shared_ptr<InferenceEngine> engine;
