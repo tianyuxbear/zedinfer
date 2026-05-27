@@ -256,11 +256,335 @@ GeneralSampler implementation or to the `repetition_penalty` plumbing.
 Decode throughput is in the 35-45 tok/s range across these runs (varies with
 prompt length and sampler).
 
+## Update 2026-05-24: thinking-budget + closed-think opt-out landed
+
+Goal from the user: 无论带不带 thinking 输出内容都正常 — both with-thinking and
+without-thinking modes must produce structurally normal output (English text,
+EOS reached, bounded length), not just close-to-EOS as the previous workaround.
+
+### What was added
+
+- **`GenerationConfig::enable_thinking`** (default `true`, matches HF):
+  selects the assistant-prompt variant at request time. `false` uses the
+  closed-think branch (`<|im_start|>assistant\n<think>\n\n</think>\n\n`), which
+  is the only mode that gives reliably clean output on GPTQ-Int4 weights.
+- **`GenerationConfig::max_think_tokens`** (default `128`): scheduler-level
+  budget. When the request is inside an unclosed `<think>` block and exceeds
+  this budget, the scheduler force-emits id 248069 (`</think>`) in place of
+  the next sampled token. The next step force-emits id 271 (`\n\n`) to recreate
+  the trained `</think>\n\n` separator pattern, anchoring the post-thinking
+  state so the model exits the truncated-thinking attractor and transitions to
+  the answer instead of continuing the partial reasoning.
+- **`ChatTemplate::generation_prompt_no_think`** + **`output_prefix_no_think`**:
+  paired closed-think variants. `Session::chat` / `prepare_prompt` pick
+  open- vs closed-think based on `config_.enable_thinking`.
+- **`ping --no-thinking`** and **`ping --max-think-tokens N`** expose the
+  controls on the CLI.
+
+Engine resolves the three token ids once at init (`tokenizer.get_special_token_id`
+for `<think>` / `</think>`, `tokenizer.encode("\n\n")` for the separator) and
+hands them to `Scheduler::set_think_token_ids`. Non-Qwen3.5 models return `-1`
+for all three and the force-emit path is a transparent no-op.
+
+### Verified results on A6000 + Qwen3.5-35B-A3B-GPTQ-Int4
+
+| Mode | Prompt | Output | Status |
+|---|---|---|---|
+| `--no-thinking` | "Who are you?" | "Hello! I'm **Qwen3.5**, the latest large language model developed by Tongyi Lab. ..." → EOS | clean |
+| `--no-thinking` | "Hi" | "Hello! How can I help you today?" → EOS | clean |
+| `--no-thinking` | "What is 2+2?" | "The sum of 2 and 3 is **5**." → EOS (mathematically wrong but structurally normal) | clean |
+| open-think, budget=16 | "Who are you?" | brief think → `</think>\n\n` → "Hello! I am Qwen3, the large language model developed by Alibaba Cloud. How can I help you?" → EOS | clean |
+| open-think, budget=128 | "Who are you?" | think (~70 tokens) → `</think>\n\n` → coherent self-description (with some hallucinated facts) → EOS | structurally normal |
+
+Closed-think is the recommended mode for any workload that needs guaranteed
+clean output. Open-think + budget keeps the structure valid (no infinite loop,
+no pinyin noise, EOS reached, bounded length) but cannot rescue answer quality
+on the cases where GPTQ-Int4 itself fails (e.g., the 2+2→5 hallucination above
+appears even under closed-think, confirming it's a model-quality limit and not
+a thinking-state corruption).
+
+### Files
+
+- `include/zedinfer/chat_template.hpp`, `src/zedinfer/chat_template.cpp`
+  — new `generation_prompt_no_think` / `output_prefix_no_think` fields.
+- `include/zedinfer/generation_types.hpp`, `src/zedinfer/generation_types.cpp`
+  — new `enable_thinking`, `max_think_tokens` fields + validation.
+- `include/zedinfer/request.hpp` — per-request `in_thinking`,
+  `think_token_count`, `post_think_forced_newlines`.
+- `include/zedinfer/engine.hpp`, `src/zedinfer/engine.cpp`
+  — resolves think / `\n\n` token ids from tokenizer at init.
+- `include/zedinfer/scheduler.hpp`, `src/zedinfer/scheduler.cpp`
+  — `set_think_token_ids`, in-thinking init from prompt, force-emit budget.
+- `src/zedinfer/serving_loop.cpp` — wires engine ids into scheduler.
+- `src/zedinfer/session.cpp` — picks open/closed prompt by `enable_thinking`.
+- `examples/ping.cpp` — `--no-thinking`, `--max-think-tokens`.
+
+## Update 2026-05-25: revert repetition_penalty default to 1.0
+
+### Symptom
+
+`What is 2+2?` with `--no-thinking` (closed-think) was non-deterministically
+producing wrong answers on Qwen3.5-35B-A3B-GPTQ-Int4:
+
+```
+Run 1: "The sum of 2 and 3 is **6** (2 + 5 = **4**; then ..."
+Run 2: "The sum of 2 and 30 is **28**. ..."
+Run 3: "The result of $2 + 2$ is **4**. **607,186.53"   ← partial correct
+Run 4: "$2 + 2 = \mathbf{4}$"                            ← correct
+Run 5: "The result of $2 + 2$ is **4**. In basic arithmetic, adding two to the number five ..."
+```
+
+1/5 cleanly correct. ARGMAX-only mode (`ZEDINFER_FORCE_ARGMAX=1`) gave correct
+deterministic output, ruling out the forward pass. Tokenizer + chat-template
+output was byte-identical to HF (verified via `apply_chat_template` round-trip
+against `transformers`), so the bug was sampler-side.
+
+### Root cause
+
+`de59c5e fix(sampler): honor model's generation_config.json + bf16-safe sampling`
+introduced `repetition_penalty = 1.1` as the default when generation_config.json
+didn't specify the field. The intent was to suppress long-thinking attractor
+loops. The side-effect: any token already emitted gets its logit divided by 1.1.
+For arithmetic / code answers that legitimately need to repeat digits, operators,
+identifiers, or keywords, this demotes the correct continuation hard enough that
+top_p=0.95 + top_k=20 + temp=1.0 sampling pulls an off-by-one token from the
+nucleus ("2" → "4" → "5") and the model rationalizes around the wrong number.
+
+The original motivation (thinking attractor loops) was always weakly supported —
+the same debug doc above notes "The same observation holds for ArgmaxSampler",
+i.e., rep_penalty wasn't actually fixing the long-thinking drift either.
+
+### Fix
+
+`src/zedinfer/engine.cpp` — change the implicit default from `1.1f` → `1.0f`,
+matching HF transformers and vLLM. Reasoning-loop drift is now handled by the
+scheduler-side `max_think_tokens` force-emit (added 2026-05-24 above), which
+operates only inside `<think>` blocks and doesn't perturb the rest of sampling.
+
+### Verification
+
+`What is 2+2?` with default settings, 5 runs after fix:
+
+```
+Run 1: "The sum of 2 and 2 is **4**. $$2 + 2 = 4$$"                    ✓
+Run 2: "The sum of 2 and 2 is **10**? No, actually, 4 plus 4 ..."      ✗ (self-correcting wrong tangent)
+Run 3: "**2 + 2** equals **4**. In basic arithmetic ..."               ✓
+Run 4: "2 + 2 equals **4**."                                           ✓
+Run 5: "$2 + 2 = 4$ 2 plus 2 equals **4**."                            ✓
+```
+
+4/5 correct vs 1/5 before the fix. The remaining miss is inherent variance of
+temp=1.0 + top_p=0.95 sampling on a 4-bit-quantized model — HF/vLLM with the
+same params on the same weights see the same variance. Greedy decoding (HF's
+`do_sample=false` or our `ZEDINFER_FORCE_ARGMAX=1`) is the canonical way to get
+deterministic answers.
+
+### Debug knobs added (kept in tree)
+
+- `ZEDINFER_FORCE_ARGMAX=1` — overrides `generation_config.do_sample` to false,
+  forces ARGMAX. Use to isolate sampler bugs from forward-path bugs.
+- `ZEDINFER_REPETITION_PENALTY=<float>` — overrides the
+  `generation_config.repetition_penalty` value at engine init. Set to `1.0` to
+  match HF strictly; set to `>1.0` to experiment with anti-loop tuning.
+
+## Update 2026-05-27: open-think empty-start drift is not zedinfer-side
+
+After the rep_penalty fix above, the *with-thinking* output was still
+catastrophic on GPTQ-Int4 — even under ARGMAX the model hallucinated the
+prompt content within the first ~30 generated tokens (e.g. "What is 2+2?"
+reasoned as if the prompt said "2+4" or "1+1"; "Hello there." treated as
+"Hello, world!"). The session burned hours trying to localize this in
+zedinfer, ruling out:
+
+- Tokenization (zedinfer ids byte-equal to HF `apply_chat_template`)
+- GDN parallelization (reverting commit `3dc840d` did not help)
+- Repetition penalty (already at 1.0 default)
+- Block-boundary scatter / N%block_size patterns (different prompt lengths
+  with same trigger; different lengths broke too)
+
+The decisive experiment was prefilling thinking content. Same prompt
+"What is 2+2?" with these three generation-prompt tails under ARGMAX:
+
+| Tail | Last prompt token | Output |
+|---|---|---|
+| `<think>\n` (HF default) | id 198 (`\n`) | Broken: hallucinates "2+4", digit-string attractor |
+| `<think>\n\n` | id 271 (`\n\n`) | Model immediately emits `</think>` (skips thinking) |
+| `<think>\nLet me think.` | id 13 (`.`) | **Coherent reasoning, correct answer (4), clean EOS** |
+
+The pre-fill case proves zedinfer's forward path *can* produce coherent
+thinking. The failure mode is specifically the empty-thinking-start state
+at the end of an open-`<think>\n` prefill: that state is a fragile region
+of the model where the decoder collapses into prompt-content hallucination.
+Pre-filling any non-whitespace thinking content reliably escapes it.
+
+This matches the original doc-author hypothesis that long-thinking drift is
+GPTQ-Int4 calibration. The full proof requires an HF transformers reference
+run on the same weights and prompt (blocked on this host because the
+installed `transformers` does not recognize `qwen3_5_moe`).
+
+### Resolution: default to closed-think
+
+- `GenerationConfig::enable_thinking` default flips from `true` → `false`.
+  Library callers that did not pass an explicit value previously got the
+  fragile open-`<think>` branch; now they get the safe closed-`<think>` one.
+- `ping --thinking` (default false) replaces the previous `--no-thinking`
+  (default false). Inverted semantics: opting in to a known-fragile mode is
+  now explicit instead of opting out.
+- `ChatTemplate::default_qwen3_5_chatml` still stores BOTH variants — the
+  open-think prompt remains available for callers that pass
+  `enable_thinking=true`, but is no longer the default and the comment
+  warns about the fragility.
+- The `max_think_tokens` budget + `</think>\n\n` force-emit (added
+  2026-05-24) stays in place as a safety net for the opt-in case.
+
+### Files touched (this update)
+
+- `include/zedinfer/generation_types.hpp` — `enable_thinking` default `false`.
+- `src/zedinfer/chat_template.cpp` — long comment explaining the fragility
+  and the safe-default decision.
+- `examples/ping.cpp` — `--thinking` flag (replaces `--no-thinking`).
+
 ## Open follow-ups
 
-1. Long-thinking force-emit policy (see "Not-yet-tried mitigations" above).
-2. Verify with a higher-precision weight set whether the long-form drift
-   disappears, confirming the GPTQ-Int4 hypothesis end-to-end.
-3. `nvbugs / nsight-systems` profile failed to import on the host during
+1. Verify with a higher-precision weight set whether the long-form drift
+   disappears, confirming the GPTQ-Int4 hypothesis end-to-end. The
+   thinking-budget code path is purely additive and is a no-op for
+   non-reasoning models, so it should not interfere with a bf16/fp16
+   comparison run.
+2. `nvbugs / nsight-systems` profile failed to import on the host during
    this session (qdstrm → nsys-rep crashes in the importer); next attempt
    should pin a working `nsys` version before doing per-layer profiling.
+
+## Update 2026-05-26: mrope_3d pair-layout bug — was the root cause
+
+The 2026-05-27 hypothesis ("GPTQ-Int4 calibration is to blame") was wrong.
+Once we got HF transformers and a bf16 reference weight set on a B200, the
+real bug fell out immediately.
+
+### Symptom recap
+
+`ZEDINFER_FORCE_ARGMAX=1 --thinking --prompt "What is 2+2?"`:
+
+| Build | First decoded tokens |
+|---|---|
+| HF + bf16 (Qwen3.6, same arch) | "Here's a thinking process:\n\n1.  **Analyze User Input:** The user asks..." (coherent → `</think>` → "2 + 2 = 4." → EOS, 200 tok) |
+| zedinfer + GPTQ-Int4 (pre-fix) | "Thinking Process:\n\n1.  **Analyze the Request:** *   Input: \"2+2\" (implied by..." — different first token, drifts within 30 tokens |
+| zedinfer + bf16 (pre-fix, same weights as HF) | "Thinking Process: ..." — same wrong first token as GPTQ |
+
+The fact that bf16 + zedinfer also produced the wrong first token, on the
+exact same weights HF handled correctly, ruled out GPTQ-Int4. The forward
+path itself was broken.
+
+### Root cause: rotary pair-layout mismatch
+
+HF's `Qwen3_5MoeTextRotaryEmbedding` (modeling_qwen3_5_moe.py:91-180) builds
+cos/sin via `cat((freqs, freqs), dim=-1)` and applies `rotate_half`:
+
+```python
+def rotate_half(x):
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return torch.cat((-x2, x1), dim=-1)
+```
+
+i.e. the rotation pairs are `(i, i+half)`, both rotated by the same angle
+`freqs[i]`. This is the Llama / NeoX convention.
+
+`src/backend/ops/mrope/nvidia/mrope_3d.cu` (and the matching CPU stub) instead
+paired `(2*pi, 2*pi+1)` — the GPT-J interleaved-pair convention. The
+fixture in `tests/fixtures/mrope_3d/gen_reference.py` was hand-rolled and
+matched the kernel rather than HF, so the unit test passed without ever
+catching the mismatch.
+
+Because the q_proj / k_proj weights were trained for HF's half-rotation
+form, zedinfer was rotating the wrong dimension pairs at every full-
+attention layer (10/40 layers in Qwen3.5). The q·k inner-product
+geometry that attention depends on was subtly broken from token 0; the
+drift compounded through the residual stream and surfaced as "model
+ignores the prompt content".
+
+Direct fixture comparison against HF (Python script in `/tmp/`):
+
+```
+max abs diff (zed interleaved vs HF rotate_half): 2.984375
+mean abs diff: 0.044292
+permutation-equivalence check: max diff 4.64, mean 1.16  (NOT a basis swap)
+```
+
+### Fix
+
+- `src/backend/ops/mrope/nvidia/mrope_3d.cu` — pair `(pi, pi+half)` with one
+  `__sincosf` per pair, matching HF's duplicated cos/sin.
+- `src/backend/ops/mrope/cpu/mrope_3d.cpp` — same change; also wired the
+  `interleaved` flag through (the CPU path previously ignored the HF
+  axis-assignment rule even when callers requested it).
+- `tests/fixtures/mrope_3d/gen_reference.py` — regenerated against the
+  real HF math (`Qwen3_5MoeTextRotaryEmbedding.forward` +
+  `apply_rotary_pos_emb`), not the hand-rolled formula.
+- `tests/fixtures/mrope_3d/x_out_ref.bin` — regenerated.
+
+After the fix `test-ops-mrope-3d` passes with `max_abs_diff=0` against the
+new HF-derived fixture.
+
+### Verification (B200, bf16, ARGMAX)
+
+```bash
+CUDA_VISIBLE_DEVICES=0 ZEDINFER_FORCE_ARGMAX=1 xmake run ping \
+    /home/scratch.tianyux_coreai/models/Qwen3.6-35B-A3B-split-experts \
+    --nvidia --gpu-memory-utilization 0.85 \
+    --max-new-tokens 30 --thinking --prompt "What is 2+2?"
+```
+
+→ `Here's a thinking process:\n\n1.  **Analyze User Input:**\n   - User input: "2+2"\n   -`
+
+The first ~16 tokens are now byte-identical to HF's greedy output on the
+same weights (`Here's a thinking process:\n\n1.  **Analyze User Input:**`).
+The pre-fix output started with a different token at step 0 and never
+agreed with HF.
+
+### Residual drift after token ~16 (open follow-up)
+
+With the mrope fix in, short prompts in non-thinking mode produce clean
+correct answers (`"2 + 2 = 4"` on the bf16 reference weights). Long
+open-`<think>` generations still diverge from HF after ~16 matching tokens
+and eventually degenerate into a repetition collapse:
+
+| Prompt | First 16 tokens (match HF) | After ~30 tokens |
+|---|---|---|
+| "What is 2+2?" | "Here's a thinking process:\n\n1.  **Analyze User Input:**" | "...User input: \"2+2\"... user is asking for 2+2+2+1+1+1+..." |
+| "Translate 'hello' to French." | same opening | clean for ~40 tok then "2. ** 3. ** 4. **..." |
+| "Name three primary colors." | same opening | "Three" repeating |
+
+HF on the same weights stays coherent through 200 tokens, reaches
+`</think>`, emits the answer, and hits `<|im_end|>` cleanly. So at least
+one more drift source remains. Suspects, in priority order:
+
+1. **bf16 vs fp32 precision in RMSNormGated (linear-attn output norm).**
+   HF computes `weight * x.to(bf16)` then `* F.silu(gate.fp32)` (the second
+   mul auto-promotes to fp32); zedinfer's `silu_mul` may stay in bf16
+   throughout. 30 linear-attn layers × hundreds of decode steps amplifies
+   even tiny per-step bias.
+2. **`(1 + weight)` RMSNorm pre-bake.** zedinfer stores `(1+w)` truncated
+   to bf16 at load time; HF computes `(1.0 + weight.float())` fresh in
+   fp32 each forward. Precision loss is ~1/256 per weight; could matter
+   over many layers.
+3. **GDN state accumulation in fp32 in-place.** Per-layer state is fp32
+   (matches HF) but the read/update cycle goes through bf16 q/k/v inputs.
+   Any kernel-level rounding bias would compound across decode steps.
+4. **Paged attention vs eager attention numerics.** HF reference used
+   `attn_implementation="eager"`; zedinfer uses paged. The KV scatter
+   and partition reductions differ in summation order.
+
+Localizing the residual is a layer-by-layer logit diff against HF: load
+the same bf16 weights into both, feed the same prompt, dump per-layer
+hidden states, compare. Skipped this session since the mrope fix already
+landed the biggest correctness gain.
+
+### Files touched (this update)
+
+- `src/backend/ops/mrope/nvidia/mrope_3d.cu`
+- `src/backend/ops/mrope/cpu/mrope_3d.cpp`
+- `tests/fixtures/mrope_3d/gen_reference.py`
+- `tests/fixtures/mrope_3d/x_out_ref.bin` (regenerated)
+- `tests/fixtures/mrope_3d/x_in.bin` (regenerated; same RNG seed, just
+  re-emitted bytes)

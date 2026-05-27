@@ -14,13 +14,29 @@ namespace zedinfer::ops {
 namespace {
 
 // One thread per (token n, head hd, dim-pair pi). Each thread fully rotates
-// one bf16 pair (2*pi, 2*pi+1). The pi-axis assignment (t/h/w) is derived
-// from the (s0, s1, s2) section split. `interleaved` selects between two layouts:
+// one bf16 pair (pi, pi+half) — the HF "rotate_half" form used by
+// Qwen3_5MoeTextRotaryEmbedding.apply_rotary_pos_emb (see modeling_qwen3_5_moe.py
+// lines 558-585). HF builds cos/sin of shape (..., Dh_rot) by concatenating
+// freqs with itself along the last axis, so cos[..., i] == cos[..., i+half]
+// for i in [0, half); the rotation pairs slot i with slot i+half, both rotated
+// by the same angle freq[i] = theta^(-(2*i)/(2*half)).
+//
+// The pi-axis assignment (t/h/w) is derived from the (s0, s1, s2) section
+// split. `interleaved` selects between two layouts:
 //   - chunked   (interleaved=false): [T..., H..., W...] each chunk of length section[axis]
 //   - interleaved (interleaved=true):  matches HF Qwen3_5MoeTextRotaryEmbedding.
 //     apply_interleaved_mrope: T defaults everywhere, H overwrites pi in
 //     {1, 4, 7, ...} up to section[1]*3, W overwrites pi in {2, 5, 8, ...} up
 //     to section[2]*3. See modeling_qwen3_5_moe.py:165-180.
+//
+// NOTE: An earlier version of this kernel paired (2*pi, 2*pi+1) — the
+// GPT-J interleaved rotation form. That is mathematically NOT equivalent to
+// HF's rotate_half (it rotates different pairs), so when applied to q/k
+// projections trained for HF's half-rotation it produced subtly wrong q.k
+// dot products. The error compounded across all full-attention layers and
+// caused token-level divergence from HF after the very first generated token
+// (the Qwen3.5 alignment bug investigated in
+// docs/debug/qwen3_5_sampler_and_thinking_drift.md).
 //
 // freq = exp(-theta_log * (2*pi) / (2*half)) — equivalent to theta^(-(2*pi)/(2*half))
 // but cheaper because half is small and theta_log is precomputed on the host.
@@ -66,11 +82,15 @@ __global__ void mrope_3d_kernel(__nv_bfloat16* __restrict__ x,
     float c, s;
     __sincosf(angle, &s, &c);
 
-    const int base = (n * H + hd) * Dh + 2 * pi;
-    const float a = __bfloat162float(x[base]);
-    const float b = __bfloat162float(x[base + 1]);
-    x[base]       = __float2bfloat16(a * c - b * s);
-    x[base + 1]   = __float2bfloat16(a * s + b * c);
+    // HF rotate_half pair: slot pi (low half) and slot pi+half (high half),
+    // both rotated by the same angle. Matches q_embed = q*cos + rotate_half(q)*sin.
+    const int row_base = (n * H + hd) * Dh;
+    const int idx_lo   = row_base + pi;
+    const int idx_hi   = row_base + pi + half;
+    const float a = __bfloat162float(x[idx_lo]);
+    const float b = __bfloat162float(x[idx_hi]);
+    x[idx_lo] = __float2bfloat16(a * c - b * s);
+    x[idx_hi] = __float2bfloat16(a * s + b * c);
 }
 
 } // namespace
