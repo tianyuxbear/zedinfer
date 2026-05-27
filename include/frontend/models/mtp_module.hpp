@@ -41,14 +41,16 @@ public:
     MTPModule(const MTPModule&) = delete;
     MTPModule& operator=(const MTPModule&) = delete;
 
-    // Stage B.1: single-token, no past KV — predicts t+2 given main's
-    // residual stream at position t and the token main just sampled at t+1.
+    // Stage C.1: single-token decode forward WITH an internal K/V cache.
     //
-    // The attention block is simplified: with an empty MTP KV cache it
-    // attends only to the current position, so softmax is degenerate
-    // (uniform-1 over the single token). Multi-step KV cache and the
-    // proper prefill path (filling MTP's K/V across the whole prompt)
-    // land in Stage C with the speculative-decode scheduler.
+    // Each call advances MTP's K/V cache by 1 position. The first call
+    // after reset_kv_cache() sees past=0 (empty cache, attention
+    // degenerate to self-attention), and each subsequent call sees
+    // past++ positions of context. Quality climbs as the cache fills.
+    //
+    // Stage C.2 will add a multi-token batched variant that lets us
+    // ALSO fill the cache across the prompt during main prefill,
+    // closing the "first decode sees empty cache" gap.
     //
     // Args:
     //   hidden_at_t:       [1, hidden_size] — main's PRE-final-norm residual
@@ -58,10 +60,18 @@ public:
     //   exec:              compute device + dtype
     //
     // Returns: logits [1, vocab] — model's guess for token t+2.
-    // Throws if !ready().
+    // Throws if !ready() OR if the cache is full (past >= max_kv_len_).
     tensor_t forward(tensor_t hidden_at_t, int next_token_id,
                      tensor_t embed_tokens_w, tensor_t lm_head_w,
                      const ExecutorConfig& exec) const;
+
+    // Reset the internal K/V cache before processing a new request.
+    // (Stage C.1 single-tenant design — Stage D will move cache into
+    // per-Request state to support multi-request concurrent decode.)
+    void reset_kv_cache() const { past_seq_len_ = 0; }
+
+    // Current cached sequence length (debug / spec-decode accept-rate logging).
+    int past_seq_len() const { return past_seq_len_; }
 
     // True iff a full MTP weight set was found at ctor time. False for
     // models that don't ship MTP (e.g. Qwen3 base, DeepSeek-R1 distill).
@@ -105,6 +115,17 @@ private:
 
     // Final RMSNorm before lm_head, mtp.norm.weight.
     tensor_t final_norm_;            // [hidden]
+
+    // ----- Stage C.1: internal MTP K/V cache (single-tenant) -----
+    // Logical layout: [max_kv_len_, num_kv_heads, head_dim] bf16, contiguous.
+    // Treated as a single paged block (block_size = max_kv_len_,
+    // page_table = [0]) so the existing ops::attention kernel works as-is.
+    static constexpr size_t kDefaultMaxKvLen_ = 4096;
+    size_t           max_kv_len_      = kDefaultMaxKvLen_;
+    mutable tensor_t k_cache_;        // allocated lazily on first forward
+    mutable tensor_t v_cache_;
+    mutable tensor_t page_table_dev_; // [1] int32 = {0}, allocated once
+    mutable int      past_seq_len_ = 0;
 };
 
 } // namespace zedinfer::model

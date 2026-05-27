@@ -165,6 +165,14 @@ bool ServingLoop::step() {
                 && moe_model->mtp_module()->ready()) {
                 hidden_out_ptr = &mtp_hidden_last;
                 mtp_owner      = moe_model;
+                // Single-tenant Stage C.1 design: clear MTP K/V at the start
+                // of every prefill step so a new request gets a fresh cache.
+                // Continuous decode steps DON'T reset, letting MTP attention
+                // accumulate context as decode progresses. Multi-request
+                // concurrent decode is Stage D — needs per-Request K/V state.
+                if (!batch.prefill_requests.empty()) {
+                    moe_model->mtp_module()->reset_kv_cache();
+                }
             }
             logits = model::hybrid_transformer_forward(hcfg, ctx, *req, engine_->exec_config(), scratch,
                                                          req->image_embeds(), hidden_out_ptr);

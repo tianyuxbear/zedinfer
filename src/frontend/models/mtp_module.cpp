@@ -3,10 +3,12 @@
 #include "backend/core/context/context.hpp"
 #include "backend/device/runtime_api.hpp"
 #include "backend/ops/attn_output_gate/attn_output_gate.hpp"
+#include "backend/ops/mrope/mrope_3d.hpp"
 #include "backend/ops/moe/topk_softmax.hpp"
 #include "backend/ops/ops.hpp"
 #include "backend/tensor/tensor.hpp"
 #include "frontend/models/base.hpp"
+#include "frontend/models/hybrid_forward_config.hpp"  // MRoPEConfig
 #include "utils/types.hpp"
 
 #include <plog/Log.h>
@@ -174,42 +176,38 @@ MTPModule::~MTPModule() = default;
 
 namespace {
 
-// SIMPLIFIED single-token attention for MTP with empty past KV.
+// Single-token decode attention for MTP with a growing K/V cache.
 //
-// For one token at the start of a fresh KV cache, the softmax over q@k.T
-// degenerates to a single weight of 1.0, so the attention output is just
-// v at the (sole) attended position. We bypass the full paged-attention
-// kernel entirely and assemble attn_out[q_head, d] = v_self[q_head//rep, d]
-// with the GQA replication factor rep = Hq / Hkv. mrope at position 0 is
-// a no-op (angle = pos * freq = 0), so we also skip the rotation.
+// K and V caches are laid out as [max_kv_len, Hkv*Dh] bf16 contiguous, but
+// we reuse ops::attention with the paged-decode dispatch by treating the
+// whole cache as a single "page" of size max_kv_len with page_table=[0].
+// That way the existing `paged_attention_decode_kernel` reads positions
+// 0..past at byte offset `pos * Hkv*Dh*elt` without any new GPU code.
 //
-// Then apply attn_output_gate (sigmoid(gate) * attn) and o_proj as usual.
+// h_in:     [1, hidden]
+// k_cache, v_cache: [max_kv_len, Hkv*Dh] bf16 (mutated: writes at row `past`)
+// page_table_dev: device int [1] = {0}
+// past:     number of positions ALREADY in the cache before this call
 // Returns o_proj output [1, hidden_size].
-//
-// h_in:    [1, hidden]
-// q_proj:  [2*Hq*Dh, hidden]  (Qwen3.5 q+gate doubled)
-// k_proj:  [Hkv*Dh, hidden]
-// v_proj:  [Hkv*Dh, hidden]
-// o_proj:  [hidden, Hq*Dh]
-// q_norm/k_norm: [Dh]   (1+w)
-tensor_t mtp_attention_one_token(tensor_t h_in,
-                                 tensor_t q_proj, tensor_t k_proj, tensor_t v_proj,
-                                 tensor_t o_proj, tensor_t q_norm, tensor_t k_norm,
-                                 const Qwen3_5MoEConfig& cfg, const ExecutorConfig& exec) {
+tensor_t mtp_attention_decode(tensor_t h_in,
+                              tensor_t q_proj, tensor_t k_proj, tensor_t v_proj,
+                              tensor_t o_proj, tensor_t q_norm, tensor_t k_norm,
+                              tensor_t k_cache, tensor_t v_cache,
+                              tensor_t page_table_dev, int past, int max_kv_len,
+                              const Qwen3_5MoEConfig& cfg, const ExecutorConfig& exec) {
     const size_t Hq  = cfg.num_attention_heads;
     const size_t Hkv = cfg.num_key_value_heads;
     const size_t Dh  = cfg.head_dim > 0 ? cfg.head_dim : (cfg.hidden_size / Hq);
     const size_t q_dim  = Hq  * Dh;
     const size_t kv_dim = Hkv * Dh;
-    const size_t rep = Hq / Hkv;
 
     auto make = [&](std::vector<size_t> shape) {
         return Tensor::create(std::move(shape), exec.data_type, exec.device_type, exec.device_id);
     };
+    auto* api = device::getRuntimeAPI(exec.device_type);
+    const size_t elt = utils::dsize(exec.data_type);
 
-    // q_proj is reordered like the main full-attn path: rows [0, q_dim)
-    // are query, rows [q_dim, 2*q_dim) are output gate (see
-    // reorder_q_proj_weight in qwen3_5.cpp). Slice once at call time.
+    // q_proj is reordered like main full-attn (rows [0,q_dim)=q, [q_dim,2q_dim)=gate).
     auto w_q    = q_proj->slice(0, 0, q_dim);
     auto w_gate = q_proj->slice(0, q_dim, 2 * q_dim);
 
@@ -222,7 +220,6 @@ tensor_t mtp_attention_one_token(tensor_t h_in,
     ops::linear(k_raw, h_in, k_proj);
     ops::linear(v,     h_in, v_proj);
 
-    // Per-head RMSNorm on q and k (Qwen3_5MoeRMSNorm with (1+w) at kernel time).
     auto q_normed = make({1, q_dim});
     auto k_normed = make({1, kv_dim});
     ops::rms_norm(q_normed->view({Hq,  Dh}), q_raw->view({Hq,  Dh}),
@@ -230,27 +227,55 @@ tensor_t mtp_attention_one_token(tensor_t h_in,
     ops::rms_norm(k_normed->view({Hkv, Dh}), k_raw->view({Hkv, Dh}),
                   k_norm, cfg.rms_norm_eps, /*add_one_to_weight=*/true);
 
-    // (mrope skipped — position 0 = identity rotation)
-    // (attention skipped — single token attends only to itself, output = v)
-    //
-    // Build attn = v replicated across query heads. Layout per token:
-    //   attn[1, Hq, Dh] where attn[h, d] = v[h / rep, d]
-    auto attn = make({1, Hq, Dh});
-    auto* api = device::getRuntimeAPI(exec.device_type);
-    const size_t elt = utils::dsize(exec.data_type);
-    for (size_t h = 0; h < Hq; ++h) {
-        const size_t kv_head = h / rep;
-        // dest: attn->data() + (h * Dh) * elt
-        // src:  v->data()    + (kv_head * Dh) * elt
-        api->memcpy_sync(static_cast<std::byte*>(attn->data()) + h * Dh * elt,
-                         static_cast<std::byte*>(v->data())    + kv_head * Dh * elt,
-                         Dh * elt, ZEDINFER_MEMCPY_D2D);
+    // mrope_3d at position `past`. Build [3, 1] int32 = {past, past, past}.
+    auto pos_thw = Tensor::create({3, 1}, ZEDINFER_DTYPE_I32, exec.device_type, exec.device_id);
+    {
+        int32_t host_pos[3] = {past, past, past};
+        api->memcpy_sync(pos_thw->data(), host_pos, 3 * sizeof(int32_t), ZEDINFER_MEMCPY_H2D);
     }
+    MRoPEConfig mrope_cfg;
+    mrope_cfg.interleaved    = cfg.mrope_interleaved;
+    mrope_cfg.section        = cfg.mrope_section;
+    mrope_cfg.partial_factor = cfg.partial_rotary_factor;
+    mrope_cfg.theta          = cfg.rope_theta;
+    ops::mrope_3d(q_normed->view({1, Hq,  Dh}), pos_thw, mrope_cfg);
+    ops::mrope_3d(k_normed->view({1, Hkv, Dh}), pos_thw, mrope_cfg);
 
-    // attn := sigmoid(gate) * attn   (in place on attn)
+    // Write rotated k_normed and raw v into K/V cache at row `past`.
+    api->memcpy_sync(static_cast<std::byte*>(k_cache->data())
+                         + static_cast<size_t>(past) * kv_dim * elt,
+                     k_normed->data(), kv_dim * elt, ZEDINFER_MEMCPY_D2D);
+    api->memcpy_sync(static_cast<std::byte*>(v_cache->data())
+                         + static_cast<size_t>(past) * kv_dim * elt,
+                     v->data(), kv_dim * elt, ZEDINFER_MEMCPY_D2D);
+
+    // Configure single-page paged attention.
+    ops::AttentionConfig acfg{
+        /*nhead=*/static_cast<int>(Hq),
+        /*nkvhead=*/static_cast<int>(Hkv),
+        /*head_dim=*/static_cast<int>(Dh),
+        /*scale=*/1.0f / std::sqrt(static_cast<float>(Dh)),
+        /*block_size=*/max_kv_len,
+        /*dtype=*/exec.data_type,
+        /*device_type=*/exec.device_type,
+        /*device_id=*/exec.device_id,
+    };
+    auto attn = make({1, Hq, Dh});
+    ops::AttentionParams params{acfg};
+    params.use_flashinfer = false; // single-block + single-request → native paged decode is enough
+    params.out = attn->view({Hq, Dh});
+    params.q   = q_normed->view({Hq, Dh});
+    params.k_pool_base = k_cache->data();
+    params.v_pool_base = v_cache->data();
+    params.page_table  = reinterpret_cast<const int*>(page_table_dev->data());
+    params.seq_len     = past + 1;
+    params.seqlen_q    = 1;
+    ops::attention(params);
+
+    // attn := sigmoid(gate) * attn   (in place)
     ops::attn_output_gate(attn, gate);
 
-    // o_proj: view attn as [1, q_dim] (head-major flatten matches the main path)
+    // o_proj
     auto out = make({1, cfg.hidden_size});
     ops::linear(out, attn->view({1, q_dim}), o_proj);
     return out;
@@ -407,10 +432,36 @@ tensor_t MTPModule::forward(tensor_t hidden_at_t, int next_token_id,
     ops::rms_norm(h_in, h_in_raw, in_layernorm_, main_cfg_.rms_norm_eps,
                   /*add_one_to_weight=*/true);
 
-    // 6. Attention block (simplified: single token, empty past KV).
-    auto attn_out = mtp_attention_one_token(h_in, q_proj_, k_proj_, v_proj_,
-                                            o_proj_, q_norm_, k_norm_,
-                                            main_cfg_, exec);
+    // 6. Attention with growing K/V cache. Lazy-allocate the cache + the
+    //    1-element page_table on the first call. Single-tenant: caller must
+    //    invoke reset_kv_cache() between requests.
+    if (!k_cache_) {
+        const size_t Hkv = main_cfg_.num_key_value_heads;
+        const size_t Dh  = main_cfg_.head_dim > 0 ? main_cfg_.head_dim
+                                                  : (main_cfg_.hidden_size / main_cfg_.num_attention_heads);
+        k_cache_ = Tensor::create({max_kv_len_, Hkv * Dh}, exec.data_type,
+                                  exec.device_type, exec.device_id);
+        v_cache_ = Tensor::create({max_kv_len_, Hkv * Dh}, exec.data_type,
+                                  exec.device_type, exec.device_id);
+        page_table_dev_ = Tensor::create({1}, ZEDINFER_DTYPE_I32,
+                                         exec.device_type, exec.device_id);
+        const int32_t zero = 0;
+        api->memcpy_sync(page_table_dev_->data(), &zero, sizeof(int32_t),
+                         ZEDINFER_MEMCPY_H2D);
+        LOGI.printf("[MTPModule] allocated K/V cache: %zu positions x %zu kv_dim (bf16)",
+                    max_kv_len_, Hkv * Dh);
+    }
+    if (static_cast<size_t>(past_seq_len_) >= max_kv_len_) {
+        throw std::runtime_error("[MTPModule] K/V cache full: past_seq_len_="
+                                 + std::to_string(past_seq_len_)
+                                 + " max=" + std::to_string(max_kv_len_));
+    }
+    auto attn_out = mtp_attention_decode(h_in, q_proj_, k_proj_, v_proj_,
+                                         o_proj_, q_norm_, k_norm_,
+                                         k_cache_, v_cache_, page_table_dev_,
+                                         past_seq_len_, static_cast<int>(max_kv_len_),
+                                         main_cfg_, exec);
+    past_seq_len_ += 1;
 
     // 7. Residual after attention.
     auto h1 = make({1, H});
