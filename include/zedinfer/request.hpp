@@ -134,6 +134,28 @@ private:
     tensor_t image_embeds_;
     tensor_t pos_ids_thw_;
     bool     has_images_ = false;
+
+public:
+    // ----- Qwen3.5 MTP (Stage D) per-request K/V state -----
+    // The MTP head has its own attention layer with its own K/V cache.
+    // Storing the cache here (rather than as static state inside MTPModule)
+    // lets concurrent requests run MTP in parallel without trampling each
+    // other. Layout: [max_kv_len, num_kv_heads * head_dim] bf16 contiguous,
+    // accessed via the "single huge page" trick (block_size=max_kv_len,
+    // page_table=[0]) so the existing paged-attention kernel works as-is.
+    // Buffers stay allocated for the lifetime of the request; only the
+    // logical past_seq_len resets between conversation turns.
+    tensor_t mtp_k_cache;
+    tensor_t mtp_v_cache;
+    tensor_t mtp_page_table_dev;       // [1] int32 = {0}
+    int      mtp_past_seq_len = 0;     // committed K/V positions in cache
+
+    // Stage D.1 speculative-decode pending draft. After each main forward
+    // the engine asks MTP for the t+2 prediction; we stash it here so the
+    // NEXT scheduled step can feed [last_token, mtp_pending_draft] to main
+    // as a 2-token verify batch. -1 = no draft pending (regular 1-token
+    // decode this step).
+    int      mtp_pending_draft = -1;
 };
 
 } // namespace zedinfer

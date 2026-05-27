@@ -174,7 +174,8 @@ MTPModule::MTPModule(const Qwen3_5MoEConfig& main_cfg, ModelWeights& weights, co
 
 MTPModule::~MTPModule() = default;
 
-tensor_t MTPModule::prefill(tensor_t hidden_main_seq,
+tensor_t MTPModule::prefill(InferenceRequest& req,
+                            tensor_t hidden_main_seq,
                             const std::vector<int>& next_tokens,
                             tensor_t embed_tokens_w, tensor_t lm_head_w,
                             const ExecutorConfig& exec) const {
@@ -190,14 +191,14 @@ tensor_t MTPModule::prefill(tensor_t hidden_main_seq,
                                  + std::to_string(next_tokens.size())
                                  + " does not match P=" + std::to_string(P));
     }
-    // Loop forward() per position. Each call advances past_seq_len_ by 1.
-    // Intermediate logits are discarded; only the final (P-1) prediction
-    // gets returned. Sequential — fine for correctness validation. Stage
-    // D will batch this into a single attention call with seqlen_q = P.
+    // Loop forward() per position. Each call advances req.mtp_past_seq_len
+    // by 1. Intermediate logits are discarded; only the final (P-1)
+    // prediction is returned. Sequential — Stage E will batch this into
+    // a single attention call with seqlen_q = P.
     tensor_t last_logits;
     for (size_t i = 0; i < P; ++i) {
         auto row = hidden_main_seq->slice(0, i, i + 1);
-        last_logits = forward(row, next_tokens[i], embed_tokens_w, lm_head_w, exec);
+        last_logits = forward(req, row, next_tokens[i], embed_tokens_w, lm_head_w, exec);
     }
     return last_logits;
 }
@@ -403,7 +404,30 @@ tensor_t mtp_moe_one_token(tensor_t h_post,
 
 } // namespace
 
-tensor_t MTPModule::forward(tensor_t hidden_at_t, int next_token_id,
+// Public helper — lazily allocates request's MTP buffers, resets past.
+void mtp_reset_request_state(InferenceRequest& req,
+                             size_t max_kv_len,
+                             size_t num_kv_heads, size_t head_dim,
+                             const ExecutorConfig& exec) {
+    const size_t kv_dim = num_kv_heads * head_dim;
+    if (!req.mtp_k_cache) {
+        req.mtp_k_cache = Tensor::create({max_kv_len, kv_dim}, exec.data_type,
+                                         exec.device_type, exec.device_id);
+        req.mtp_v_cache = Tensor::create({max_kv_len, kv_dim}, exec.data_type,
+                                         exec.device_type, exec.device_id);
+        req.mtp_page_table_dev = Tensor::create({1}, ZEDINFER_DTYPE_I32,
+                                                exec.device_type, exec.device_id);
+        const int32_t zero = 0;
+        auto* api = device::getRuntimeAPI(exec.device_type);
+        api->memcpy_sync(req.mtp_page_table_dev->data(), &zero, sizeof(int32_t),
+                         ZEDINFER_MEMCPY_H2D);
+    }
+    req.mtp_past_seq_len    = 0;
+    req.mtp_pending_draft   = -1;
+}
+
+tensor_t MTPModule::forward(InferenceRequest& req,
+                            tensor_t hidden_at_t, int next_token_id,
                             tensor_t embed_tokens_w, tensor_t lm_head_w,
                             const ExecutorConfig& exec) const {
     if (!ready_) {
@@ -460,36 +484,31 @@ tensor_t MTPModule::forward(tensor_t hidden_at_t, int next_token_id,
     ops::rms_norm(h_in, h_in_raw, in_layernorm_, main_cfg_.rms_norm_eps,
                   /*add_one_to_weight=*/true);
 
-    // 6. Attention with growing K/V cache. Lazy-allocate the cache + the
-    //    1-element page_table on the first call. Single-tenant: caller must
-    //    invoke reset_kv_cache() between requests.
-    if (!k_cache_) {
+    // 6. Attention with this request's K/V cache. Caller must have
+    //    invoked mtp_reset_request_state(req, ...) once when admitting
+    //    the request; that lazily allocates req.mtp_k_cache / v_cache
+    //    and zeros req.mtp_past_seq_len.
+    if (!req.mtp_k_cache) {
         const size_t Hkv = main_cfg_.num_key_value_heads;
         const size_t Dh  = main_cfg_.head_dim > 0 ? main_cfg_.head_dim
                                                   : (main_cfg_.hidden_size / main_cfg_.num_attention_heads);
-        k_cache_ = Tensor::create({max_kv_len_, Hkv * Dh}, exec.data_type,
-                                  exec.device_type, exec.device_id);
-        v_cache_ = Tensor::create({max_kv_len_, Hkv * Dh}, exec.data_type,
-                                  exec.device_type, exec.device_id);
-        page_table_dev_ = Tensor::create({1}, ZEDINFER_DTYPE_I32,
-                                         exec.device_type, exec.device_id);
-        const int32_t zero = 0;
-        api->memcpy_sync(page_table_dev_->data(), &zero, sizeof(int32_t),
-                         ZEDINFER_MEMCPY_H2D);
-        LOGI.printf("[MTPModule] allocated K/V cache: %zu positions x %zu kv_dim (bf16)",
+        mtp_reset_request_state(req, max_kv_len_, Hkv, Dh, exec);
+        LOGI.printf("[MTPModule] lazy-init request MTP K/V cache: %zu x %zu bf16",
                     max_kv_len_, Hkv * Dh);
     }
-    if (static_cast<size_t>(past_seq_len_) >= max_kv_len_) {
-        throw std::runtime_error("[MTPModule] K/V cache full: past_seq_len_="
-                                 + std::to_string(past_seq_len_)
-                                 + " max=" + std::to_string(max_kv_len_));
+    if (static_cast<size_t>(req.mtp_past_seq_len) >= max_kv_len_) {
+        throw std::runtime_error("[MTPModule] req.mtp_past_seq_len="
+                                 + std::to_string(req.mtp_past_seq_len)
+                                 + " >= max=" + std::to_string(max_kv_len_));
     }
     auto attn_out = mtp_attention_decode(h_in, q_proj_, k_proj_, v_proj_,
                                          o_proj_, q_norm_, k_norm_,
-                                         k_cache_, v_cache_, page_table_dev_,
-                                         past_seq_len_, static_cast<int>(max_kv_len_),
+                                         req.mtp_k_cache, req.mtp_v_cache,
+                                         req.mtp_page_table_dev,
+                                         req.mtp_past_seq_len,
+                                         static_cast<int>(max_kv_len_),
                                          main_cfg_, exec);
-    past_seq_len_ += 1;
+    req.mtp_past_seq_len += 1;
 
     // 7. Residual after attention.
     auto h1 = make({1, H});

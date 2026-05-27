@@ -171,7 +171,16 @@ bool ServingLoop::step() {
                 // accumulate context as decode progresses. Multi-request
                 // concurrent decode is Stage D — needs per-Request K/V state.
                 if (!batch.prefill_requests.empty()) {
-                    moe_model->mtp_module()->reset_kv_cache();
+                    // Lazily allocate + reset MTP K/V state on this request.
+                    // Stage D.0: state is per-request now, not module-global.
+                    const auto& mcfg = moe_model->moe_config();
+                    const size_t Hkv = mcfg.num_key_value_heads;
+                    const size_t Dh  = mcfg.head_dim > 0 ? mcfg.head_dim
+                                                         : (mcfg.hidden_size / mcfg.num_attention_heads);
+                    model::mtp_reset_request_state(*batch.prefill_requests[0],
+                                                   moe_model->mtp_module()->max_kv_len(),
+                                                   Hkv, Dh,
+                                                   engine_->exec_config());
                 }
             }
             logits = model::hybrid_transformer_forward(hcfg, ctx, *req, engine_->exec_config(), scratch,
@@ -240,12 +249,12 @@ bool ServingLoop::step() {
                             // last slot = the token sampler just picked
                             next_tokens.push_back(req->last_token);
                             mtp_logits = mtp_owner->mtp_module()->prefill(
-                                mtp_hidden_last, next_tokens, embed_w, lmhead_w,
+                                *req, mtp_hidden_last, next_tokens, embed_w, lmhead_w,
                                 engine_->exec_config());
                         } else {
                             auto last_row = mtp_hidden_last->slice(0, N - 1, N);
                             mtp_logits = mtp_owner->mtp_module()->forward(
-                                last_row, req->last_token, embed_w, lmhead_w,
+                                *req, last_row, req->last_token, embed_w, lmhead_w,
                                 engine_->exec_config());
                         }
 

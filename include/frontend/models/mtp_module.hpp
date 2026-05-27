@@ -5,6 +5,7 @@
 #include "frontend/models/expert_weights.hpp"
 #include "frontend/models/qwen3_5_config.hpp"
 #include "zedinfer/activation.hpp"   // ExecutorConfig (struct definition)
+#include "zedinfer/request.hpp"      // InferenceRequest (mtp_k_cache, etc.)
 
 #include <memory>
 #include <vector>
@@ -42,18 +43,13 @@ public:
     MTPModule(const MTPModule&) = delete;
     MTPModule& operator=(const MTPModule&) = delete;
 
-    // Stage C.1: single-token decode forward WITH an internal K/V cache.
-    //
-    // Each call advances MTP's K/V cache by 1 position. The first call
-    // after reset_kv_cache() sees past=0 (empty cache, attention
-    // degenerate to self-attention), and each subsequent call sees
-    // past++ positions of context. Quality climbs as the cache fills.
-    //
-    // Stage C.2 will add a multi-token batched variant that lets us
-    // ALSO fill the cache across the prompt during main prefill,
-    // closing the "first decode sees empty cache" gap.
+    // Stage D.0: single-token decode forward — KV state lives on the
+    // request, so concurrent requests run independently. The first call
+    // for a request (mtp_past_seq_len == 0) sees no past context; later
+    // calls accumulate as past_seq_len grows by 1 per call.
     //
     // Args:
+    //   req:               request holding MTP K/V state (mutated)
     //   hidden_at_t:       [1, hidden_size] — main's PRE-final-norm residual
     //   next_token_id:     id sampled by main at position t+1
     //   embed_tokens_w:    main embed_tokens.weight [vocab, hidden] — reused
@@ -61,12 +57,13 @@ public:
     //   exec:              compute device + dtype
     //
     // Returns: logits [1, vocab] — model's guess for token t+2.
-    // Throws if !ready() OR if the cache is full (past >= max_kv_len_).
-    tensor_t forward(tensor_t hidden_at_t, int next_token_id,
+    // Throws if !ready() OR if the request's cache is full (past >= max_kv_len_).
+    tensor_t forward(InferenceRequest& req,
+                     tensor_t hidden_at_t, int next_token_id,
                      tensor_t embed_tokens_w, tensor_t lm_head_w,
                      const ExecutorConfig& exec) const;
 
-    // Stage C.2: prefill MTP K/V across the prompt.
+    // Stage C.2 / D.0: prefill MTP K/V across the prompt for this request.
     //
     // After main prefill of a P-token prompt, the caller gives us:
     //   hidden_main_seq: [P, hidden] — main's residuals at positions 0..P-1
@@ -74,24 +71,21 @@ public:
     //                    position i+1 (i.e. prompt[i+1] for i in 0..P-2,
     //                    and main's just-sampled t_P for i=P-1).
     //
-    // We loop the per-position forward P times so each call advances the
-    // internal K/V cache by 1. Sequential — Stage D will batch this into
-    // a single attention call with seqlen_q=P (~10x faster on the prompt).
+    // Loops forward() per position; each call advances req.mtp_past_seq_len
+    // by 1. Sequential — Stage E will batch this into a single attention
+    // call with seqlen_q=P (~10x faster on the prompt).
     //
     // Returns the LAST-position logits [1, vocab], i.e. MTP's prediction
-    // for token t_{P+1}. Intermediate logits are computed and discarded.
-    tensor_t prefill(tensor_t hidden_main_seq,
+    // for token t_{P+1}.
+    tensor_t prefill(InferenceRequest& req,
+                     tensor_t hidden_main_seq,
                      const std::vector<int>& next_tokens,
                      tensor_t embed_tokens_w, tensor_t lm_head_w,
                      const ExecutorConfig& exec) const;
 
-    // Reset the internal K/V cache before processing a new request.
-    // (Stage C.1 single-tenant design — Stage D will move cache into
-    // per-Request state to support multi-request concurrent decode.)
-    void reset_kv_cache() const { past_seq_len_ = 0; }
-
-    // Current cached sequence length (debug / spec-decode accept-rate logging).
-    int past_seq_len() const { return past_seq_len_; }
+    // Stage D max KV length per request (default matches Stage C.1's
+    // single-tenant fixed buffer). Callers can override at engine init.
+    size_t max_kv_len() const { return max_kv_len_; }
 
     // True iff a full MTP weight set was found at ctor time. False for
     // models that don't ship MTP (e.g. Qwen3 base, DeepSeek-R1 distill).
@@ -136,16 +130,22 @@ private:
     // Final RMSNorm before lm_head, mtp.norm.weight.
     tensor_t final_norm_;            // [hidden]
 
-    // ----- Stage C.1: internal MTP K/V cache (single-tenant) -----
-    // Logical layout: [max_kv_len_, num_kv_heads, head_dim] bf16, contiguous.
-    // Treated as a single paged block (block_size = max_kv_len_,
-    // page_table = [0]) so the existing ops::attention kernel works as-is.
+    // ----- Stage D.0: MTP K/V cache is now per-Request -----
+    // Buffers live on InferenceRequest (req.mtp_k_cache / mtp_v_cache /
+    // mtp_page_table_dev / mtp_past_seq_len). MTPModule itself only holds
+    // weights + the cache size. This makes concurrent multi-request decode
+    // safe — no shared mutable state to trample.
     static constexpr size_t kDefaultMaxKvLen_ = 4096;
-    size_t           max_kv_len_      = kDefaultMaxKvLen_;
-    mutable tensor_t k_cache_;        // allocated lazily on first forward
-    mutable tensor_t v_cache_;
-    mutable tensor_t page_table_dev_; // [1] int32 = {0}, allocated once
-    mutable int      past_seq_len_ = 0;
+    size_t                  max_kv_len_      = kDefaultMaxKvLen_;
 };
+
+// Helper: lazily allocate a request's MTP K/V buffers + reset past_seq_len.
+// Idempotent — calling on an already-initialised request just zeros the
+// past counter (buffer reuse). Public so serving_loop can call it before
+// each turn / at request admission.
+void mtp_reset_request_state(InferenceRequest& req,
+                             size_t max_kv_len,
+                             size_t num_kv_heads, size_t head_dim,
+                             const ExecutorConfig& exec);
 
 } // namespace zedinfer::model
