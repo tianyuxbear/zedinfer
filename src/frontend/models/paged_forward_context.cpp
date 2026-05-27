@@ -721,16 +721,36 @@ void PagedForwardContext::build_flashinfer_kv_write_cache() {
 
 void PagedForwardContext::attend_decode_single(int layer, tensor_t q_rope, tensor_t attn,
                                                const ops::AttentionConfig& cfg, size_t nhead, size_t head_dim) {
-    auto* dt = slots_[0].block_table;
+    // Locate the (sole) decode slot and pick up its num_tokens.
+    const Slot* decode_slot = nullptr;
     for (const auto& slot : slots_) {
-        if (slot.is_decode) {
-            dt = slot.block_table;
-            break;
-        }
+        if (slot.is_decode) { decode_slot = &slot; break; }
+    }
+    if (!decode_slot) return;
+    auto* dt = decode_slot->block_table;
+    const int n_q = decode_slot->num_tokens;  // 1 normally, 2 for spec-decode verify
+
+    auto decode_q = q_rope->slice(0, cached_decode_start_, cached_decode_start_ + n_q);
+    auto decode_out = attn->slice(0, cached_decode_start_, cached_decode_start_ + n_q);
+
+    // For n_q > 1 (spec-decode verify) we treat this as a small prefill so
+    // the causal mask is applied correctly across the N new positions over
+    // the past+N KV. Same paged page_table; only the params layout changes.
+    if (n_q > 1) {
+        auto page_bt_gpu = upload_to_gpu(dt->pages[layer], cfg.device_type, cfg.device_id);
+        ops::AttentionParams params{cfg};
+        params.out = decode_out;
+        params.q   = decode_q;
+        params.k_pool_base = pool_.k_pool_base();
+        params.v_pool_base = pool_.v_pool_base();
+        params.page_table  = page_bt_gpu ? reinterpret_cast<const int*>(page_bt_gpu->data())
+                                          : dt->pages[layer].data();
+        params.seqlen_q = n_q;
+        params.past_len = decode_slot->past_len;
+        ops::attention(params);
+        return;
     }
 
-    auto decode_q = q_rope->slice(0, cached_decode_start_, cached_decode_start_ + 1);
-    auto decode_out = attn->slice(0, cached_decode_start_, cached_decode_start_ + 1);
     const bool use_flashinfer = supports_flashinfer(cfg) && !flashinfer_decode_layer_cache_.empty();
 
     ops::AttentionParams params{cfg};

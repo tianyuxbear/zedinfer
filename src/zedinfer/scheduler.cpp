@@ -307,34 +307,108 @@ void Scheduler::process_results(ScheduledBatch& batch, tensor_t logits, sampler:
         if (req->cancelled && req->cancelled->load()) {
             LOGI << "[Scheduler] Request " << req->request_id << " cancelled";
             complete_request(*req);
-            offset++;
+            // Skip the row(s) this req contributed.
+            offset += (req->mtp_pending_draft >= 0) ? 2 : 1;
             continue;
         }
 
-        // Pass [offset : offset+1] to sampler — single row, no double-slice issue.
-        // Hand the generated history (req->output_ids) to the sampler so the
-        // repetition penalty in GeneralSampler can demote already-seen tokens
-        // and prevent the model from collapsing into a "Wait, the user is
-        // asking ..." attractor during long generations.
-        auto req_logits = logits->slice(0, offset, offset + 1);
-        int token = sampler.sample(req_logits, &req->output_ids);
-        token = apply_think_budget(req, token);
+        // Stage D.1 spec-decode verify path: if a draft is pending, the
+        // forward was 2-token [last_token, draft] so we have logits at
+        // offset+0 (main's guess given last_token) and offset+1 (main's
+        // guess given draft, only valid if draft is accepted).
+        const bool is_spec = (req->mtp_pending_draft >= 0);
+        const int  draft   = req->mtp_pending_draft;
+        // Always clear the pending slot for the next iteration; serving_loop
+        // will refill it with a new draft after MTP runs.
+        req->mtp_pending_draft = -1;
 
-        if (const char* env = std::getenv("ZEDINFER_DUMP_TOKEN_IDS"); env && env[0] == '1') {
-            fprintf(stderr, "[zedinfer-tok] step=%d id=%d\n", req->generated_count, token);
+        if (is_spec) {
+            // logits[0] -> main's prediction for the position last_token was at.
+            // If argmax matches the draft, the draft was right; we ALSO accept
+            // the t+2 sample (from logits[1]). Otherwise reject — emit only
+            // main's corrected token and let next step overwrite the dirty
+            // K/V slot we just wrote with the wrong input.
+            auto row0 = logits->slice(0, offset,     offset + 1);
+            int  t0   = sampler.sample(row0, &req->output_ids);
+            t0 = apply_think_budget(req, t0);
+
+            if (t0 == draft) {
+                // ACCEPT: commit draft + sample next from logits[1].
+                auto row1 = logits->slice(0, offset + 1, offset + 2);
+                int  t1   = sampler.sample(row1, &req->output_ids);
+                // think-budget on the second emitted token too.
+                t1 = apply_think_budget(req, t1);
+
+                if (const char* env = std::getenv("ZEDINFER_DUMP_TOKEN_IDS"); env && env[0] == '1') {
+                    fprintf(stderr, "[zedinfer-tok] step=%d id=%d (spec-accept)\n",
+                            req->generated_count, t0);
+                    fprintf(stderr, "[zedinfer-tok] step=%d id=%d (spec-accept+1)\n",
+                            req->generated_count + 1, t1);
+                }
+
+                req->output_ids.push_back(t0);
+                req->output_ids.push_back(t1);
+                req->last_token = t1;
+                req->generated_count   += 2;
+                req->block_table().seq_len += 2;
+                req->mtp_accept_count  += 1;
+                req->mtp_last_n_committed = 2;
+
+                if (is_stop_token(t0, stop_token_ids) || is_stop_token(t1, stop_token_ids)
+                    || req->generated_count >= req->config.max_new_tokens) {
+                    complete_request(*req);
+                } else if (req->config.stream && req->stream_callback) {
+                    req->stream_callback(tokenizer.decode({t0, t1}));
+                }
+            } else {
+                // REJECT: emit only the corrected token. Position N+1 was
+                // written with the wrong input — its K/V is dirty, but the
+                // NEXT decode step is a 1-token forward at position N+1,
+                // which overwrites the dirty slot before any attention read
+                // reaches it.
+                if (const char* env = std::getenv("ZEDINFER_DUMP_TOKEN_IDS"); env && env[0] == '1') {
+                    fprintf(stderr, "[zedinfer-tok] step=%d id=%d (spec-reject draft=%d)\n",
+                            req->generated_count, t0, draft);
+                }
+
+                req->output_ids.push_back(t0);
+                req->last_token = t0;
+                req->generated_count++;
+                req->block_table().seq_len += 1;
+                req->mtp_reject_count += 1;
+                req->mtp_last_n_committed = 1;
+
+                if (is_stop_token(t0, stop_token_ids)
+                    || req->generated_count >= req->config.max_new_tokens) {
+                    complete_request(*req);
+                } else if (req->config.stream && req->stream_callback) {
+                    req->stream_callback(tokenizer.decode({t0}));
+                }
+            }
+            offset += 2;
+        } else {
+            // Normal 1-token decode (no draft pending OR spec disabled).
+            auto req_logits = logits->slice(0, offset, offset + 1);
+            int  token = sampler.sample(req_logits, &req->output_ids);
+            token = apply_think_budget(req, token);
+
+            if (const char* env = std::getenv("ZEDINFER_DUMP_TOKEN_IDS"); env && env[0] == '1') {
+                fprintf(stderr, "[zedinfer-tok] step=%d id=%d\n", req->generated_count, token);
+            }
+
+            req->output_ids.push_back(token);
+            req->last_token = token;
+            req->generated_count++;
+            req->block_table().seq_len++;
+            req->mtp_last_n_committed = 1;
+
+            if (is_stop_token(token, stop_token_ids) || req->generated_count >= req->config.max_new_tokens) {
+                complete_request(*req);
+            } else if (req->config.stream && req->stream_callback) {
+                req->stream_callback(tokenizer.decode({token}));
+            }
+            offset++;
         }
-
-        req->output_ids.push_back(token);
-        req->last_token = token;
-        req->generated_count++;
-        req->block_table().seq_len++;
-
-        if (is_stop_token(token, stop_token_ids) || req->generated_count >= req->config.max_new_tokens) {
-            complete_request(*req);
-        } else if (req->config.stream && req->stream_callback) {
-            req->stream_callback(tokenizer.decode({token}));
-        }
-        offset++;
     }
 
     // Process prefill results

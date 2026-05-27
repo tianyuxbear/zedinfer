@@ -3,7 +3,13 @@
 namespace zedinfer {
 
 int ScheduledBatch::total_tokens() const {
-    int total = static_cast<int>(decode_requests.size()); // 1 token per decode
+    int total = 0;
+    for (auto* req : decode_requests) {
+        // Spec-decode (Stage D.1): if MTP gave us a draft for the next
+        // position, this decode req contributes 2 tokens [last_token, draft]
+        // so main can verify both in a single forward.
+        total += (req->mtp_pending_draft >= 0) ? 2 : 1;
+    }
     for (int cs : prefill_chunk_sizes) { total += cs; }
     return total;
 }
@@ -19,25 +25,33 @@ BatchContext ScheduledBatch::build_context() const {
     // Decode slots first (decode-first policy)
     ctx.decode_token_offset = 0;
     for (auto* req : decode_requests) {
-        // Each decode request contributes 1 token (last_token)
+        const bool spec = (req->mtp_pending_draft >= 0);
+        const int  n    = spec ? 2 : 1;
+
+        // Normal decode: 1 token. Spec verify: 2 tokens [last_token, draft] so
+        // main can validate the MTP-proposed t+2 in the same forward.
         ctx.token_ids.push_back(req->last_token);
-        ctx.position_ids.push_back(req->block_table().seq_len); // position = current kv length
+        ctx.position_ids.push_back(req->block_table().seq_len);
+        if (spec) {
+            ctx.token_ids.push_back(req->mtp_pending_draft);
+            ctx.position_ids.push_back(req->block_table().seq_len + 1);
+        }
 
         BatchContext::Slot slot;
         slot.request = req;
         slot.token_offset = offset;
-        slot.num_tokens = 1;
+        slot.num_tokens = n;
         slot.past_len = req->block_table().seq_len;
         slot.is_prefill = false;
         ctx.slots.push_back(slot);
 
-        // Block tables for decode attention
-        // Use layer 0's block table as representative — kernel receives per-layer tables
-        // during the actual forward. Here we store the full block table pointer.
+        // Block tables for decode attention. seq_len here is the kv-cache
+        // length the attention kernel reads (past + the n positions we're
+        // about to write).
         ctx.decode_page_tables.push_back(req->block_table().pages[0].data());
-        ctx.decode_seq_lens.push_back(req->block_table().seq_len + 1); // past + current token
+        ctx.decode_seq_lens.push_back(req->block_table().seq_len + n);
 
-        offset++;
+        offset += n;
     }
 
     // Prefill slots after decode

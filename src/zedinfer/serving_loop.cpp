@@ -139,8 +139,10 @@ bool ServingLoop::step() {
         // M1 smoke assumes one request per batch — pick whichever phase is
         // present. Multi-request batched hybrid is M5 territory.
         tensor_t logits;
-        tensor_t mtp_hidden_last;  // captured iff ZEDINFER_MTP_DEBUG=1, see below
+        tensor_t mtp_hidden_last;  // captured iff MTP active (see below)
         const model::Qwen3_5MoeModel* mtp_owner = nullptr;
+        const bool mtp_spec_env  = std::getenv("ZEDINFER_MTP_SPEC")  != nullptr;
+        const bool mtp_debug_env = std::getenv("ZEDINFER_MTP_DEBUG") != nullptr;
         if (auto* hybrid_model = dynamic_cast<const model::Qwen3_5Model*>(&engine_->model())) {
             InferenceRequest* req = !batch.decode_requests.empty()
                                        ? batch.decode_requests[0]
@@ -154,22 +156,19 @@ bool ServingLoop::step() {
             const auto* moe_model = dynamic_cast<const model::Qwen3_5MoeModel*>(hybrid_model);
             model::HybridForwardConfig hcfg = moe_model ? moe_model->hybrid_forward_config_moe()
                                                           : hybrid_model->hybrid_forward_config();
-            // MTP smoke: capture main's pre-final-norm residual when the env
-            // knob is set AND this model ships an MTP head. Caller (just
-            // below the sampler) will invoke MTPModule::forward(hidden_last,
-            // sampled_token) and log the speculative next-next-token. Pure
-            // observability — no effect on the live generation path.
-            const bool mtp_debug_env = std::getenv("ZEDINFER_MTP_DEBUG") != nullptr;
+            // Stage D.1 speculative decoding gate. ZEDINFER_MTP_SPEC=1 turns
+            // on the full proposal+verify path: main captures hidden_last,
+            // MTPModule runs after each step to set req.mtp_pending_draft,
+            // and the NEXT scheduled step submits 2 tokens [last, draft] so
+            // main can verify in a single forward. ZEDINFER_MTP_DEBUG keeps
+            // working as a no-op observer (just logs draft vs main argmax).
+            const bool mtp_active    = (mtp_spec_env || mtp_debug_env)
+                                       && moe_model && moe_model->mtp_module()
+                                       && moe_model->mtp_module()->ready();
             tensor_t* hidden_out_ptr = nullptr;
-            if (mtp_debug_env && moe_model && moe_model->mtp_module()
-                && moe_model->mtp_module()->ready()) {
+            if (mtp_active) {
                 hidden_out_ptr = &mtp_hidden_last;
                 mtp_owner      = moe_model;
-                // Single-tenant Stage C.1 design: clear MTP K/V at the start
-                // of every prefill step so a new request gets a fresh cache.
-                // Continuous decode steps DON'T reset, letting MTP attention
-                // accumulate context as decode progresses. Multi-request
-                // concurrent decode is Stage D — needs per-Request K/V state.
                 if (!batch.prefill_requests.empty()) {
                     // Lazily allocate + reset MTP K/V state on this request.
                     // Stage D.0: state is per-request now, not module-global.
@@ -212,19 +211,27 @@ bool ServingLoop::step() {
 
         scheduler_.process_results(batch, logits, engine_->sampler(), engine_->tokenizer(), engine_->stop_token_ids());
 
-        // MTP smoke (Stage B.1): if main captured hidden_last for us, invoke
-        // MTPModule::forward(last-pos hidden, main's just-sampled token) and
-        // log MTP's top-1 next-next-token guess. Observability only — does
-        // not change the live decode trajectory. Gated on ZEDINFER_MTP_DEBUG
-        // (set in the upstream `hidden_out_ptr` branch) so the hot path
-        // pays nothing in normal serving.
-        if (mtp_hidden_last && mtp_owner) {
+        // Stage D.1 MTP integration: after scheduler picks tokens for this
+        // step, advance MTP's K/V cache and produce the next draft. Gated
+        // on mtp_active (ZEDINFER_MTP_SPEC or _DEBUG + a ready MTP head).
+        //
+        // Three cases:
+        //   - Prefill (P-token hidden, just-sampled t_P): run MTPModule::prefill
+        //     across positions 0..P-1. The final logit gives the next draft.
+        //   - Decode with mtp_last_n_committed=1: 1 main step, 1 MTP forward.
+        //   - Decode with mtp_last_n_committed=2 (spec ACCEPT): 2 MTP forwards
+        //     covering the two committed positions; last logit -> next draft.
+        // Spec REJECT also yields n_committed=1, but the second row of
+        // mtp_hidden_last was computed against a poisoned K/V slot and must
+        // not be fed to MTP — we just use row 0 (clean).
+        const bool mtp_active = (mtp_spec_env || mtp_debug_env) && mtp_owner;
+        if (mtp_active && mtp_hidden_last) {
             try {
                 InferenceRequest* req = !batch.decode_requests.empty()
                                            ? batch.decode_requests[0]
                                            : (!batch.prefill_requests.empty() ? batch.prefill_requests[0]
                                                                               : nullptr);
-                if (req) {
+                if (req && req->phase != RequestPhase::COMPLETE) {
                     const auto& w = mtp_owner->weights();
                     auto embed_w  = w.has_tensor("embed_tokens.weight")
                                         ? w.get_tensor("embed_tokens.weight") : nullptr;
@@ -233,32 +240,38 @@ bool ServingLoop::step() {
                     if (embed_w && lmhead_w) {
                         const size_t N = mtp_hidden_last->shape()[0];
                         tensor_t mtp_logits;
-                        if (N > 1) {
-                            // Stage C.2 prefill path: feed all P positions of
-                            // main's residual through MTP, with the "next
-                            // tokens" series being prompt[1..P-1] then the
-                            // just-sampled token (= main's t_P). This fills
-                            // MTP's K/V cache so subsequent decode steps have
-                            // proper context — closes the 0% -> ~50%+ accept
-                            // rate gap Stage C.1 was bounded by.
+                        if (!batch.prefill_requests.empty()) {
+                            // Prefill: cover all P prompt positions through MTP.
                             std::vector<int> next_tokens;
                             next_tokens.reserve(N);
                             for (size_t i = 1; i < req->input_ids.size() && next_tokens.size() < N - 1; ++i) {
                                 next_tokens.push_back(req->input_ids[i]);
                             }
-                            // last slot = the token sampler just picked
                             next_tokens.push_back(req->last_token);
                             mtp_logits = mtp_owner->mtp_module()->prefill(
                                 *req, mtp_hidden_last, next_tokens, embed_w, lmhead_w,
                                 engine_->exec_config());
                         } else {
-                            auto last_row = mtp_hidden_last->slice(0, N - 1, N);
-                            mtp_logits = mtp_owner->mtp_module()->forward(
-                                *req, last_row, req->last_token, embed_w, lmhead_w,
-                                engine_->exec_config());
+                            // Decode: advance MTP by mtp_last_n_committed positions.
+                            // For each committed slot k:
+                            //   hidden_row_k = mtp_hidden_last[k]   (row 0 always clean,
+                            //                                        row 1 only used on
+                            //                                        spec accept)
+                            //   token_k      = the k-th most-recently-emitted token,
+                            //                  i.e. output_ids[end - n_committed + k]
+                            const int n = std::max(1, req->mtp_last_n_committed);
+                            const size_t end = req->output_ids.size();
+                            for (int k = 0; k < n; ++k) {
+                                auto hrow = mtp_hidden_last->slice(0, k, k + 1);
+                                int  tok  = req->output_ids[end - n + k];
+                                mtp_logits = mtp_owner->mtp_module()->forward(
+                                    *req, hrow, tok, embed_w, lmhead_w,
+                                    engine_->exec_config());
+                            }
                         }
 
-                        // Top-1 via ops::argmax (small extra D2H copy).
+                        // Top-1 via ops::argmax; store as next draft so the
+                        // NEXT scheduled step builds a 2-token verify batch.
                         const size_t vocab = mtp_logits->shape()[1];
                         auto last_view = mtp_logits->view({vocab});
                         auto idx_dev = Tensor::create({1}, ZEDINFER_DTYPE_I64,
@@ -272,12 +285,22 @@ bool ServingLoop::step() {
                         auto* api = device::getRuntimeAPI(engine_->exec_config().device_type);
                         api->memcpy_sync(&mtp_top1, idx_dev->data(), sizeof(int64_t),
                                          ZEDINFER_MEMCPY_D2H);
-                        fprintf(stderr, "[MTP-debug] main_token=%d  mtp_top1=%lld\n",
-                                req->last_token, (long long)mtp_top1);
+                        if (mtp_spec_env) {
+                            req->mtp_pending_draft = static_cast<int>(mtp_top1);
+                        }
+                        if (mtp_debug_env) {
+                            fprintf(stderr, "[MTP-debug] main_token=%d  mtp_top1=%lld\n",
+                                    req->last_token, (long long)mtp_top1);
+                        }
                     }
                 }
+                if (req) {
+                    // Consume the per-step flag so a future iteration doesn't
+                    // accidentally pick a stale n.
+                    req->mtp_last_n_committed = 0;
+                }
             } catch (const std::exception& e) {
-                LOGW << "[ServingLoop] MTP-debug branch raised: " << e.what();
+                LOGW << "[ServingLoop] MTP branch raised: " << e.what();
             }
         }
     } catch (const std::exception& e) {

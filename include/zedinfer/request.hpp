@@ -156,6 +156,18 @@ public:
     // as a 2-token verify batch. -1 = no draft pending (regular 1-token
     // decode this step).
     int      mtp_pending_draft = -1;
+
+    // Stage D.1 spec-decode counters (per request, lifetime of the request).
+    // Useful for logging the accept rate observed during actual generation,
+    // distinct from the off-line measurements done during Stage C tuning.
+    int      mtp_accept_count = 0;
+    int      mtp_reject_count = 0;
+
+    // Number of tokens committed by the most recent scheduler step. Set by
+    // Scheduler::process_results so serving_loop knows how many MTP forwards
+    // to run to advance MTP's K/V cache. 1 for normal decode + reject, 2 on
+    // spec accept. Reset to 0 after consumption.
+    int      mtp_last_n_committed = 0;
 };
 
 } // namespace zedinfer
