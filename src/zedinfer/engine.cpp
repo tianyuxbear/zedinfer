@@ -41,6 +41,14 @@ namespace {
 std::shared_ptr<sampler::Sampler> create_sampler_from_generation_config(const std::string& model_path,
                                                                        const ExecutorConfig& exec_config) {
     namespace fs = std::filesystem;
+    // Debug override: if ZEDINFER_FORCE_ARGMAX is set, ignore generation_config
+    // and use deterministic greedy sampling. Useful for reproducible debugging
+    // of forward-path correctness without sampler RNG noise.
+    if (const char* force_argmax = std::getenv("ZEDINFER_FORCE_ARGMAX");
+        force_argmax != nullptr && *force_argmax != '\0' && std::string(force_argmax) != "0") {
+        LOGI << "[Sampler] ZEDINFER_FORCE_ARGMAX set; using ARGMAX regardless of generation_config.json";
+        return sampler::createSampler(exec_config, sampler::SamplerType::ARGMAX);
+    }
     fs::path gen_cfg_path = fs::path(model_path) / "generation_config.json";
     if (!fs::exists(gen_cfg_path)) {
         LOGI << "[Sampler] No generation_config.json at " << gen_cfg_path.string()
@@ -62,16 +70,35 @@ std::shared_ptr<sampler::Sampler> create_sampler_from_generation_config(const st
         params.temperature = j.value("temperature", params.temperature);
         params.top_k = j.value("top_k", params.top_k);
         params.top_p = j.value("top_p", params.top_p);
-        // Repetition penalty: honor the value from generation_config.json if present;
-        // otherwise apply a mild default of 1.1. Without this default, long
-        // generations under the Qwen recommended params (temp=1.0, top_k=20,
-        // top_p=0.95) collapse into degenerate "Wait, the user is asking ..." loops
-        // when the per-step distribution becomes peaked enough that top_p selects a
-        // single token. HF transformers also defaults repetition_penalty=1.0 (off),
-        // but their generation_config files for reasoning-quality runs typically
-        // specify a value; we pick 1.1 as a conservative middle ground that prevents
-        // collapse without hurting fluency.
-        params.repetition_penalty = j.value("repetition_penalty", 1.1f);
+        // Repetition penalty: honor generation_config.json if specified, else
+        // default to 1.0 (off) to match HF transformers and vLLM. A previous
+        // version defaulted to 1.1 to suppress "Wait, the user is asking ..."
+        // attractor loops in long open-<think> generation, but 1.1 is too
+        // aggressive for arithmetic / code prompts: it demotes already-emitted
+        // tokens that the answer LEGITIMATELY needs to repeat (digits like
+        // "2", operators "+"/"=" in math; identifiers/keywords in code). The
+        // first-token sample is unaffected (output_ids is empty), but step 2+
+        // pulls the nucleus off the correct continuation, so a "What is 2+2?"
+        // prompt would non-deterministically answer "2 and 3 is 5" or
+        // "2+4=10" instead of "2+2=4". The thinking-loop drift is now
+        // addressed by Scheduler::max_think_tokens force-emit, which doesn't
+        // perturb non-thinking sampling.
+        params.repetition_penalty = j.value("repetition_penalty", 1.0f);
+        // Debug override: ZEDINFER_REPETITION_PENALTY=<float> bypasses the
+        // generation_config value entirely. Useful when validating whether
+        // the default 1.1 (introduced to suppress thinking-loop attractors)
+        // is interfering with non-reasoning prompts.
+        if (const char* env_rp = std::getenv("ZEDINFER_REPETITION_PENALTY");
+            env_rp != nullptr && *env_rp != '\0') {
+            try {
+                params.repetition_penalty = std::stof(env_rp);
+                LOGI.printf("[Sampler] ZEDINFER_REPETITION_PENALTY=%.3f overriding generation_config",
+                            params.repetition_penalty);
+            } catch (const std::exception& e) {
+                LOGW << "[Sampler] ZEDINFER_REPETITION_PENALTY parse failed: " << e.what()
+                     << "; using generation_config value " << params.repetition_penalty;
+            }
+        }
         // generation_config rarely sets a fixed seed; honor it if present, else 0
         // (createSampler will seed from std::random_device).
         params.seed = j.value("seed", 0u);
@@ -199,6 +226,25 @@ std::shared_ptr<InferenceEngine> InferenceEngine::create(const std::string& mode
         std::move(model), std::move(tokenizer), std::move(sampler), device, exec_config, std::move(chat_template)));
 
     engine->build_stop_token_ids();
+
+    // Resolve <think>/</think> token ids from the tokenizer once at engine
+    // init. Reasoning models in the Qwen3.5 family carry these as special
+    // tokens (248068 / 248069); models that do not have them get -1 here and
+    // the scheduler's force-emit-</think> path becomes a no-op.
+    engine->think_open_token_id_ = engine->tokenizer_->get_special_token_id("<think>");
+    engine->think_close_token_id_ = engine->tokenizer_->get_special_token_id("</think>");
+    // Resolve "\n\n" token id for the post-</think> separator. The BPE
+    // tokenizer encodes "\n\n" as a single token (id 271 for Qwen3.5's
+    // vocab); if for some reason it splits, take the first id. We need this
+    // so the scheduler can mirror the natural </think>\n\n pattern from the
+    // training chat_template after force-closing thinking.
+    {
+        auto nl_ids = engine->tokenizer_->encode("\n\n");
+        engine->double_newline_token_id_ = nl_ids.empty() ? -1 : nl_ids.back();
+    }
+    LOGI << "[Engine] Think tokens: <think>=" << engine->think_open_token_id_
+         << " </think>=" << engine->think_close_token_id_
+         << " \\n\\n=" << engine->double_newline_token_id_;
 
     engine->model_name_ = model_name;
     engine->scheduler_config_ = sched_config;

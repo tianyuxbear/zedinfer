@@ -15,6 +15,10 @@ void GenerationConfig::validate() const {
         throw std::invalid_argument("max_new_tokens must be positive");
     }
 
+    if (max_think_tokens < 0) {
+        throw std::invalid_argument("max_think_tokens must be non-negative (0 disables the budget)");
+    }
+
     if (stream && !stream_callback) {
         throw std::invalid_argument("stream_callback required when stream=true");
     }
@@ -25,6 +29,8 @@ std::string GenerationConfig::info() const {
     oss << "\n=== GenerationConfig: ===\n"
         << "  Mode: " << (gen_mode == GenerationMode::CHAT ? "CHAT" : "PING") << "\n"
         << "  Max tokens: " << max_new_tokens << "\n"
+        << "  Enable thinking: " << std::boolalpha << enable_thinking << "\n"
+        << "  Max think tokens: " << max_think_tokens << "\n"
         << "  Stream: " << std::boolalpha << stream << "\n"
         << "  Verbose: " << std::boolalpha << verbose;
     return oss.str();

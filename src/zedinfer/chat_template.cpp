@@ -57,23 +57,35 @@ ChatTemplate ChatTemplate::default_qwen_chatml() {
 }
 
 ChatTemplate ChatTemplate::default_qwen3_5_chatml() {
-    // Match Qwen3.5's chat_template.jinja default: enable_thinking=true emits
-    // `<|im_start|>assistant\n<think>\n`, so the model produces a reasoning
-    // chain followed by the answer. This is the format Qwen3.5 was trained on
-    // for the assistant turn — closing the think block early
-    // (`<think>\n\n</think>\n\n`) drops the model into a less-trained branch
-    // that hallucinates a fake `user:` prefix or otherwise drifts.
+    // Qwen3.5's chat_template.jinja exposes two assistant-prompt variants:
     //
-    // The long-generation degeneration that previously appeared inside open
-    // <think> blocks (the model collapsing into "Wait, the user is asking ..."
-    // loops after ~80 tokens) is now suppressed by the repetition_penalty=1.1
-    // default applied in GeneralSampler. The penalty demotes already-emitted
-    // tokens enough to keep the nucleus diverse even when the per-step
-    // distribution becomes peaked, so the model stays out of the degenerate
-    // attractor and the reasoning chain completes normally.
+    //   enable_thinking=true  (jinja default):  "<|im_start|>assistant\n<think>\n"
+    //                          → model produces a reasoning chain then the answer.
+    //   enable_thinking=false:                  "<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    //                          → empty think block, model emits a direct answer.
+    //
+    // Both variants are stored here; GenerationConfig::enable_thinking picks at
+    // request time. We diverge from HF's jinja default by defaulting
+    // enable_thinking=false (see GenerationConfig::enable_thinking): on
+    // Qwen3.5-GPTQ-Int4 the empty-thinking-start state at the end of the
+    // open-<think> prefill is a fragile region of the model — the decoder
+    // hallucinates the prompt content for the first ~30 tokens of thinking
+    // (e.g. "What is 2+2?" reasoned as "the prompt actually says 2+4"). The
+    // closed-<think> prefill skips that region entirely. Pre-filling some
+    // thinking content (e.g. "<think>\nLet me think.") recovers coherent
+    // thinking but is workload-specific; for general use closed-<think> is
+    // the safe default. Higher-precision weight sets (bf16/fp16) likely
+    // tolerate the empty start cleanly — re-evaluate when bringing those up.
+    //
+    // See docs/debug/qwen3_5_sampler_and_thinking_drift.md for the full
+    // investigation (verified token-by-token against HF apply_chat_template;
+    // tested ARGMAX/sampling, GDN parallelization revert, prompt-suffix
+    // sweep — none of which localize a zedinfer-side cause).
     ChatTemplate t = default_qwen_chatml();
     t.generation_prompt = "<|im_start|>assistant\n<think>\n";
     t.output_prefix = "<think>\n";
+    t.generation_prompt_no_think = "<|im_start|>assistant\n<think>\n\n</think>\n\n";
+    t.output_prefix_no_think = "";
     return t;
 }
 
@@ -128,7 +140,9 @@ ChatTemplate ChatTemplate::load(const std::string& model_path, const std::string
             t.assistant_prefix = j.value("assistant_prefix", "");
             t.assistant_suffix = j.value("assistant_suffix", "");
             t.generation_prompt = j.value("generation_prompt", "");
+            t.generation_prompt_no_think = j.value("generation_prompt_no_think", "");
             t.output_prefix = j.value("output_prefix", "");
+            t.output_prefix_no_think = j.value("output_prefix_no_think", "");
             t.add_bos_first_turn_only = j.value("add_bos_first_turn_only", true);
             t.system_prefix = j.value("system_prefix", "");
             t.system_suffix = j.value("system_suffix", "");

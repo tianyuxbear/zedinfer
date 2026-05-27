@@ -58,6 +58,16 @@ InferenceSession::~InferenceSession() {
 }
 
 std::string InferenceSession::chat(const std::string& user_input) {
+    // Pick the open/closed-think variant of the assistant turn prompt. Falls
+    // back to the open-think prompt for templates without a closed-think
+    // variant (e.g., DeepSeek-R1, dense Qwen).
+    const bool use_no_think
+        = !config_.enable_thinking && !template_.generation_prompt_no_think.empty();
+    const std::string& gen_prompt
+        = use_no_think ? template_.generation_prompt_no_think : template_.generation_prompt;
+    const std::string& out_prefix
+        = use_no_think ? template_.output_prefix_no_think : template_.output_prefix;
+
     std::string input;
 
     if (is_first_turn_) {
@@ -66,18 +76,18 @@ std::string InferenceSession::chat(const std::string& user_input) {
     }
 
     input += template_.user_prefix + user_input + template_.user_suffix;
-    input += template_.generation_prompt;
+    input += gen_prompt;
 
     chat_history_.push_back({"user", user_input});
 
-    if (!template_.output_prefix.empty() && config_.stream && config_.stream_callback) {
-        config_.stream_callback(template_.output_prefix);
+    if (!out_prefix.empty() && config_.stream && config_.stream_callback) {
+        config_.stream_callback(out_prefix);
     }
 
     // Generate using block table directly (no KVCache object needed)
     std::string raw_output = engine_->serving_loop().generate(block_table_, input, config_);
 
-    std::string output = template_.output_prefix + clean_output(raw_output, template_);
+    std::string output = out_prefix + clean_output(raw_output, template_);
 
     chat_history_.push_back({"assistant", raw_output});
 
@@ -87,12 +97,17 @@ std::string InferenceSession::chat(const std::string& user_input) {
 }
 
 std::string InferenceSession::prepare_prompt(const std::string& user_input) {
+    const bool use_no_think
+        = !config_.enable_thinking && !template_.generation_prompt_no_think.empty();
+    const std::string& gen_prompt
+        = use_no_think ? template_.generation_prompt_no_think : template_.generation_prompt;
+
     std::string input;
     if (is_first_turn_) {
         input += template_.bos_token;
     }
     input += template_.user_prefix + user_input + template_.user_suffix;
-    input += template_.generation_prompt;
+    input += gen_prompt;
     return input;
 }
 

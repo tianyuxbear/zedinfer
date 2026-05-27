@@ -84,6 +84,18 @@ public:
     const ExecutorConfig& exec_config() const { return exec_config_; }
     const ChatTemplate& chat_template() const { return chat_template_; }
     const std::vector<int>& stop_token_ids() const { return stop_token_ids_; }
+
+    // Token ids for the reasoning <think>/</think> markers used by Qwen3.5.
+    // Engine resolves these from the tokenizer at init; return -1 when the
+    // model does not have these as special tokens (in which case the
+    // scheduler's force-emit-</think> path is a no-op).
+    int think_open_token_id() const { return think_open_token_id_; }
+    int think_close_token_id() const { return think_close_token_id_; }
+    // Token id for the "\n\n" double-newline used to separate </think> from
+    // the answer in Qwen3.5's chat_template. Engine resolves it from the
+    // tokenizer at init (BPE: token "ĊĊ" = 271 for the Qwen3.5 vocab);
+    // return -1 if the tokenizer does not have it as a single token.
+    int double_newline_token_id() const { return double_newline_token_id_; }
     kvcache::BlockPool* block_pool() { return block_pool_.get(); }
     kvcache::BlockAllocator* block_allocator() { return block_allocator_.get(); }
     kvcache::PrefixCache* prefix_cache() { return prefix_cache_.get(); }
@@ -109,6 +121,9 @@ private:
     ExecutorConfig exec_config_;
     ChatTemplate chat_template_;
     std::vector<int> stop_token_ids_;
+    int think_open_token_id_ = -1;
+    int think_close_token_id_ = -1;
+    int double_newline_token_id_ = -1;
     SchedulerConfig scheduler_config_;
     std::string model_name_;
     std::unique_ptr<kvcache::BlockPool> block_pool_;

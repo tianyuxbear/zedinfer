@@ -37,6 +37,18 @@ int main(int argc, char* argv[]) {
         .default_value(512)
         .scan<'i', int>();
 
+    program.add_argument("--thinking")
+        .help("Enable the reasoning <think> block (Qwen3.5). Off by default because the "
+              "open-<think> branch is fragile on GPTQ-Int4 weights and produces hallucinated "
+              "prompt content. Opt in if the weights handle empty-thinking-start cleanly.")
+        .default_value(false)
+        .implicit_value(true);
+
+    program.add_argument("--max-think-tokens")
+        .help("Force </think> after this many tokens inside an open <think> block (0 = disabled)")
+        .default_value(128)
+        .scan<'i', int>();
+
     program.add_argument("--stream")
         .help("Stream tokens to stdout as they are generated")
         .default_value(false)
@@ -87,6 +99,8 @@ int main(int argc, char* argv[]) {
     GenerationConfig gen_config;
     gen_config.gen_mode = GenerationMode::PING;
     gen_config.max_new_tokens = program.get<int>("--max-new-tokens");
+    gen_config.enable_thinking = program.get<bool>("--thinking");
+    gen_config.max_think_tokens = program.get<int>("--max-think-tokens");
     gen_config.verbose = true;
     gen_config.print_stats = true;
     if (program.get<bool>("--stream")) {

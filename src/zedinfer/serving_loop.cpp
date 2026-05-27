@@ -27,6 +27,13 @@ ServingLoop::ServingLoop(InferenceEngine& engine, SchedulerConfig sched_config)
     if (auto* pool = engine_->ssm_state_pool()) {
         scheduler_.set_ssm_state_pool(pool);
     }
+    // Pass <think> / </think> ids (Qwen3.5 family) so the scheduler can drive
+    // the per-request thinking-budget force-emit. Returns -1 for models without
+    // these special tokens, in which case the scheduler treats the budget as
+    // disabled. The "\n\n" id (resolved via tokenizer.encode) anchors the
+    // post-</think> state after a force-close.
+    scheduler_.set_think_token_ids(engine_->think_open_token_id(), engine_->think_close_token_id(),
+                                   engine_->double_newline_token_id());
 }
 
 // ============================================================================

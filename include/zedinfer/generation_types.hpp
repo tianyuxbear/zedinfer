@@ -21,6 +21,29 @@ struct GenerationConfig {
     int max_new_tokens = 512;
     GenerationMode gen_mode = GenerationMode::PING;
 
+    // For reasoning models (Qwen3.5 family) with a closed-think variant in
+    // their chat template: enable_thinking=true uses generation_prompt (the
+    // open-<think> form), enable_thinking=false uses generation_prompt_no_think
+    // (closed-<think> empty block, direct-answer branch). Falls back to
+    // generation_prompt if no closed-think variant exists.
+    //
+    // Default `false`: on Qwen3.5-GPTQ-Int4 the open-<think> branch hits a
+    // fragile region of the model where the prefill state after `<think>\n`
+    // (empty thinking start) causes the decoder to hallucinate the prompt
+    // content for the first ~30 tokens of thinking. Closed-think skips that
+    // region entirely and produces a clean direct answer. Higher-precision
+    // weight sets (bf16/fp16) likely escape the fragility and may benefit
+    // from enable_thinking=true; opt in explicitly when you trust the
+    // weights to handle empty-thinking-start cleanly.
+    bool enable_thinking = false;
+
+    // Maximum tokens allowed inside an open <think>...</think> block before
+    // the scheduler force-emits </think> to escape long-generation drift seen
+    // on GPTQ-Int4 reasoning models. 0 disables the budget (model is free to
+    // emit </think> whenever it wants). Only meaningful when enable_thinking
+    // is true and the model emits explicit <think>/</think> tokens.
+    int max_think_tokens = 128;
+
     // Streaming output
     bool stream = false;
     std::function<void(const std::string&)> stream_callback = nullptr;

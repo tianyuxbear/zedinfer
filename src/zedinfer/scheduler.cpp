@@ -103,6 +103,33 @@ void Scheduler::set_ssm_state_pool(model::SSMStatePool* pool) {
     ssm_state_pool_ = pool;
 }
 
+void Scheduler::set_think_token_ids(int open_id, int close_id, int double_newline_id) {
+    think_open_token_id_ = open_id;
+    think_close_token_id_ = close_id;
+    double_newline_token_id_ = double_newline_id;
+}
+
+namespace {
+
+// Count occurrences of a particular token id in a list. Used to decide whether
+// the prompt's last <think> is still open at generation start by comparing the
+// number of <think> opens to </think> closes; if opens > closes, we're inside
+// an unclosed thinking block.
+int count_token(const std::vector<int>& ids, int target_id) {
+    if (target_id < 0) {
+        return 0;
+    }
+    int n = 0;
+    for (int id : ids) {
+        if (id == target_id) {
+            ++n;
+        }
+    }
+    return n;
+}
+
+} // namespace
+
 // ============================================================================
 // Batched Scheduling
 // ============================================================================
@@ -222,6 +249,56 @@ void Scheduler::process_results(ScheduledBatch& batch, tensor_t logits, sampler:
                                 tokenizer::Tokenizer& tokenizer, const std::vector<int>& stop_token_ids) {
     int offset = 0;
 
+    // Inline helper: apply the "force-emit </think>" budget to a freshly
+    // sampled token, then update the request's thinking state. Centralized so
+    // both prefill (first generated token) and decode (subsequent tokens)
+    // paths share the exact same logic.
+    //
+    // Rules:
+    //   - If a post-think newline force-emit is pending (post_think_forced_newlines > 0),
+    //     replace the sampled token with "\n\n" so the model sees the trained
+    //     "</think>\n\n" pattern instead of continuing its truncated reasoning.
+    //   - Else if we are currently in thinking AND the per-request budget is
+    //     set AND we've used it up AND the model did NOT itself emit </think>,
+    //     replace the sampled token with </think> and schedule a "\n\n"
+    //     force-emit on the next step.
+    //   - If the token (sampled or forced) is </think>, leave thinking.
+    //   - Otherwise, if we are still in thinking, increment the budget counter.
+    auto apply_think_budget = [this](InferenceRequest* req, int token) -> int {
+        // Highest priority: drain the post-</think> newline budget. Carries the
+        // model from "just force-closed thinking" back to a normal sampling
+        // state by reproducing the trained </think>\n\n separator pattern.
+        if (req->post_think_forced_newlines > 0) {
+            if (double_newline_token_id_ >= 0) {
+                token = double_newline_token_id_;
+            }
+            req->post_think_forced_newlines--;
+            return token;
+        }
+
+        if (!req->in_thinking) {
+            return token;
+        }
+        const int budget = req->config.max_think_tokens;
+        if (budget > 0 && req->think_token_count >= budget && token != think_close_token_id_
+            && think_close_token_id_ >= 0) {
+            LOGI << "[Scheduler] Request " << req->request_id << " force-emit </think> after "
+                 << req->think_token_count << " think tokens (budget=" << budget << ")";
+            token = think_close_token_id_;
+            // Queue the trailing "\n\n" force-emit so the model exits the
+            // truncated-thinking attractor. Skip if we don't have a newline id.
+            if (double_newline_token_id_ >= 0) {
+                req->post_think_forced_newlines = 1;
+            }
+        }
+        if (token == think_close_token_id_) {
+            req->in_thinking = false;
+        } else {
+            req->think_token_count++;
+        }
+        return token;
+    };
+
     // Process decode results
     for (auto* req : batch.decode_requests) {
         // Check cancellation (client disconnected)
@@ -239,6 +316,7 @@ void Scheduler::process_results(ScheduledBatch& batch, tensor_t logits, sampler:
         // asking ..." attractor during long generations.
         auto req_logits = logits->slice(0, offset, offset + 1);
         int token = sampler.sample(req_logits, &req->output_ids);
+        token = apply_think_budget(req, token);
 
         req->output_ids.push_back(token);
         req->last_token = token;
@@ -263,6 +341,18 @@ void Scheduler::process_results(ScheduledBatch& batch, tensor_t logits, sampler:
         if (req->phase == RequestPhase::DECODE || req->prefill_progress >= static_cast<int>(req->input_ids.size())) {
             req->phase = RequestPhase::DECODE;
 
+            // Initialize per-request thinking state from the prompt. For Qwen3.5
+            // the open-think generation_prompt ends with <think>, so input_ids
+            // will contain one more <think> than </think> and we enter decode
+            // already inside an unclosed thinking block. For closed-think /
+            // non-reasoning models, opens == closes and in_thinking stays false.
+            if (think_open_token_id_ >= 0 && think_close_token_id_ >= 0) {
+                int opens = count_token(req->input_ids, think_open_token_id_);
+                int closes = count_token(req->input_ids, think_close_token_id_);
+                req->in_thinking = opens > closes;
+                req->think_token_count = 0;
+            }
+
             // Insert full blocks into prefix cache after prefill completes
             if (prefix_cache_ && block_allocator_) {
                 prefix_cache_->insert_blocks(req->input_ids, block_allocator_->block_size(), req->block_table());
@@ -271,6 +361,7 @@ void Scheduler::process_results(ScheduledBatch& batch, tensor_t logits, sampler:
             auto req_logits = logits->slice(0, offset, offset + chunk);
             // First sampled token of a request: no generated history yet.
             int token = sampler.sample(req_logits, &req->output_ids);
+            token = apply_think_budget(req, token);
 
             req->output_ids.push_back(token);
             req->last_token = token;

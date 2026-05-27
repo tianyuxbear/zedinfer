@@ -50,6 +50,25 @@ struct InferenceRequest {
 
     std::vector<int> output_ids;
 
+    // Reasoning-model thinking-block state (Qwen3.5 family). Tracks whether
+    // the request is currently inside an open <think>...</think> block and
+    // how many tokens have been generated since the last <think> was seen.
+    // Scheduler updates these on every sampled token; engine resolves the
+    // think_open_id / think_close_id token ids from the tokenizer at init
+    // and passes them to Scheduler::process_results. Non-reasoning models
+    // never enter a thinking state, so these fields stay at defaults.
+    bool in_thinking = false;
+    int  think_token_count = 0;
+
+    // After scheduler force-emits </think>, the model's natural follow-up is
+    // "\n\n" before the answer (see Qwen3.5's chat_template.jinja). When we
+    // truncate thinking mid-token the model often continues the truncated
+    // reasoning instead, dragging the drift into the answer. To anchor the
+    // post-think state, the scheduler force-emits this many "\n\n" tokens
+    // immediately after </think>, mirroring the trained pattern. Counter
+    // decrements per step; reaches 0 → free-running again.
+    int post_think_forced_newlines = 0;
+
     // Stream callback forwarded from GenerationConfig at request construction
     std::function<void(const std::string&)> stream_callback;
 

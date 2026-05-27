@@ -68,6 +68,20 @@ public:
     // Pass nullptr (the default) for non-hybrid models.
     void set_ssm_state_pool(model::SSMStatePool* pool);
 
+    // Register the reasoning model's <think> / </think> token ids so the
+    // scheduler can (a) initialize per-request in_thinking state by scanning
+    // the prompt and (b) force-emit </think> after GenerationConfig::
+    // max_think_tokens tokens to escape long-generation drift on GPTQ-Int4
+    // weights. Pass -1 for models that do not have these as special tokens
+    // (the force-emit path becomes a no-op).
+    //
+    // `double_newline_id` is the tokenizer id for "\n\n". After the scheduler
+    // force-emits </think>, it also force-emits one "\n\n" to recreate the
+    // </think>\n\n pattern the model was trained on, anchoring the post-
+    // thinking state so it can transition to the answer instead of
+    // continuing the truncated reasoning. Pass -1 to skip the newline.
+    void set_think_token_ids(int open_id, int close_id, int double_newline_id = -1);
+
     /**
      * Submit a new request. Thread-safe (can be called from HTTP threads).
      */
@@ -99,6 +113,9 @@ private:
     kvcache::BlockAllocator* block_allocator_ = nullptr;
     kvcache::PrefixCache* prefix_cache_ = nullptr;
     model::SSMStatePool* ssm_state_pool_ = nullptr;
+    int think_open_token_id_ = -1;
+    int think_close_token_id_ = -1;
+    int double_newline_token_id_ = -1;
     std::mutex submit_mutex_;
 
     std::deque<std::unique_ptr<InferenceRequest>> waiting_queue_;
