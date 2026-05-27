@@ -56,6 +56,26 @@ ChatTemplate ChatTemplate::default_qwen_chatml() {
     return t;
 }
 
+ChatTemplate ChatTemplate::default_qwen3_chatml() {
+    // Qwen3 / Qwen3-MoE chat_template.jinja (tokenizer_config.json) emits
+    // exactly the same ChatML envelope as plain Qwen, but the
+    // add_generation_prompt block has an `enable_thinking` branch:
+    //
+    //   enable_thinking=true  (jinja default):  "<|im_start|>assistant\n"
+    //                          → model emits its own `<think>...</think>` block.
+    //   enable_thinking=false:                  "<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    //                          → empty think block, model emits a direct answer.
+    //
+    // Both variants are stored here so GenerationConfig::enable_thinking can
+    // pick at request time (the same way it does for Qwen3.5). The default
+    // generation_prompt does NOT pre-inject `<think>\n` like Qwen3.5 does —
+    // Qwen3's training emits the open-think tag itself when reasoning is on.
+    ChatTemplate t = default_qwen_chatml();
+    t.generation_prompt_no_think = "<|im_start|>assistant\n<think>\n\n</think>\n\n";
+    t.output_prefix_no_think = "";
+    return t;
+}
+
 ChatTemplate ChatTemplate::default_qwen3_5_chatml() {
     // Qwen3.5's chat_template.jinja exposes two assistant-prompt variants:
     //
@@ -155,12 +175,20 @@ ChatTemplate ChatTemplate::load(const std::string& model_path, const std::string
         }
     }
 
-    // Auto-detect: DeepSeek-R1 distillation vs standard Qwen. Qwen3 MoE uses the same
-    // ChatML conversation format as dense Qwen3, so it routes through the same branch.
+    // Auto-detect: DeepSeek-R1 distillation vs standard Qwen.
     if (model_type == "qwen2" || model_type == "qwen3" || model_type == "qwen3_moe") {
         if (is_deepseek_r1_format(model_path)) {
             LOGI << "[ChatTemplate] Detected DeepSeek-R1 format for model_type=" << model_type;
             return default_deepseek_r1();
+        }
+        // Qwen3 / Qwen3-MoE are reasoning models — they emit `<think>` on
+        // their own under enable_thinking=true and accept the closed-think
+        // `<think>\n\n</think>\n\n` prefill under enable_thinking=false.
+        // Qwen2 is not a reasoning model: stays on the plain ChatML template
+        // (no closed-think prompt — `<think>` is not part of its vocabulary).
+        if (model_type == "qwen3" || model_type == "qwen3_moe") {
+            LOGI << "[ChatTemplate] Using Qwen3 reasoning ChatML template for model_type=" << model_type;
+            return default_qwen3_chatml();
         }
         LOGI << "[ChatTemplate] Using ChatML template for model_type=" << model_type;
         return default_qwen_chatml();

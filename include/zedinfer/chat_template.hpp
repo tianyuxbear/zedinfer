@@ -49,8 +49,16 @@ struct ChatTemplate {
     // Built-in default for DeepSeek-R1 distillation models
     static ChatTemplate default_deepseek_r1();
 
-    // Built-in default for standard Qwen models (ChatML format)
+    // Built-in default for standard Qwen models (ChatML format).
+    // Use for non-reasoning models (Qwen2). No closed-think variant — the
+    // `<think>` token isn't part of the trained vocabulary semantics.
     static ChatTemplate default_qwen_chatml();
+
+    // Built-in default for Qwen3 / Qwen3-MoE (reasoning models that emit
+    // `<think>...</think>` blocks themselves; jinja's enable_thinking=false
+    // injects the empty closed-think block to skip reasoning). Generation
+    // prompt does NOT pre-inject `<think>` — the model emits it.
+    static ChatTemplate default_qwen3_chatml();
 
     // Built-in default for Qwen3.5 (reasoning model: assistant turn must start
     // with `<think>\n`, otherwise the model drifts and hallucinates a fake
