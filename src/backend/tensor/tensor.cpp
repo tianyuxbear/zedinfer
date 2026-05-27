@@ -330,7 +330,12 @@ tensor_t Tensor::slice(size_t dim, size_t start, size_t end) const {
     // Offset = (number of elements skipped along dim) × (stride along dim) × (element size)
     // Note: stride[dim] gives number of elements to skip per step in this dimension.
     // Multiply by dsize to convert to byte offset.
-    const size_t offset_bytes = static_cast<size_t>(_meta.strides[dim]) * start * utils::dsize(_meta.dtype);
+    // Slicing must compose with any pre-existing offset on this tensor
+    // (e.g. after a prior slice or view) — otherwise chained slices land at
+    // the storage origin and silently corrupt the result. The fix is to add
+    // the local slice offset to `_offset` rather than overwrite it.
+    const size_t offset_bytes
+        = _offset + static_cast<size_t>(_meta.strides[dim]) * start * utils::dsize(_meta.dtype);
 
     // Create new tensor metadata sharing the same storage and offset
     TensorMeta new_meta{_meta.dtype, new_shape, _meta.strides};
