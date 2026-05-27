@@ -1,6 +1,7 @@
 #include "frontend/models/qwen3_5_moe.hpp"
 
 #include "frontend/models/expert_weights.hpp"
+#include "frontend/models/mtp_module.hpp"
 
 #include <plog/Log.h>
 
@@ -279,9 +280,18 @@ Qwen3_5MoeModel::Qwen3_5MoeModel(Qwen3_5MoEConfig config, std::unique_ptr<ModelW
                                           static_cast<size_t>(moe_config_.num_experts));
     expert_pool_ = std::make_unique<ExpertPool>(std::move(experts), pool_cfg);
 
-    LOGI.printf("[Qwen3_5MoeModel] constructed: experts=%d top_k=%d shared_expert_size=%d",
+    // Optional MTP head. Constructor probes for mtp.fc.weight and silently
+    // disables itself (ready()==false) when the release doesn't ship MTP.
+    // We have to construct it AFTER the main expert extraction above so the
+    // expert iterator doesn't accidentally pull in mtp.layers.0.mlp.experts.*
+    // (extract_expert_weights only looks at the "layers.{L}." prefix; MTP
+    // tensors live under "mtp.layers.{L}." and are skipped).
+    mtp_ = std::make_unique<MTPModule>(moe_config_, *weights_, exec);
+
+    LOGI.printf("[Qwen3_5MoeModel] constructed: experts=%d top_k=%d shared_expert_size=%d mtp=%s",
                 moe_config_.num_experts, moe_config_.num_experts_per_tok,
-                moe_config_.shared_expert_intermediate_size);
+                moe_config_.shared_expert_intermediate_size,
+                (mtp_ && mtp_->ready()) ? "yes" : "no");
 }
 
 Qwen3_5MoeModel::~Qwen3_5MoeModel() = default;

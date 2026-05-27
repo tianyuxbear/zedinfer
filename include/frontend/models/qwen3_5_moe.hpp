@@ -9,6 +9,8 @@
 
 namespace zedinfer::model {
 
+class MTPModule;
+
 // Qwen3.5 MoE (35B-A3B) skeleton. Inherits the dense Qwen3.5 hybrid attention +
 // SSM pool + optional vision tower from Qwen3_5Model, and adds the per-layer
 // expert pool that v0.2.0's Qwen3MoEModel already established as the unit of
@@ -41,6 +43,13 @@ public:
     ExpertPool& expert_pool() { return *expert_pool_; }
     const ExpertPool& expert_pool() const { return *expert_pool_; }
 
+    // Optional MTP head. Returns nullptr when the release didn't ship MTP
+    // weights (e.g. older Qwen3 base, DeepSeek distill) or when the loader
+    // failed to find the full set. The scheduler probes mtp_module()->ready()
+    // before enabling speculative decoding.
+    const MTPModule* mtp_module() const { return mtp_.get(); }
+    MTPModule*       mtp_module() { return mtp_.get(); }
+
     void log_runtime_stats() const override {
         if (expert_pool_) {
             expert_pool_->log_stats();
@@ -48,8 +57,9 @@ public:
     }
 
 private:
-    Qwen3_5MoEConfig moe_config_;
+    Qwen3_5MoEConfig            moe_config_;
     std::unique_ptr<ExpertPool> expert_pool_;
+    std::unique_ptr<MTPModule>  mtp_;
 };
 
 } // namespace zedinfer::model
