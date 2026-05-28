@@ -166,6 +166,25 @@ static void ensure_router_pinned(size_t bytes) {
 }
 
 // Compute router logits on device, then bring them to host as F32 for top-k selection.
+//
+// NOTE on the GPU topk_softmax kernel (Step 2.0, on this branch):
+//   We have a hand-written GPU kernel (ops::moe::topk_softmax_gpu in
+//   topk_softmax_nvidia.cu) that fuses softmax + top-K into one launch.
+//   Its softmax probabilities are bit-identical to the CPU path, but the
+//   tie-breaking order on rows where multiple experts share the same top-K
+//   probability differs from CPU std::partial_sort's heap-based ordering.
+//
+//   For non-spec generation this is harmless (the model produces equivalent
+//   tokens, just routed through experts in a slightly different order). But
+//   for MTP speculative decoding, the routing inconsistency between main
+//   forward (GPU topk) and MTP forward (CPU topk) feeds into mismatched K/V
+//   accumulation and the output degenerates ("that that that..." pathology).
+//
+//   The proper fix lives in Step 2.1+ (Marlin/CUTLASS grouped GEMM): once
+//   expert dispatch happens entirely on GPU, MTP will consume the same
+//   device-side expert_ids tensor and the two paths will agree by
+//   construction. Until then we keep the CPU topk_softmax path on the
+//   forward and treat the GPU kernel as future infrastructure.
 static ops::moe::TopKResult compute_router_topk(const ModelForwardConfig& model, tensor_t input, int layer_idx,
                                                 tensor_t router_logits_buf, size_t top_k) {
     const size_t N = input->shape()[0];
