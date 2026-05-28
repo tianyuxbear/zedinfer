@@ -332,76 +332,84 @@ tensor_t hybrid_transformer_forward(const HybridForwardConfig& m,
         pos_ids_thw = build_pos_ids_thw_text_only(ctx, exec);
     }
 
+    // Layer loop with FusedAddRMSNorm.
+    //
+    // The Qwen3.5 transformer block is:
+    //   h_in = (1+input_norm) * rms(hidden)               // [A] pre-attn norm
+    //   attn_out = attention(h_in)
+    //   h1 = hidden + attn_out                            // [B] residual after attn
+    //   h_post = (1+post_norm) * rms(h1)                  // [C] pre-mlp norm
+    //   mlp_out = mlp(h_post)
+    //   hidden_next = h1 + mlp_out                        // [D] residual after mlp
+    //   then [A]@next_layer or [E] final_norm at last layer
+    //
+    // Fusion:
+    //   [B]+[C]: `fused_add_rms_norm(attn_out, hidden, post_norm)`
+    //             → hidden becomes hidden + attn_out (the new residual stream)
+    //             → attn_out becomes the normalized h_post (reused as `h_post`)
+    //   [D]+[A]@next: `fused_add_rms_norm(mlp_out, hidden, input_norm_{L+1})`
+    //             → hidden becomes hidden + mlp_out
+    //             → mlp_out becomes h_in for next layer
+    //   For the last layer, [D]+[E]: `fused_add_rms_norm(mlp_out, hidden, final_norm)`
+    //   so the final `rms_norm` after the loop disappears entirely.
+    //
+    // The residual stream lives in-place in `hidden` — no ping-pong needed. The
+    // scratch->h1 / scratch->normed_post / scratch->hidden_out buffers become
+    // unused but are kept allocated (used by the CPU fallback if any). Only the
+    // very first `input_layernorm_0` keeps a standalone `rms_norm` call since
+    // there is no preceding residual add to fuse with.
+
+    auto h_in = use_scratch ? scratch->normed
+                : use_n2_scratch ? n2_view(n2->normed)
+                                 : make({N, hidden_size});
+    // [A] for L=0: standalone, no preceding add.
+    ops::rms_norm(h_in, hidden, m.W(m.prefix(0) + "input_layernorm.weight"), cfg.rms_norm_eps,
+                  /*add_one_to_weight=*/true);
+
     for (size_t L = 0; L < cfg.num_hidden_layers; ++L) {
-        const auto p = m.prefix(L);
-
-        // Pre-attention norm — Qwen3_5MoeRMSNorm uses (1.0 + weight), applied
-        // in fp32 inside the kernel to match HF precision (see ops.hpp).
-        auto h_in = use_scratch ? scratch->normed
-                    : use_n2_scratch ? n2_view(n2->normed)
-                                     : make({N, hidden_size});
-        ops::rms_norm(h_in, hidden, m.W(p + "input_layernorm.weight"), cfg.rms_norm_eps,
-                      /*add_one_to_weight=*/true);
-
-        // Dispatch attention by layer kind
+        // Dispatch attention by layer kind. h_in is the normalized input.
         tensor_t attn_out = m.is_linear_attn_layer(L)
                               ? forward_linear_attn_layer(m, h_in, L, req, exec)
                               : forward_full_attn_layer(m, ctx, h_in, pos_ids_thw, L, exec);
 
-        // Residual after attention
-        auto h1 = use_scratch ? scratch->h1
-                  : use_n2_scratch ? n2_view(n2->h1)
-                                   : make({N, hidden_size});
-        ops::add(h1, hidden, attn_out);
+        // [B]+[C] fused: hidden += attn_out; attn_out := rmsnorm(hidden) * (1 + post_norm).
+        // After the call attn_out aliases what used to be `h_post`.
+        ops::fused_add_rms_norm(attn_out, hidden, m.W(m.prefix(L) + "post_attention_layernorm.weight"),
+                                cfg.rms_norm_eps, /*add_one_to_weight=*/true);
+        tensor_t h_post = attn_out;
 
-        // Post-attention norm — Qwen3_5MoeRMSNorm uses (1.0 + weight).
-        auto h_post = use_scratch ? scratch->normed_post
-                      : use_n2_scratch ? n2_view(n2->normed_post)
-                                       : make({N, hidden_size});
-        ops::rms_norm(h_post, h1, m.W(p + "post_attention_layernorm.weight"), cfg.rms_norm_eps,
-                      /*add_one_to_weight=*/true);
-
-        // Dispatch MLP by sparsity. DecodeScratch is only safe to forward when
-        // it was actually allocated for the MoE shape (router_logits + expert_*
-        // + shared_*); we forward unconditionally because Qwen3_5MoeModel now
-        // returns a MoE-aware ModelForwardConfig from forward_config(), so the
-        // engine-side DecodeScratch::create populated those fields. For pure-
-        // decode N=1 this routes moe_layer_forward into the moe_decode fast
-        // path; for prefill the inner use_scratch guard (N == 1) keeps the
-        // prefill bucket/scatter logic in charge.
+        // Dispatch MLP by sparsity. moe_layer_forward routes to moe_decode (N=1)
+        // or its small-N path (N=2 spec verify) when scratch is provided.
         tensor_t mlp_out = m.is_moe_layer(L)
                               ? forward_moe_mlp(m, h_post, L, exec, scratch)
                               : forward_dense_mlp(m, h_post, L, exec);
 
-        // Residual after MLP — ping-pong between hidden and hidden_out so the
-        // previous layer's input (still aliased by `hidden` above) is not
-        // clobbered until rms_norm has already read it into h_in. For prefill
-        // (non-scratch) just alloc fresh as before.
-        tensor_t next_hidden;
-        if (use_scratch) {
-            next_hidden = (hidden == scratch->hidden ? scratch->hidden_out : scratch->hidden);
-        } else if (use_n2_scratch) {
-            // Compare data pointer to make ping-pong work with sliced views.
-            auto hidden_view  = n2_view(n2->hidden);
-            auto hidden_out_v = n2_view(n2->hidden_out);
-            next_hidden = (hidden->data() == hidden_view->data()) ? hidden_out_v : hidden_view;
-        } else {
-            next_hidden = make({N, hidden_size});
-        }
-        ops::add(next_hidden, h1, mlp_out);
-        hidden = next_hidden;
+        // [D]+next-norm fused. For L < last layer use next layer's input_layernorm;
+        // for the last layer use the model's final norm — collapsing the post-loop
+        // standalone rms_norm into this fused call. After this:
+        //   hidden = residual stream after this layer (input for next layer's add)
+        //   mlp_out = h_in for next layer (or final_normed at the last layer)
+        tensor_t next_norm_w = (L + 1 < cfg.num_hidden_layers)
+                                   ? m.W(m.prefix(L + 1) + "input_layernorm.weight")
+                                   : m.W("norm.weight");
+
+        // MTP head wants a snapshot of the PRE-final-norm residual stream. At the
+        // last layer that snapshot is precisely `hidden` *after* the fused add but
+        // before the norm is applied — but the fused kernel writes the residual
+        // first (the add result) and then reads it to produce the norm output. So
+        // after the fused call, `hidden` is exactly the pre-final-norm residual.
+        // We snapshot it after the fused call (below) when L == last layer.
+        ops::fused_add_rms_norm(mlp_out, hidden, next_norm_w, cfg.rms_norm_eps,
+                                /*add_one_to_weight=*/true);
+        h_in = mlp_out;
     }
 
-    // MTP head consumes the residual stream BEFORE the final norm. Snapshot
-    // it now into a fresh tensor (the live `hidden` buffer is either the
-    // engine-wide scratch ping-pong or about to fall out of scope), so the
-    // caller can hold onto it across the rest of this forward + sampling.
-    // Skipped when hidden_out is null (most callers don't need MTP).
+    // MTP head consumes the residual stream BEFORE the final norm. After the
+    // loop, `hidden` holds residual+all_layers (i.e. pre-final-norm value),
+    // since the last layer's fused call wrote the sum into `hidden` then
+    // normalized into `mlp_out` (now aliased by `h_in`). Async D2D to a snap
+    // buffer so the lm_head below can run concurrently.
     if (hidden_out != nullptr) {
-        // For N=2 spec-verify reuse the N2 scratch snap buffer; otherwise
-        // pay one fresh alloc. The D2D memcpy is async on the compute stream
-        // so it doesn't drain — FIFO with the rms_norm/lm_head below keeps
-        // ordering correct relative to those reads.
         tensor_t snap = use_n2_scratch ? n2_view(n2->hidden_snap)
                                        : make({N, hidden_size});
         auto* api = device::getRuntimeAPI(exec.device_type);
@@ -412,17 +420,12 @@ tensor_t hybrid_transformer_forward(const HybridForwardConfig& m,
         *hidden_out = std::move(snap);
     }
 
-    // Final norm + lm_head projection — Qwen3_5MoeRMSNorm uses (1.0 + weight).
-    auto final_normed = use_scratch ? scratch->final_normed
-                        : use_n2_scratch ? n2_view(n2->final_normed)
-                                         : make({N, hidden_size});
-    ops::rms_norm(final_normed, hidden, m.W("norm.weight"), cfg.rms_norm_eps,
-                  /*add_one_to_weight=*/true);
-
+    // `h_in` is now the final-normalized hidden (formerly `final_normed`), so
+    // skip the standalone final `rms_norm` and go straight to lm_head.
     auto logits = use_scratch ? scratch->logits
                   : use_n2_scratch ? n2_view(n2->logits)
                                    : make({N, cfg.vocab_size});
-    m.dispatch_linear(logits, final_normed, "lm_head", nullptr);
+    m.dispatch_linear(logits, h_in, "lm_head", nullptr);
 
     ctx.finalize();
     return logits;

@@ -23,6 +23,15 @@ void rearrange(tensor_t out, tensor_t in);
 // ~16 generated tokens under greedy decoding.
 void rms_norm(tensor_t out, tensor_t in, tensor_t weight, float eps,
               bool add_one_to_weight = false);
+
+// Fused residual+RMSNorm (in-place, GPU only — CPU path sequences add + rms_norm).
+//   residual := residual + input
+//   input    := residual / rms(residual) * (weight + (add_one_to_weight ? 1.0 : 0.0))
+// Both `input` and `residual` are mutated. Maps to FlashInfer's FusedAddRMSNorm /
+// GemmaFusedAddRMSNorm under the hood; used to fuse the transformer residual-add
+// with the next sublayer's pre-norm (or the model's final norm at the last layer).
+void fused_add_rms_norm(tensor_t input, tensor_t residual, tensor_t weight, float eps,
+                        bool add_one_to_weight = false);
 void rope(tensor_t out, tensor_t in, tensor_t pos_ids, float theta);
 void rope_qk(tensor_t q_out, tensor_t k_out, tensor_t q_in, tensor_t k_in, tensor_t pos_ids, float theta);
 void swiglu(tensor_t out, tensor_t gate, tensor_t up);
