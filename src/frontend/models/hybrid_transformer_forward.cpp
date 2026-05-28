@@ -11,6 +11,7 @@
 #include "utils/types.hpp"
 #include "frontend/models/decode_scratch.hpp"
 #include "frontend/models/moe_forward.hpp"
+#include "backend/core/context/context.hpp"
 #include "frontend/models/paged_forward_context.hpp"
 #include "zedinfer/activation.hpp"
 #include "zedinfer/request.hpp"
@@ -81,6 +82,11 @@ struct FullAttnDecodeScratch {
 
 static thread_local FullAttnDecodeScratch s_fa_scratch;
 
+// Max batch we pre-size the per-layer scratch buffers for. N=1 covers normal
+// decode; N=2 covers Qwen3.5 MTP speculative-decode 2-token verify. Larger N
+// (prefill) falls back to per-call alloc.
+static constexpr size_t kMaxSmallDecodeBatch = 2;
+
 static void ensure_fa_scratch(const ExecutorConfig& exec, size_t Hq, size_t Hkv, size_t Dh, size_t hidden) {
     auto& s = s_fa_scratch;
     if (s.Hq == Hq && s.Hkv == Hkv && s.Dh == Dh && s.hidden == hidden && s.device_type == exec.device_type
@@ -92,14 +98,18 @@ static void ensure_fa_scratch(const ExecutorConfig& exec, size_t Hq, size_t Hkv,
     auto mk = [&](std::vector<size_t> shape) {
         return Tensor::create(std::move(shape), exec.data_type, exec.device_type, exec.device_id);
     };
-    s.q_raw    = mk({1, q_dim});
-    s.gate     = mk({1, q_dim});
-    s.k_raw    = mk({1, kv_dim});
-    s.v        = mk({1, kv_dim});
-    s.q_normed = mk({1, q_dim});
-    s.k_normed = mk({1, kv_dim});
-    s.attn     = mk({1, Hq, Dh});
-    s.out      = mk({1, hidden});
+    // Buffers are sized at kMaxSmallDecodeBatch (=2) along the batch dim so the
+    // same scratch backs both N=1 decode and N=2 MTP spec verify. The use sites
+    // slice the first N rows; slice(0, 0, 1) is a zero-copy contiguous view.
+    const size_t B = kMaxSmallDecodeBatch;
+    s.q_raw    = mk({B, q_dim});
+    s.gate     = mk({B, q_dim});
+    s.k_raw    = mk({B, kv_dim});
+    s.v        = mk({B, kv_dim});
+    s.q_normed = mk({B, q_dim});
+    s.k_normed = mk({B, kv_dim});
+    s.attn     = mk({B, Hq, Dh});
+    s.out      = mk({B, hidden});
     s.Hq = Hq; s.Hkv = Hkv; s.Dh = Dh; s.hidden = hidden;
     s.device_type = exec.device_type;
     s.device_id = exec.device_id;
@@ -118,23 +128,84 @@ static void ensure_la_scratch(const ExecutorConfig& exec, int Hk, int Dk, int Hv
     auto mk = [&](std::vector<size_t> shape) {
         return Tensor::create(std::move(shape), exec.data_type, exec.device_type, exec.device_id);
     };
-    s.qkv      = mk({1, qkv_dim});
-    s.z        = mk({1, Hv_Dv});
-    s.a        = mk({1, static_cast<size_t>(Hv)});
-    s.b        = mk({1, static_cast<size_t>(Hv)});
-    s.qkv_conv = mk({1, qkv_dim});
-    s.q_ssm    = mk({1, Hk_Dk});
-    s.k_ssm    = mk({1, Hk_Dk});
-    s.v_ssm    = mk({1, Hv_Dv});
-    s.y        = mk({1, Hv_Dv});
-    s.y_normed = mk({1, Hv_Dv});
-    s.y_gated  = mk({1, Hv_Dv});
-    s.out      = mk({1, hidden});
+    const size_t B = kMaxSmallDecodeBatch;
+    s.qkv      = mk({B, qkv_dim});
+    s.z        = mk({B, Hv_Dv});
+    s.a        = mk({B, static_cast<size_t>(Hv)});
+    s.b        = mk({B, static_cast<size_t>(Hv)});
+    s.qkv_conv = mk({B, qkv_dim});
+    s.q_ssm    = mk({B, Hk_Dk});
+    s.k_ssm    = mk({B, Hk_Dk});
+    s.v_ssm    = mk({B, Hv_Dv});
+    s.y        = mk({B, Hv_Dv});
+    s.y_normed = mk({B, Hv_Dv});
+    s.y_gated  = mk({B, Hv_Dv});
+    s.out      = mk({B, hidden});
     s.Hk = Hk; s.Dk = Dk; s.Hv = Hv; s.Dv = Dv;
     s.hidden = hidden;
     s.device_type = exec.device_type;
     s.device_id = exec.device_id;
     s.dtype = exec.data_type;
+}
+
+// Helper: slice the first `N` rows of a scratch buffer pre-sized at
+// [kMaxSmallDecodeBatch, ...]. Zero-copy view; safe for ops::linear since the
+// row-major contiguous layout is preserved.
+static inline tensor_t scratch_view(const tensor_t& buf, size_t N) {
+    return (buf->shape()[0] == N) ? buf : buf->slice(0, 0, N);
+}
+
+// Hybrid forward layer-wide N=2 scratch (spec-decode verify). Mirrors the
+// N=1 DecodeScratch fields used by hybrid_transformer_forward's outer loop,
+// at [2, ...] dim. Without this each verify step pays 40 layers × 4 fresh
+// [2, H] allocs = ~20 ms / step under ALL_GPU; this drops it to a one-time
+// alloc on first use.
+struct HybridN2Scratch {
+    tensor_t ids;          // [2] I32
+    tensor_t pos_ids;      // [2] I64
+    tensor_t hidden;       // [2, H]
+    tensor_t hidden_out;   // [2, H]
+    tensor_t normed;       // [2, H]
+    tensor_t h1;           // [2, H]
+    tensor_t normed_post;  // [2, H]
+    tensor_t final_normed; // [2, H]
+    tensor_t logits;       // [2, V]
+    tensor_t hidden_snap;  // [2, H] — MTP residual snapshot
+
+    size_t H = 0;
+    size_t V = 0;
+    zedinferDeviceType_t device_type = ZEDINFER_DEVICE_CPU;
+    int    device_id = -1;
+    zedinferDataType_t dtype = ZEDINFER_DTYPE_F32;
+};
+static thread_local HybridN2Scratch s_hybrid_n2;
+
+static HybridN2Scratch& ensure_hybrid_n2(size_t H, size_t V, const ExecutorConfig& exec) {
+    auto& s = s_hybrid_n2;
+    if (s.hidden && s.H == H && s.V == V && s.device_type == exec.device_type
+        && s.device_id == exec.device_id && s.dtype == exec.data_type) {
+        return s;
+    }
+    auto mk  = [&](std::vector<size_t> shape, zedinferDataType_t t) {
+        return Tensor::create(std::move(shape), t, exec.device_type, exec.device_id);
+    };
+    auto mkf = [&](std::vector<size_t> shape) { return mk(shape, exec.data_type); };
+    const size_t B = kMaxSmallDecodeBatch;
+    s.ids          = mk({B}, ZEDINFER_DTYPE_I32);
+    s.pos_ids      = mk({B}, ZEDINFER_DTYPE_I64);
+    s.hidden       = mkf({B, H});
+    s.hidden_out   = mkf({B, H});
+    s.normed       = mkf({B, H});
+    s.h1           = mkf({B, H});
+    s.normed_post  = mkf({B, H});
+    s.final_normed = mkf({B, H});
+    s.logits       = mkf({B, V});
+    s.hidden_snap  = mkf({B, H});
+    s.H = H; s.V = V;
+    s.device_type = exec.device_type;
+    s.device_id   = exec.device_id;
+    s.dtype       = exec.data_type;
+    return s;
 }
 
 // Forward declarations of the per-layer-kind helpers. Each is implemented in
@@ -213,6 +284,16 @@ tensor_t hybrid_transformer_forward(const HybridForwardConfig& m,
     if (use_scratch && std::getenv("ZEDINFER_DISABLE_SCRATCH") != nullptr) {
         use_scratch = false;
     }
+    // For N=2 (MTP spec-decode verify) use a thread_local persistent N=2
+    // scratch to avoid the same per-layer fresh-alloc storm under ALL_GPU.
+    // Mutually exclusive with use_scratch (which is N=1 only).
+    const bool use_n2_scratch = (!use_scratch && N == 2 && !input_embeds
+                                  && std::getenv("ZEDINFER_DISABLE_SCRATCH") == nullptr);
+    HybridN2Scratch* n2 = nullptr;
+    if (use_n2_scratch) {
+        n2 = &ensure_hybrid_n2(hidden_size, cfg.vocab_size, exec);
+    }
+    auto n2_view = [&](const tensor_t& buf) { return scratch_view(buf, N); };
 
     // Prepare token ids + position ids. For the hybrid path the pos_ids carry
     // (t, h, w) — but the outer loop only consumes them via PagedForwardContext;
@@ -221,6 +302,10 @@ tensor_t hybrid_transformer_forward(const HybridForwardConfig& m,
     if (use_scratch) {
         ids = scratch->ids;
         pos_ids = scratch->pos_ids;
+        ctx.prepare_inputs_into(ids, pos_ids);
+    } else if (use_n2_scratch) {
+        ids = n2_view(n2->ids);
+        pos_ids = n2_view(n2->pos_ids);
         ctx.prepare_inputs_into(ids, pos_ids);
     } else {
         ctx.prepare_inputs(ids, pos_ids, exec);
@@ -233,7 +318,9 @@ tensor_t hybrid_transformer_forward(const HybridForwardConfig& m,
     if (input_embeds) {
         hidden = input_embeds;
     } else {
-        hidden = use_scratch ? scratch->hidden : make({N, hidden_size});
+        hidden = use_scratch ? scratch->hidden
+                : use_n2_scratch ? n2_view(n2->hidden)
+                                 : make({N, hidden_size});
         ops::embedding(hidden, ids, m.W("embed_tokens.weight"));
     }
 
@@ -250,7 +337,9 @@ tensor_t hybrid_transformer_forward(const HybridForwardConfig& m,
 
         // Pre-attention norm — Qwen3_5MoeRMSNorm uses (1.0 + weight), applied
         // in fp32 inside the kernel to match HF precision (see ops.hpp).
-        auto h_in = use_scratch ? scratch->normed : make({N, hidden_size});
+        auto h_in = use_scratch ? scratch->normed
+                    : use_n2_scratch ? n2_view(n2->normed)
+                                     : make({N, hidden_size});
         ops::rms_norm(h_in, hidden, m.W(p + "input_layernorm.weight"), cfg.rms_norm_eps,
                       /*add_one_to_weight=*/true);
 
@@ -260,11 +349,15 @@ tensor_t hybrid_transformer_forward(const HybridForwardConfig& m,
                               : forward_full_attn_layer(m, ctx, h_in, pos_ids_thw, L, exec);
 
         // Residual after attention
-        auto h1 = use_scratch ? scratch->h1 : make({N, hidden_size});
+        auto h1 = use_scratch ? scratch->h1
+                  : use_n2_scratch ? n2_view(n2->h1)
+                                   : make({N, hidden_size});
         ops::add(h1, hidden, attn_out);
 
         // Post-attention norm — Qwen3_5MoeRMSNorm uses (1.0 + weight).
-        auto h_post = use_scratch ? scratch->normed_post : make({N, hidden_size});
+        auto h_post = use_scratch ? scratch->normed_post
+                      : use_n2_scratch ? n2_view(n2->normed_post)
+                                       : make({N, hidden_size});
         ops::rms_norm(h_post, h1, m.W(p + "post_attention_layernorm.weight"), cfg.rms_norm_eps,
                       /*add_one_to_weight=*/true);
 
@@ -280,12 +373,21 @@ tensor_t hybrid_transformer_forward(const HybridForwardConfig& m,
                               ? forward_moe_mlp(m, h_post, L, exec, scratch)
                               : forward_dense_mlp(m, h_post, L, exec);
 
-        // Residual after MLP — ping-pong between scratch->hidden and scratch->hidden_out
-        // so the previous layer's input (still aliased by `hidden` above) is not
-        // clobbered until rms_norm has already read it into h_in. For non-scratch
-        // (prefill) just alloc fresh as before.
-        tensor_t next_hidden = use_scratch ? (hidden == scratch->hidden ? scratch->hidden_out : scratch->hidden)
-                                           : make({N, hidden_size});
+        // Residual after MLP — ping-pong between hidden and hidden_out so the
+        // previous layer's input (still aliased by `hidden` above) is not
+        // clobbered until rms_norm has already read it into h_in. For prefill
+        // (non-scratch) just alloc fresh as before.
+        tensor_t next_hidden;
+        if (use_scratch) {
+            next_hidden = (hidden == scratch->hidden ? scratch->hidden_out : scratch->hidden);
+        } else if (use_n2_scratch) {
+            // Compare data pointer to make ping-pong work with sliced views.
+            auto hidden_view  = n2_view(n2->hidden);
+            auto hidden_out_v = n2_view(n2->hidden_out);
+            next_hidden = (hidden->data() == hidden_view->data()) ? hidden_out_v : hidden_view;
+        } else {
+            next_hidden = make({N, hidden_size});
+        }
         ops::add(next_hidden, h1, mlp_out);
         hidden = next_hidden;
     }
@@ -296,20 +398,30 @@ tensor_t hybrid_transformer_forward(const HybridForwardConfig& m,
     // caller can hold onto it across the rest of this forward + sampling.
     // Skipped when hidden_out is null (most callers don't need MTP).
     if (hidden_out != nullptr) {
-        auto snap = make({N, hidden_size});
+        // For N=2 spec-verify reuse the N2 scratch snap buffer; otherwise
+        // pay one fresh alloc. The D2D memcpy is async on the compute stream
+        // so it doesn't drain — FIFO with the rms_norm/lm_head below keeps
+        // ordering correct relative to those reads.
+        tensor_t snap = use_n2_scratch ? n2_view(n2->hidden_snap)
+                                       : make({N, hidden_size});
         auto* api = device::getRuntimeAPI(exec.device_type);
-        api->memcpy_sync(snap->data(), hidden->data(),
-                         N * hidden_size * utils::dsize(exec.data_type),
-                         ZEDINFER_MEMCPY_D2D);
+        auto compute_stream = core::context().runtime().stream();
+        api->memcpy_async(snap->data(), hidden->data(),
+                          N * hidden_size * utils::dsize(exec.data_type),
+                          ZEDINFER_MEMCPY_D2D, compute_stream);
         *hidden_out = std::move(snap);
     }
 
     // Final norm + lm_head projection — Qwen3_5MoeRMSNorm uses (1.0 + weight).
-    auto final_normed = use_scratch ? scratch->final_normed : make({N, hidden_size});
+    auto final_normed = use_scratch ? scratch->final_normed
+                        : use_n2_scratch ? n2_view(n2->final_normed)
+                                         : make({N, hidden_size});
     ops::rms_norm(final_normed, hidden, m.W("norm.weight"), cfg.rms_norm_eps,
                   /*add_one_to_weight=*/true);
 
-    auto logits = use_scratch ? scratch->logits : make({N, cfg.vocab_size});
+    auto logits = use_scratch ? scratch->logits
+                  : use_n2_scratch ? n2_view(n2->logits)
+                                   : make({N, cfg.vocab_size});
     m.dispatch_linear(logits, final_normed, "lm_head", nullptr);
 
     ctx.finalize();
@@ -348,20 +460,24 @@ static tensor_t forward_linear_attn_layer(const HybridForwardConfig& m, tensor_t
         return Tensor::create(std::move(shape), exec.data_type, exec.device_type, exec.device_id);
     };
 
-    // For N=1 decode reuse the thread_local persistent scratch (12 buffers
-    // sized to this model's linear-attn shape). For prefill (N > 1) fall back
-    // to per-call alloc — those tensors scale with N and aren't shared.
-    const bool use_la_scratch = (N == 1);
+    // For N ∈ {1, 2} reuse the thread_local persistent scratch (12 buffers
+    // sized at kMaxSmallDecodeBatch=2 along the batch dim). For prefill (N > 2)
+    // fall back to per-call alloc. The buffers are dimensioned for N=2 so a
+    // slice(0, 0, N) call returns a zero-copy contiguous view of the first N
+    // rows, valid for both N=1 decode and N=2 MTP spec-decode verify.
+    const bool use_la_scratch = (N <= kMaxSmallDecodeBatch);
     if (use_la_scratch) {
         ensure_la_scratch(exec, Hk, Dk, Hv, Dv, m.config.hidden_size);
     }
 
+    auto la_view = [&](const tensor_t& buf) { return scratch_view(buf, N); };
+
     // 1. Four input projections (all BF16; linear_attn is excluded from quantization
     //    per Qwen3.5 dynamic rules).
-    auto qkv = use_la_scratch ? s_la_scratch.qkv : make({N, qkv_dim});
-    auto z   = use_la_scratch ? s_la_scratch.z   : make({N, Hv_Dv});
-    auto a   = use_la_scratch ? s_la_scratch.a   : make({N, static_cast<size_t>(Hv)});
-    auto b   = use_la_scratch ? s_la_scratch.b   : make({N, static_cast<size_t>(Hv)});
+    auto qkv = use_la_scratch ? la_view(s_la_scratch.qkv) : make({N, qkv_dim});
+    auto z   = use_la_scratch ? la_view(s_la_scratch.z)   : make({N, Hv_Dv});
+    auto a   = use_la_scratch ? la_view(s_la_scratch.a)   : make({N, static_cast<size_t>(Hv)});
+    auto b   = use_la_scratch ? la_view(s_la_scratch.b)   : make({N, static_cast<size_t>(Hv)});
     ops::linear(qkv, h_in, m.W(p + "in_proj_qkv.weight"));
     ops::linear(z,   h_in, m.W(p + "in_proj_z.weight"));
     ops::linear(a,   h_in, m.W(p + "in_proj_a.weight"));
@@ -369,16 +485,16 @@ static tensor_t forward_linear_attn_layer(const HybridForwardConfig& m, tensor_t
 
     // 2. Depthwise causal conv1d (kernel=4) with conv state from SSMStatePool.
     //    Kernel folds silu into its output, so qkv_conv = silu(conv1d(qkv)).
-    auto qkv_conv = use_la_scratch ? s_la_scratch.qkv_conv : make({N, qkv_dim});
+    auto qkv_conv = use_la_scratch ? la_view(s_la_scratch.qkv_conv) : make({N, qkv_dim});
     ops::mamba::causal_conv1d(qkv_conv, qkv, m.W(p + "conv1d.weight"),
                                 m.ssm_pool->view(), req.ssm_slot_idx(),
                                 m.linear_layer_index(L));
 
     // 3. Split qkv_conv [N, qkv_dim] into contiguous q [N, Hk_Dk], k [N, Hk_Dk],
     //    v [N, Hv_Dv] for the SSU kernel. Strided copy lives in ops-nvidia.
-    auto q_ssm = use_la_scratch ? s_la_scratch.q_ssm : make({N, Hk_Dk});
-    auto k_ssm = use_la_scratch ? s_la_scratch.k_ssm : make({N, Hk_Dk});
-    auto v_ssm = use_la_scratch ? s_la_scratch.v_ssm : make({N, Hv_Dv});
+    auto q_ssm = use_la_scratch ? la_view(s_la_scratch.q_ssm) : make({N, Hk_Dk});
+    auto k_ssm = use_la_scratch ? la_view(s_la_scratch.k_ssm) : make({N, Hk_Dk});
+    auto v_ssm = use_la_scratch ? la_view(s_la_scratch.v_ssm) : make({N, Hv_Dv});
     const size_t elt = utils::dsize(exec.data_type);
     ops::mamba::copy_strided_rows(q_ssm, qkv_conv, 0,         Hk_Dk, qkv_dim, N, elt);
     ops::mamba::copy_strided_rows(k_ssm, qkv_conv, Hk_Dk,     Hk_Dk, qkv_dim, N, elt);
@@ -400,7 +516,7 @@ static tensor_t forward_linear_attn_layer(const HybridForwardConfig& m, tensor_t
     //    the delta-rule recurrence S = decay * S + beta * outer(v - S k, k).
     //    The silu(z) output gate is applied separately below (Step 7), not
     //    inside the kernel.
-    auto y = use_la_scratch ? s_la_scratch.y : make({N, Hv_Dv});
+    auto y = use_la_scratch ? la_view(s_la_scratch.y) : make({N, Hv_Dv});
     ops::mamba::GDNParams gp;
     gp.state_view = m.ssm_pool->view();
     gp.slot_idx   = req.ssm_slot_idx();
@@ -420,7 +536,7 @@ static tensor_t forward_linear_attn_layer(const HybridForwardConfig& m, tensor_t
     //    per-call D2H+H2D.
     tensor_t norm_w = m.W(p + "norm.weight");
 
-    auto y_normed = use_la_scratch ? s_la_scratch.y_normed : make({N, Hv_Dv});
+    auto y_normed = use_la_scratch ? la_view(s_la_scratch.y_normed) : make({N, Hv_Dv});
     ops::rms_norm(y_normed->view({N * static_cast<size_t>(Hv), static_cast<size_t>(Dv)}),
                   y->view({N * static_cast<size_t>(Hv), static_cast<size_t>(Dv)}),
                   norm_w, m.config.rms_norm_eps);
@@ -429,13 +545,13 @@ static tensor_t forward_linear_attn_layer(const HybridForwardConfig& m, tensor_t
     //    Performed externally because the kernel only emits the delta-rule
     //    readout; Qwen3.5 applies silu(z) * o_norm before out_proj.
     {
-        auto y_gated = use_la_scratch ? s_la_scratch.y_gated : make({N, Hv_Dv});
+        auto y_gated = use_la_scratch ? la_view(s_la_scratch.y_gated) : make({N, Hv_Dv});
         ops::silu_mul(y_gated, z, y_normed);
         y_normed = y_gated;
     }
 
     // 8. Output projection [Hv_Dv → hidden_size].
-    auto out = use_la_scratch ? s_la_scratch.out : make({N, m.config.hidden_size});
+    auto out = use_la_scratch ? la_view(s_la_scratch.out) : make({N, m.config.hidden_size});
     ops::linear(out, y_normed, m.W(p + "out_proj.weight"));
     return out;
 }
@@ -457,10 +573,11 @@ static tensor_t forward_full_attn_layer(const HybridForwardConfig& m,
         return Tensor::create(std::move(shape), exec.data_type, exec.device_type, exec.device_id);
     };
 
-    const bool use_fa_scratch = (N == 1);
+    const bool use_fa_scratch = (N <= kMaxSmallDecodeBatch);
     if (use_fa_scratch) {
         ensure_fa_scratch(exec, Hq, Hkv, Dh, m.config.hidden_size);
     }
+    auto fa_view = [&](const tensor_t& buf) { return scratch_view(buf, N); };
 
     // q_proj has doubled output [2*q_dim, hidden_size] — first q_dim rows are
     // the q projection, second q_dim rows are the output gate. Slice along
@@ -470,19 +587,19 @@ static tensor_t forward_full_attn_layer(const HybridForwardConfig& m,
     auto w_q    = q_proj_w->slice(0, 0, q_dim);          // [q_dim, hidden]
     auto w_gate = q_proj_w->slice(0, q_dim, 2 * q_dim);  // [q_dim, hidden]
 
-    auto q_raw = use_fa_scratch ? s_fa_scratch.q_raw : make({N, q_dim});
-    auto gate  = use_fa_scratch ? s_fa_scratch.gate  : make({N, q_dim});
+    auto q_raw = use_fa_scratch ? fa_view(s_fa_scratch.q_raw) : make({N, q_dim});
+    auto gate  = use_fa_scratch ? fa_view(s_fa_scratch.gate)  : make({N, q_dim});
     ops::linear(q_raw, h_in, w_q);
     ops::linear(gate,  h_in, w_gate);
 
-    auto k_raw = use_fa_scratch ? s_fa_scratch.k_raw : make({N, kv_dim});
-    auto v     = use_fa_scratch ? s_fa_scratch.v     : make({N, kv_dim});
+    auto k_raw = use_fa_scratch ? fa_view(s_fa_scratch.k_raw) : make({N, kv_dim});
+    auto v     = use_fa_scratch ? fa_view(s_fa_scratch.v)     : make({N, kv_dim});
     ops::linear(k_raw, h_in, m.W(p + "k_proj.weight"));
     ops::linear(v,     h_in, m.W(p + "v_proj.weight"));
 
     // Per-head RMSNorm on q / k (Qwen3.5 uses Qwen3_5MoeRMSNorm with (1+w)).
-    auto q_normed = use_fa_scratch ? s_fa_scratch.q_normed : make({N, q_dim});
-    auto k_normed = use_fa_scratch ? s_fa_scratch.k_normed : make({N, kv_dim});
+    auto q_normed = use_fa_scratch ? fa_view(s_fa_scratch.q_normed) : make({N, q_dim});
+    auto k_normed = use_fa_scratch ? fa_view(s_fa_scratch.k_normed) : make({N, kv_dim});
     ops::rms_norm(q_normed->view({N * Hq,  Dh}),
                   q_raw->view({N * Hq,  Dh}),
                   m.W(p + "q_norm.weight"), m.config.rms_norm_eps,
@@ -507,10 +624,11 @@ static tensor_t forward_full_attn_layer(const HybridForwardConfig& m,
 
     // Paged attention. attend allocates and returns the attn output tensor;
     // for N=1 decode reuse the persistent attn buffer (shape [1, Hq, Dh])
-    // so the per-layer alloc doesn't hit the populated pool.
+    // so the per-layer alloc doesn't hit the populated pool. For N=2 we pass
+    // a [2, Hq, Dh] view of the same scratch buffer.
     const float scale = 1.0f / std::sqrt(static_cast<float>(Dh));
     auto attn = ctx.attend(kv_idx, q_normed, scale, exec, Hq, Hkv, Dh,
-                           use_fa_scratch ? s_fa_scratch.attn : nullptr);
+                           use_fa_scratch ? fa_view(s_fa_scratch.attn) : nullptr);
 
     // Attention output gate: attn := attn * sigmoid(gate), in place.
     // Both tensors are shape [N, Hq, Dh] — flatten matches because attn comes
@@ -523,7 +641,7 @@ static tensor_t forward_full_attn_layer(const HybridForwardConfig& m,
     // in->dim(1) rather than the (3-D) middle dimension Hq, which would
     // collapse the o_proj GEMM to a 16-channel reduction and produce a
     // ~100x attenuated residual that drifted from HF after a single layer.
-    auto out = use_fa_scratch ? s_fa_scratch.out : make({N, m.config.hidden_size});
+    auto out = use_fa_scratch ? fa_view(s_fa_scratch.out) : make({N, m.config.hidden_size});
     ops::linear(out, attn->view({N, q_dim}), m.W(p + "o_proj.weight"));
     return out;
 }

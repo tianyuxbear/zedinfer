@@ -44,6 +44,14 @@ struct SchedulerConfig {
     float gpu_memory_utilization = 0.9f;
     int kv_block_size = 16;
     bool use_paged_kvcache = true;
+
+    // Qwen3.5 MTP speculative decoding. Off by default — must be opted in
+    // via --mtp on the CLI (or ZEDINFER_MTP_SPEC=1 / ZEDINFER_MTP_DEBUG=1
+    // env vars, kept as research toggles). When on AND the loaded model
+    // ships an MTP head, the serving loop runs MTPModule after each main
+    // forward to draft t+2 and the next scheduler step issues a 2-token
+    // verify batch.
+    bool mtp_enabled = false;
 };
 
 /**

@@ -55,6 +55,12 @@ int main(int argc, char* argv[]) {
         .default_value(false)
         .implicit_value(true);
 
+    program.add_argument("--mtp")
+        .help("Enable Qwen3.5 MTP speculative decoding (off by default). "
+              "Only effective when the loaded model ships an MTP head.")
+        .default_value(false)
+        .implicit_value(true);
+
     try {
         program.parse_args(argc, argv);
     } catch (const std::exception& err) {
@@ -74,6 +80,7 @@ int main(int argc, char* argv[]) {
 
     SchedulerConfig sched_config;
     sched_config.gpu_memory_utilization = program.get<float>("--gpu-memory-utilization");
+    sched_config.mtp_enabled = program.get<bool>("--mtp");
     if (const char* env = std::getenv("ZEDINFER_KV_BLOCK_SIZE")) {
         sched_config.kv_block_size = std::atoi(env);
         printf("[ping] Using kv_block_size=%d from env\n", sched_config.kv_block_size);

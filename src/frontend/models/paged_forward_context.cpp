@@ -478,7 +478,8 @@ void PagedForwardContext::build_flashinfer_decode_cache(const ops::AttentionConf
 
         ensure_flashinfer_page_table_cache(*table, cfg.device_type, cfg.device_id);
         ensure_flashinfer_single_decode_metadata_cache(
-            *table, kv_len, cfg.block_size, flashinfer_decode_uses_prefill_kernel_, cfg.device_type, cfg.device_id);
+            *table, kv_len, cfg.block_size, flashinfer_decode_uses_prefill_kernel_,
+            cfg.device_type, cfg.device_id);
         flashinfer_decode_layer_cache_.resize(num_layers);
         for (int layer = 0; layer < num_layers; ++layer) {
             flashinfer_decode_layer_cache_[layer] = {table->flashinfer_page_tables_gpu[layer]};
@@ -733,9 +734,11 @@ void PagedForwardContext::attend_decode_single(int layer, tensor_t q_rope, tenso
     auto decode_q = q_rope->slice(0, cached_decode_start_, cached_decode_start_ + n_q);
     auto decode_out = attn->slice(0, cached_decode_start_, cached_decode_start_ + n_q);
 
-    // For n_q > 1 (spec-decode verify) we treat this as a small prefill so
-    // the causal mask is applied correctly across the N new positions over
-    // the past+N KV. Same paged page_table; only the params layout changes.
+    // For n_q > 1 (Qwen3.5 MTP spec-decode verify) the native paged_prefill
+    // kernel is actually slightly faster than the flashinfer prefill kernel at
+    // small n_q (n_q=2) on H100 — flashinfer's grid/tile config is tuned for
+    // large prefill batches and overhead dominates here. Keep the native path
+    // until the kernel landscape changes.
     if (n_q > 1) {
         auto page_bt_gpu = upload_to_gpu(dt->pages[layer], cfg.device_type, cfg.device_id);
         ops::AttentionParams params{cfg};

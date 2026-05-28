@@ -19,7 +19,7 @@
 namespace zedinfer {
 
 ServingLoop::ServingLoop(InferenceEngine& engine, SchedulerConfig sched_config)
-    : engine_(&engine), scheduler_(std::move(sched_config)) {
+    : engine_(&engine), mtp_enabled_(sched_config.mtp_enabled), scheduler_(std::move(sched_config)) {
     if (engine_->block_allocator()) {
         scheduler_.set_block_allocator(engine_->block_allocator());
     }
@@ -141,8 +141,16 @@ bool ServingLoop::step() {
         tensor_t logits;
         tensor_t mtp_hidden_last;  // captured iff MTP active (see below)
         const model::Qwen3_5MoeModel* mtp_owner = nullptr;
+        // Three independent ways to enable MTP, in priority order:
+        //   1. --mtp CLI flag (mtp_enabled_, the user-facing knob, default off).
+        //   2. ZEDINFER_MTP_SPEC env var (research/legacy active spec mode).
+        //   3. ZEDINFER_MTP_DEBUG env var (observer-only: log drafts, no spec).
+        // mtp_spec is the "active" path (drafts get committed via 2-token verify);
+        // mtp_debug just logs. The user-visible default is off — env vars exist
+        // so we don't have to touch the binary's CLI surface to A/B test.
         const bool mtp_spec_env  = std::getenv("ZEDINFER_MTP_SPEC")  != nullptr;
         const bool mtp_debug_env = std::getenv("ZEDINFER_MTP_DEBUG") != nullptr;
+        const bool mtp_spec      = mtp_enabled_ || mtp_spec_env;
         if (auto* hybrid_model = dynamic_cast<const model::Qwen3_5Model*>(&engine_->model())) {
             InferenceRequest* req = !batch.decode_requests.empty()
                                        ? batch.decode_requests[0]
@@ -162,7 +170,7 @@ bool ServingLoop::step() {
             // and the NEXT scheduled step submits 2 tokens [last, draft] so
             // main can verify in a single forward. ZEDINFER_MTP_DEBUG keeps
             // working as a no-op observer (just logs draft vs main argmax).
-            const bool mtp_active    = (mtp_spec_env || mtp_debug_env)
+            const bool mtp_active    = (mtp_spec || mtp_debug_env)
                                        && moe_model && moe_model->mtp_module()
                                        && moe_model->mtp_module()->ready();
             tensor_t* hidden_out_ptr = nullptr;
@@ -224,7 +232,7 @@ bool ServingLoop::step() {
         // Spec REJECT also yields n_committed=1, but the second row of
         // mtp_hidden_last was computed against a poisoned K/V slot and must
         // not be fed to MTP — we just use row 0 (clean).
-        const bool mtp_active = (mtp_spec_env || mtp_debug_env) && mtp_owner;
+        const bool mtp_active = (mtp_spec || mtp_debug_env) && mtp_owner;
         if (mtp_active && mtp_hidden_last) {
             try {
                 InferenceRequest* req = !batch.decode_requests.empty()
@@ -285,7 +293,7 @@ bool ServingLoop::step() {
                         auto* api = device::getRuntimeAPI(engine_->exec_config().device_type);
                         api->memcpy_sync(&mtp_top1, idx_dev->data(), sizeof(int64_t),
                                          ZEDINFER_MEMCPY_D2H);
-                        if (mtp_spec_env) {
+                        if (mtp_spec) {
                             req->mtp_pending_draft = static_cast<int>(mtp_top1);
                         }
                         if (mtp_debug_env) {

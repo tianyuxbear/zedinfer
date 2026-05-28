@@ -6,6 +6,7 @@
 #include "backend/ops/mrope/mrope_3d.hpp"
 #include "backend/ops/moe/topk_softmax.hpp"
 #include "backend/ops/ops.hpp"
+#include "backend/ops/shared_expert_gate/shared_expert_gate.hpp"
 #include "backend/tensor/tensor.hpp"
 #include "frontend/models/base.hpp"
 #include "frontend/models/hybrid_forward_config.hpp"  // MRoPEConfig
@@ -21,6 +22,143 @@
 #include <vector>
 
 namespace zedinfer::model {
+
+namespace {
+
+// Persistent per-thread scratch for the MTP forward path. The original
+// MTPModule::forward + mtp_attention_decode + mtp_moe_one_token make ~28
+// Tensor::create calls per invocation. Under ALL_GPU the BestFitMemoryPool
+// is heavily populated by ~14 GB of expert weights, so per-call alloc
+// round-trips cost ~30+ ms cumulatively — the MTP "1-layer" forward
+// measured at ~35 ms total per the Stage E perf write-up. This scratch
+// makes the steady-state per-call cost just the actual kernel work.
+//
+// Sized at the model's MTP shape on first use; reallocated only if the shape
+// changes (which it doesn't post-init).
+struct MTPScratch {
+    bool ready = false;
+    // top of MTPModule::forward
+    tensor_t id_tensor;     // [1]   I32
+    tensor_t emb;           // [1, H]
+    tensor_t norm_e;        // [1, H]
+    tensor_t norm_h;        // [1, H]
+    tensor_t concat;        // [1, 2H]
+    tensor_t h_in_raw;      // [1, H]
+    tensor_t h_in;          // [1, H]
+    tensor_t h1;            // [1, H]
+    tensor_t h_post;        // [1, H]
+    tensor_t h_after_moe;   // [1, H]
+    tensor_t final_normed;  // [1, H]
+    tensor_t logits;        // [1, V]
+
+    // mtp_attention_decode
+    tensor_t att_q_raw;     // [1, q_dim]
+    tensor_t att_gate;      // [1, q_dim]
+    tensor_t att_k_raw;     // [1, kv_dim]
+    tensor_t att_v;         // [1, kv_dim]
+    tensor_t att_q_normed;  // [1, q_dim]
+    tensor_t att_k_normed;  // [1, kv_dim]
+    tensor_t att_pos_thw;   // [3, 1] I32
+    tensor_t att_attn;      // [1, Hq, Dh]
+    tensor_t att_out;       // [1, H]
+
+    // mtp_moe_one_token
+    tensor_t moe_router_logits; // [1, num_experts]
+    tensor_t moe_out;           // [1, H]
+    tensor_t moe_gate_buf;      // [1, moe_inter]
+    tensor_t moe_up_buf;        // [1, moe_inter]
+    tensor_t moe_act_buf;       // [1, moe_inter]
+    tensor_t moe_down_buf;      // [1, H]
+    tensor_t moe_sh_gate;       // [1, shared_inter]
+    tensor_t moe_sh_up;         // [1, shared_inter]
+    tensor_t moe_sh_act;        // [1, shared_inter]
+    tensor_t moe_sh_down;       // [1, H]
+    tensor_t moe_sh_gate_logit; // [1, 1]
+
+    // Cached shape signature.
+    size_t H = 0, q_dim = 0, kv_dim = 0, V = 0;
+    size_t Hq = 0, Dh = 0;
+    size_t num_experts = 0, moe_inter = 0, shared_inter = 0;
+    zedinferDeviceType_t device_type = ZEDINFER_DEVICE_CPU;
+    int    device_id = -1;
+    zedinferDataType_t dtype = ZEDINFER_DTYPE_F32;
+};
+
+static thread_local MTPScratch s_mtp_scratch;
+
+static MTPScratch& ensure_mtp_scratch(const Qwen3_5MoEConfig& cfg, const ExecutorConfig& exec) {
+    const size_t H = cfg.hidden_size;
+    const size_t Hq  = cfg.num_attention_heads;
+    const size_t Hkv = cfg.num_key_value_heads;
+    const size_t Dh  = cfg.head_dim > 0 ? cfg.head_dim : (H / Hq);
+    const size_t q_dim   = Hq  * Dh;
+    const size_t kv_dim  = Hkv * Dh;
+    const size_t V       = cfg.vocab_size;
+    const size_t num_e   = static_cast<size_t>(cfg.num_experts);
+    const size_t moe_int = static_cast<size_t>(cfg.moe_intermediate_size);
+    const size_t sh_int  = static_cast<size_t>(cfg.shared_expert_intermediate_size);
+
+    auto& s = s_mtp_scratch;
+    if (s.ready && s.H == H && s.q_dim == q_dim && s.kv_dim == kv_dim && s.V == V && s.Hq == Hq && s.Dh == Dh
+        && s.num_experts == num_e && s.moe_inter == moe_int && s.shared_inter == sh_int
+        && s.device_type == exec.device_type && s.device_id == exec.device_id && s.dtype == exec.data_type) {
+        return s;
+    }
+    auto mkf = [&](std::vector<size_t> shape) {
+        return Tensor::create(std::move(shape), exec.data_type, exec.device_type, exec.device_id);
+    };
+    auto mk  = [&](std::vector<size_t> shape, zedinferDataType_t t) {
+        return Tensor::create(std::move(shape), t, exec.device_type, exec.device_id);
+    };
+
+    s.id_tensor    = mk({1}, ZEDINFER_DTYPE_I32);
+    s.emb          = mkf({1, H});
+    s.norm_e       = mkf({1, H});
+    s.norm_h       = mkf({1, H});
+    s.concat       = mkf({1, 2 * H});
+    s.h_in_raw     = mkf({1, H});
+    s.h_in         = mkf({1, H});
+    s.h1           = mkf({1, H});
+    s.h_post       = mkf({1, H});
+    s.h_after_moe  = mkf({1, H});
+    s.final_normed = mkf({1, H});
+    s.logits       = mkf({1, V});
+
+    s.att_q_raw    = mkf({1, q_dim});
+    s.att_gate     = mkf({1, q_dim});
+    s.att_k_raw    = mkf({1, kv_dim});
+    s.att_v        = mkf({1, kv_dim});
+    s.att_q_normed = mkf({1, q_dim});
+    s.att_k_normed = mkf({1, kv_dim});
+    s.att_pos_thw  = mk({3, 1}, ZEDINFER_DTYPE_I32);
+    s.att_attn     = mkf({1, Hq, Dh});
+    s.att_out      = mkf({1, H});
+
+    s.moe_router_logits = mkf({1, num_e});
+    s.moe_out           = mkf({1, H});
+    s.moe_gate_buf      = mkf({1, moe_int});
+    s.moe_up_buf        = mkf({1, moe_int});
+    s.moe_act_buf       = mkf({1, moe_int});
+    s.moe_down_buf      = mkf({1, H});
+    if (sh_int > 0) {
+        s.moe_sh_gate       = mkf({1, sh_int});
+        s.moe_sh_up         = mkf({1, sh_int});
+        s.moe_sh_act        = mkf({1, sh_int});
+        s.moe_sh_down       = mkf({1, H});
+        s.moe_sh_gate_logit = mkf({1, 1});
+    }
+    s.H = H; s.q_dim = q_dim; s.kv_dim = kv_dim; s.V = V; s.Hq = Hq; s.Dh = Dh;
+    s.num_experts = num_e; s.moe_inter = moe_int; s.shared_inter = sh_int;
+    s.device_type = exec.device_type;
+    s.device_id   = exec.device_id;
+    s.dtype       = exec.data_type;
+    s.ready       = true;
+    LOGI.printf("[MTPScratch] allocated H=%zu V=%zu q_dim=%zu kv_dim=%zu num_e=%zu moe_int=%zu sh_int=%zu",
+                H, V, q_dim, kv_dim, num_e, moe_int, sh_int);
+    return s;
+}
+
+} // anonymous namespace (MTPScratch only)
 
 namespace {
 
@@ -223,16 +361,14 @@ tensor_t mtp_attention_decode(tensor_t h_in,
                               tensor_t o_proj, tensor_t q_norm, tensor_t k_norm,
                               tensor_t k_cache, tensor_t v_cache,
                               tensor_t page_table_dev, int past, int max_kv_len,
-                              const Qwen3_5MoEConfig& cfg, const ExecutorConfig& exec) {
+                              const Qwen3_5MoEConfig& cfg, const ExecutorConfig& exec,
+                              MTPScratch& s) {
     const size_t Hq  = cfg.num_attention_heads;
     const size_t Hkv = cfg.num_key_value_heads;
     const size_t Dh  = cfg.head_dim > 0 ? cfg.head_dim : (cfg.hidden_size / Hq);
     const size_t q_dim  = Hq  * Dh;
     const size_t kv_dim = Hkv * Dh;
 
-    auto make = [&](std::vector<size_t> shape) {
-        return Tensor::create(std::move(shape), exec.data_type, exec.device_type, exec.device_id);
-    };
     auto* api = device::getRuntimeAPI(exec.device_type);
     const size_t elt = utils::dsize(exec.data_type);
 
@@ -240,43 +376,48 @@ tensor_t mtp_attention_decode(tensor_t h_in,
     auto w_q    = q_proj->slice(0, 0, q_dim);
     auto w_gate = q_proj->slice(0, q_dim, 2 * q_dim);
 
-    auto q_raw = make({1, q_dim});
-    auto gate  = make({1, q_dim});
-    auto k_raw = make({1, kv_dim});
-    auto v     = make({1, kv_dim});
+    auto& q_raw = s.att_q_raw;
+    auto& gate  = s.att_gate;
+    auto& k_raw = s.att_k_raw;
+    auto& v     = s.att_v;
     ops::linear(q_raw, h_in, w_q);
     ops::linear(gate,  h_in, w_gate);
     ops::linear(k_raw, h_in, k_proj);
     ops::linear(v,     h_in, v_proj);
 
-    auto q_normed = make({1, q_dim});
-    auto k_normed = make({1, kv_dim});
+    auto& q_normed = s.att_q_normed;
+    auto& k_normed = s.att_k_normed;
     ops::rms_norm(q_normed->view({Hq,  Dh}), q_raw->view({Hq,  Dh}),
                   q_norm, cfg.rms_norm_eps, /*add_one_to_weight=*/true);
     ops::rms_norm(k_normed->view({Hkv, Dh}), k_raw->view({Hkv, Dh}),
                   k_norm, cfg.rms_norm_eps, /*add_one_to_weight=*/true);
 
     // mrope_3d at position `past`. Build [3, 1] int32 = {past, past, past}.
-    auto pos_thw = Tensor::create({3, 1}, ZEDINFER_DTYPE_I32, exec.device_type, exec.device_id);
+    // Reuse the cached pos_thw tensor — its three int32 slots get refilled
+    // every call. memcpy_sync is fine here: 12 bytes, host-side stack data.
     {
         int32_t host_pos[3] = {past, past, past};
-        api->memcpy_sync(pos_thw->data(), host_pos, 3 * sizeof(int32_t), ZEDINFER_MEMCPY_H2D);
+        api->memcpy_sync(s.att_pos_thw->data(), host_pos, 3 * sizeof(int32_t), ZEDINFER_MEMCPY_H2D);
     }
     MRoPEConfig mrope_cfg;
     mrope_cfg.interleaved    = cfg.mrope_interleaved;
     mrope_cfg.section        = cfg.mrope_section;
     mrope_cfg.partial_factor = cfg.partial_rotary_factor;
     mrope_cfg.theta          = cfg.rope_theta;
-    ops::mrope_3d(q_normed->view({1, Hq,  Dh}), pos_thw, mrope_cfg);
-    ops::mrope_3d(k_normed->view({1, Hkv, Dh}), pos_thw, mrope_cfg);
+    ops::mrope_3d(q_normed->view({1, Hq,  Dh}), s.att_pos_thw, mrope_cfg);
+    ops::mrope_3d(k_normed->view({1, Hkv, Dh}), s.att_pos_thw, mrope_cfg);
 
     // Write rotated k_normed and raw v into K/V cache at row `past`.
-    api->memcpy_sync(static_cast<std::byte*>(k_cache->data())
-                         + static_cast<size_t>(past) * kv_dim * elt,
-                     k_normed->data(), kv_dim * elt, ZEDINFER_MEMCPY_D2D);
-    api->memcpy_sync(static_cast<std::byte*>(v_cache->data())
-                         + static_cast<size_t>(past) * kv_dim * elt,
-                     v->data(), kv_dim * elt, ZEDINFER_MEMCPY_D2D);
+    // Use the compute stream's async memcpy so we don't drain the stream between
+    // the projections we just issued and the attention kernel that comes next.
+    // The kernel and the copies share one stream, so FIFO ordering still holds.
+    auto compute_stream = core::context().runtime().stream();
+    api->memcpy_async(static_cast<std::byte*>(k_cache->data())
+                          + static_cast<size_t>(past) * kv_dim * elt,
+                      k_normed->data(), kv_dim * elt, ZEDINFER_MEMCPY_D2D, compute_stream);
+    api->memcpy_async(static_cast<std::byte*>(v_cache->data())
+                          + static_cast<size_t>(past) * kv_dim * elt,
+                      v->data(), kv_dim * elt, ZEDINFER_MEMCPY_D2D, compute_stream);
 
     // Configure single-page paged attention.
     ops::AttentionConfig acfg{
@@ -289,7 +430,7 @@ tensor_t mtp_attention_decode(tensor_t h_in,
         /*device_type=*/exec.device_type,
         /*device_id=*/exec.device_id,
     };
-    auto attn = make({1, Hq, Dh});
+    auto& attn = s.att_attn;
     ops::AttentionParams params{acfg};
     params.use_flashinfer = false; // single-block + single-request → native paged decode is enough
     params.out = attn->view({Hq, Dh});
@@ -305,7 +446,7 @@ tensor_t mtp_attention_decode(tensor_t h_in,
     ops::attn_output_gate(attn, gate);
 
     // o_proj
-    auto out = make({1, cfg.hidden_size});
+    auto& out = s.att_out;
     ops::linear(out, attn->view({1, q_dim}), o_proj);
     return out;
 }
@@ -319,48 +460,43 @@ tensor_t mtp_moe_one_token(tensor_t h_post,
                            tensor_t shared_gate_proj, tensor_t shared_up_proj,
                            tensor_t shared_down_proj,
                            const ExpertWeights& experts,
-                           const Qwen3_5MoEConfig& cfg, const ExecutorConfig& exec) {
-    const size_t H        = cfg.hidden_size;
-    const size_t num_e    = static_cast<size_t>(cfg.num_experts);
-    const size_t top_k    = static_cast<size_t>(cfg.num_experts_per_tok);
-    const size_t moe_inter = static_cast<size_t>(cfg.moe_intermediate_size);
-    const size_t shared_inter = static_cast<size_t>(cfg.shared_expert_intermediate_size);
+                           const Qwen3_5MoEConfig& cfg, const ExecutorConfig& exec,
+                           MTPScratch& s) {
+    (void)exec;
+    const size_t num_e = s.num_experts;
+    const size_t top_k = static_cast<size_t>(cfg.num_experts_per_tok);
 
-    auto make = [&](std::vector<size_t> shape) {
-        return Tensor::create(std::move(shape), exec.data_type, exec.device_type, exec.device_id);
-    };
-    auto* api = device::getRuntimeAPI(exec.device_type);
+    auto* api = device::getRuntimeAPI(s.device_type);
 
     // 1. Router: router_logits = h_post @ router_w.T
-    auto router_logits = make({1, num_e});
+    auto& router_logits = s.moe_router_logits;
     ops::linear(router_logits, h_post, router_w);
 
     // 2. D2H + bf16->fp32 + global softmax + top-k + renorm.
     //    num_e is small (256 for Qwen3.5), so do it on host.
     //    Qwen3_5MoeTopKRouter ALWAYS renormalizes (modeling_qwen3_5_moe.py:788),
-    //    so pass true here too.
-    std::vector<uint16_t> rl_bf16(num_e);
-    api->memcpy_sync(rl_bf16.data(), router_logits->data(),
+    //    so pass true here too. Thread_local pinned vector avoids per-call heap
+    //    alloc — the D2H sync itself is unavoidable (CPU top-k consumer).
+    static thread_local std::vector<uint16_t> rl_bf16_buf;
+    static thread_local std::vector<float>    rl_f32_buf;
+    if (rl_bf16_buf.size() < num_e) rl_bf16_buf.resize(num_e);
+    if (rl_f32_buf.size()  < num_e) rl_f32_buf.resize(num_e);
+    api->memcpy_sync(rl_bf16_buf.data(), router_logits->data(),
                      num_e * sizeof(uint16_t), ZEDINFER_MEMCPY_D2H);
-    std::vector<float> rl_f32(num_e);
     for (size_t i = 0; i < num_e; ++i) {
-        uint32_t u = static_cast<uint32_t>(rl_bf16[i]) << 16;
-        std::memcpy(&rl_f32[i], &u, sizeof(float));
+        uint32_t u = static_cast<uint32_t>(rl_bf16_buf[i]) << 16;
+        std::memcpy(&rl_f32_buf[i], &u, sizeof(float));
     }
-    auto topk = ops::moe::topk_softmax(rl_f32.data(), /*N=*/1, num_e, top_k,
+    auto topk = ops::moe::topk_softmax(rl_f32_buf.data(), /*N=*/1, num_e, top_k,
                                        /*norm_topk_prob=*/true);
 
-    // 3. Output accumulator (fp32 on device for stable accumulation).
-    auto out_bf16 = make({1, H});
+    // 3. Output accumulator (bf16 on device).
+    auto& out_bf16 = s.moe_out;
     ops::fill_zero(out_bf16);
 
     // 4. Loop top-k experts. Each expert contributes
     //    delta = down(swiglu(gate(h), up(h))) and we accumulate
     //    out += topk_weights[k] * delta.
-    auto gate_buf = make({1, moe_inter});
-    auto up_buf   = make({1, moe_inter});
-    auto act_buf  = make({1, moe_inter});
-    auto down_buf = make({1, H});
     for (size_t k = 0; k < top_k; ++k) {
         const int    e_id = topk.expert_ids[k];
         const float  w_k  = topk.expert_weights[k];
@@ -369,35 +505,30 @@ tensor_t mtp_moe_one_token(tensor_t h_post,
             throw std::runtime_error("[MTPModule] expert " + std::to_string(e_id)
                                      + " missing bf16 weights (quantized MTP not supported yet)");
         }
-        ops::linear(gate_buf, h_post, ffn.gate_weight);
-        ops::linear(up_buf,   h_post, ffn.up_weight);
-        ops::swiglu(act_buf, gate_buf, up_buf);
-        ops::linear(down_buf, act_buf, ffn.down_weight);
-        ops::add_scaled(out_bf16, down_buf, w_k);
+        ops::linear(s.moe_gate_buf, h_post, ffn.gate_weight);
+        ops::linear(s.moe_up_buf,   h_post, ffn.up_weight);
+        ops::swiglu(s.moe_act_buf, s.moe_gate_buf, s.moe_up_buf);
+        ops::linear(s.moe_down_buf, s.moe_act_buf, ffn.down_weight);
+        ops::add_scaled(out_bf16, s.moe_down_buf, w_k);
     }
 
     // 5. Shared expert.
-    auto sh_gate = make({1, shared_inter});
-    auto sh_up   = make({1, shared_inter});
-    auto sh_act  = make({1, shared_inter});
-    auto sh_down = make({1, H});
+    auto& sh_gate = s.moe_sh_gate;
+    auto& sh_up   = s.moe_sh_up;
+    auto& sh_act  = s.moe_sh_act;
+    auto& sh_down = s.moe_sh_down;
     ops::linear(sh_gate, h_post, shared_gate_proj);
     ops::linear(sh_up,   h_post, shared_up_proj);
     ops::swiglu(sh_act, sh_gate, sh_up);
     ops::linear(sh_down, sh_act, shared_down_proj);
 
-    // 6. Shared expert gate (sigmoid scalar from linear [1,1]).
-    auto sh_gate_logit = make({1, 1});
+    // 6. Shared expert gate (in-place on GPU via shared_expert_gate op).
+    auto& sh_gate_logit = s.moe_sh_gate_logit;
     ops::linear(sh_gate_logit, h_post, shared_gate_w);
-    uint16_t sgl_bf16 = 0;
-    api->memcpy_sync(&sgl_bf16, sh_gate_logit->data(), sizeof(uint16_t), ZEDINFER_MEMCPY_D2H);
-    uint32_t u_sgl = static_cast<uint32_t>(sgl_bf16) << 16;
-    float    sgl_f32 = 0.0f;
-    std::memcpy(&sgl_f32, &u_sgl, sizeof(float));
-    const float sh_gate_val = 1.0f / (1.0f + std::exp(-sgl_f32));
+    ops::shared_expert_gate(sh_down, sh_gate_logit);
 
-    // 7. out += sh_gate_val * sh_down
-    ops::add_scaled(out_bf16, sh_down, sh_gate_val);
+    // 7. out += sh_down (already gated by sigmoid above)
+    ops::add_scaled(out_bf16, sh_down, 1.0f);
 
     return out_bf16;
 }
@@ -442,46 +573,44 @@ tensor_t MTPModule::forward(InferenceRequest& req,
 
     const size_t H = main_cfg_.hidden_size;
 
-    auto make = [&](std::vector<size_t> shape) {
-        return Tensor::create(std::move(shape), exec.data_type, exec.device_type, exec.device_id);
-    };
+    // Persistent per-thread scratch. First call allocates ~28 [1, ...] buffers;
+    // subsequent calls just reuse them. Without this each MTP call paid ~30 ms
+    // of BestFitPool round-trips alone (the Stage E perf write-up has the
+    // detailed breakdown).
+    auto& s = ensure_mtp_scratch(main_cfg_, exec);
+
     auto* api = device::getRuntimeAPI(exec.device_type);
     const size_t elt = utils::dsize(exec.data_type);
 
-    // 1. Embed lookup for the just-sampled main token. ops::embedding takes a
-    //    1-D int32 index tensor and an [vocab, hidden] weight; we wrap the
-    //    single id in a one-element device tensor.
-    auto id_tensor = Tensor::create({1}, ZEDINFER_DTYPE_I32, exec.device_type, exec.device_id);
+    // 1. Embed lookup for the just-sampled main token. Reuse the scratch
+    //    [1] I32 buffer instead of fresh-allocating an id tensor.
     const int32_t id32 = next_token_id;
-    api->memcpy_sync(id_tensor->data(), &id32, sizeof(int32_t), ZEDINFER_MEMCPY_H2D);
-    auto emb = make({1, H});
-    ops::embedding(emb, id_tensor, embed_tokens_w);
+    api->memcpy_sync(s.id_tensor->data(), &id32, sizeof(int32_t), ZEDINFER_MEMCPY_H2D);
+    ops::embedding(s.emb, s.id_tensor, embed_tokens_w);
 
     // 2. Pre-fc norms: (1+w) RMSNorm on emb and on hidden_at_t.
-    auto norm_e = make({1, H});
-    auto norm_h = make({1, H});
-    ops::rms_norm(norm_e, emb,          pre_fc_norm_embedding_, main_cfg_.rms_norm_eps,
+    ops::rms_norm(s.norm_e, s.emb,        pre_fc_norm_embedding_, main_cfg_.rms_norm_eps,
                   /*add_one_to_weight=*/true);
-    ops::rms_norm(norm_h, hidden_at_t,  pre_fc_norm_hidden_,    main_cfg_.rms_norm_eps,
+    ops::rms_norm(s.norm_h, hidden_at_t,  pre_fc_norm_hidden_,    main_cfg_.rms_norm_eps,
                   /*add_one_to_weight=*/true);
 
     // 3. Concatenate norm_e and norm_h along the last dim → [1, 2*H].
-    //    Manual D2D memcpy: row layout is [emb part | hidden part].
-    auto concat = make({1, 2 * H});
-    api->memcpy_sync(static_cast<std::byte*>(concat->data()),
-                     static_cast<std::byte*>(norm_e->data()),
-                     H * elt, ZEDINFER_MEMCPY_D2D);
-    api->memcpy_sync(static_cast<std::byte*>(concat->data()) + H * elt,
-                     static_cast<std::byte*>(norm_h->data()),
-                     H * elt, ZEDINFER_MEMCPY_D2D);
+    //    Manual D2D memcpy: row layout is [emb part | hidden part]. Run async
+    //    on the compute stream — both halves are independent and the fc linear
+    //    that consumes `concat` is enqueued after on the same stream.
+    auto compute_stream = core::context().runtime().stream();
+    api->memcpy_async(static_cast<std::byte*>(s.concat->data()),
+                      static_cast<std::byte*>(s.norm_e->data()),
+                      H * elt, ZEDINFER_MEMCPY_D2D, compute_stream);
+    api->memcpy_async(static_cast<std::byte*>(s.concat->data()) + H * elt,
+                      static_cast<std::byte*>(s.norm_h->data()),
+                      H * elt, ZEDINFER_MEMCPY_D2D, compute_stream);
 
     // 4. fc projection: 2*H -> H.
-    auto h_in_raw = make({1, H});
-    ops::linear(h_in_raw, concat, fc_weight_);
+    ops::linear(s.h_in_raw, s.concat, fc_weight_);
 
     // 5. Pre-attention norm (Qwen3_5MoeRMSNorm with (1+w)).
-    auto h_in = make({1, H});
-    ops::rms_norm(h_in, h_in_raw, in_layernorm_, main_cfg_.rms_norm_eps,
+    ops::rms_norm(s.h_in, s.h_in_raw, in_layernorm_, main_cfg_.rms_norm_eps,
                   /*add_one_to_weight=*/true);
 
     // 6. Attention with this request's K/V cache. Caller must have
@@ -501,41 +630,36 @@ tensor_t MTPModule::forward(InferenceRequest& req,
                                  + std::to_string(req.mtp_past_seq_len)
                                  + " >= max=" + std::to_string(max_kv_len_));
     }
-    auto attn_out = mtp_attention_decode(h_in, q_proj_, k_proj_, v_proj_,
+    auto attn_out = mtp_attention_decode(s.h_in, q_proj_, k_proj_, v_proj_,
                                          o_proj_, q_norm_, k_norm_,
                                          req.mtp_k_cache, req.mtp_v_cache,
                                          req.mtp_page_table_dev,
                                          req.mtp_past_seq_len,
                                          static_cast<int>(max_kv_len_),
-                                         main_cfg_, exec);
+                                         main_cfg_, exec, s);
     req.mtp_past_seq_len += 1;
 
     // 7. Residual after attention.
-    auto h1 = make({1, H});
-    ops::add(h1, h_in_raw, attn_out);
+    ops::add(s.h1, s.h_in_raw, attn_out);
 
     // 8. Post-attention norm.
-    auto h_post = make({1, H});
-    ops::rms_norm(h_post, h1, post_layernorm_, main_cfg_.rms_norm_eps,
+    ops::rms_norm(s.h_post, s.h1, post_layernorm_, main_cfg_.rms_norm_eps,
                   /*add_one_to_weight=*/true);
 
     // 9. MoE block.
-    auto mlp_out = mtp_moe_one_token(h_post, mlp_gate_router_, shared_expert_gate_,
+    auto mlp_out = mtp_moe_one_token(s.h_post, mlp_gate_router_, shared_expert_gate_,
                                      shared_expert_gate_proj_, shared_expert_up_proj_,
                                      shared_expert_down_proj_, *experts_,
-                                     main_cfg_, exec);
+                                     main_cfg_, exec, s);
 
     // 10. Residual after MoE.
-    auto h_after_moe = make({1, H});
-    ops::add(h_after_moe, h1, mlp_out);
+    ops::add(s.h_after_moe, s.h1, mlp_out);
 
     // 11. Final norm + lm_head.
-    auto final_normed = make({1, H});
-    ops::rms_norm(final_normed, h_after_moe, final_norm_, main_cfg_.rms_norm_eps,
+    ops::rms_norm(s.final_normed, s.h_after_moe, final_norm_, main_cfg_.rms_norm_eps,
                   /*add_one_to_weight=*/true);
-    auto logits = make({1, static_cast<size_t>(main_cfg_.vocab_size)});
-    ops::linear(logits, final_normed, lm_head_w);
-    return logits;
+    ops::linear(s.logits, s.final_normed, lm_head_w);
+    return s.logits;
 }
 
 } // namespace zedinfer::model

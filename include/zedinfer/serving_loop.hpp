@@ -61,6 +61,10 @@ public:
 
 private:
     InferenceEngine* engine_;
+    // Cached from SchedulerConfig at construction (the config itself is
+    // moved into scheduler_). True when --mtp / ZEDINFER_MTP_SPEC enabled
+    // MTP speculative decoding for this engine.
+    bool mtp_enabled_ = false;
     Scheduler scheduler_;
 
     // Thread synchronization for serving mode
