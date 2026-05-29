@@ -88,6 +88,29 @@ public:
     void setSeed(unsigned int seed) override;
     std::string name() const override { return "General"; }
 
+    // The truncated, renormalized distribution sample() draws from: applies
+    // repetition penalty + temperature + softmax + top_k + top_p, returns the
+    // surviving (probability, token_id) pairs sorted by probability descending
+    // (probabilities sum to 1 over the kept support). Exposed so Qwen3.5 MTP
+    // speculative decoding can run true rejection sampling against it.
+    std::vector<std::pair<float, int>> truncatedDist(tensor_t logits,
+                                                     const std::vector<int>* recent_tokens = nullptr);
+
+    // Draw one token id from a precomputed truncatedDist() output (inverse-CDF
+    // over the sampler's RNG stream).
+    int sampleFromDist(const std::vector<std::pair<float, int>>& dist);
+
+    // Speculative-decode rejection sampling at one position. p_dist is the
+    // target (main model) truncatedDist and q_dist the draft (MTP head)
+    // truncatedDist for the same position; `draft` was previously drawn from
+    // q_dist. Accepts the draft with probability min(1, p(draft)/q(draft));
+    // on reject samples the corrected token from the residual
+    // normalize(max(0, p - q)) over the target support. Returns the committed
+    // token and sets `accepted`. The committed token is distributed exactly as
+    // the target p (standard speculative-decoding guarantee).
+    int specRejectionSample(const std::vector<std::pair<float, int>>& p_dist,
+                            const std::vector<std::pair<float, int>>& q_dist, int draft, bool& accepted);
+
     void setParams(const SamplerParams& params);
     const SamplerParams& getParams() const { return params_; }
 

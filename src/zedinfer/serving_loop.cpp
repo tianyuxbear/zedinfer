@@ -316,7 +316,19 @@ bool ServingLoop::step() {
                         api->memcpy_sync(&mtp_top1, idx_dev->data(), sizeof(int64_t),
                                          ZEDINFER_MEMCPY_D2H);
                         if (mtp_spec) {
-                            req->mtp_pending_draft = static_cast<int>(mtp_top1);
+                            // Stage D.2: in sampling mode draw the draft from the
+                            // MTP head's truncated distribution q (not argmax) and
+                            // carry q so the verify step runs true rejection
+                            // sampling. Greedy/argmax mode keeps the MTP top-1 as
+                            // the draft (exact top-1 match acceptance).
+                            if (auto* gs = dynamic_cast<sampler::GeneralSampler*>(&engine_->sampler())) {
+                                auto q = gs->truncatedDist(last_view, &req->output_ids);
+                                req->mtp_pending_draft = gs->sampleFromDist(q);
+                                req->mtp_draft_q       = std::move(q);
+                            } else {
+                                req->mtp_pending_draft = static_cast<int>(mtp_top1);
+                                req->mtp_draft_q.clear();
+                            }
                         }
                         if (mtp_debug_env) {
                             fprintf(stderr, "[MTP-debug] main_token=%d  mtp_top1=%lld\n",

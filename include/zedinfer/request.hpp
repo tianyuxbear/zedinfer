@@ -10,6 +10,7 @@
 #include <functional>
 #include <future>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace zedinfer {
@@ -178,6 +179,16 @@ public:
     // as a 2-token verify batch. -1 = no draft pending (regular 1-token
     // decode this step).
     int      mtp_pending_draft = -1;
+
+    // Stage D.2 spec-decode rejection sampling (sampling mode only). When the
+    // active sampler is GeneralSampler the draft is DRAWN from the MTP head's
+    // truncated distribution q (not argmax), and that q is carried here so the
+    // verify step can run true rejection sampling: accept the draft with
+    // probability min(1, p(draft)/q(draft)) against the main distribution p,
+    // else resample the corrected token from the residual normalize(max(0,p-q)).
+    // Sparse (probability, token_id) pairs; empty under greedy/argmax (which
+    // uses exact top-1 match acceptance instead).
+    std::vector<std::pair<float, int>> mtp_draft_q;
 
     // Stage D.1 spec-decode counters (per request, lifetime of the request).
     // Useful for logging the accept rate observed during actual generation,

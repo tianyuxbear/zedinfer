@@ -182,7 +182,8 @@ void GeneralSampler::setTopP(float top_p) {
     params_.top_p = top_p;
 }
 
-int GeneralSampler::sample(tensor_t logits, const std::vector<int>* recent_tokens) {
+std::vector<std::pair<float, int>> GeneralSampler::truncatedDist(tensor_t logits,
+                                                                const std::vector<int>* recent_tokens) {
     // Extract and ensure logits are on CPU
     tensor_t last_logits = getLastLogits(logits);
     last_logits = ensureCPU(last_logits);
@@ -228,16 +229,78 @@ int GeneralSampler::sample(tensor_t logits, const std::vector<int>* recent_token
         applyTopP(indexed_probs);
     }
 
-    // Renormalize filtered probabilities
+    // Renormalize filtered probabilities so they sum to 1 over the kept support.
     float prob_sum = 0.0f;
     for (const auto& pair : indexed_probs) { prob_sum += pair.first; }
+    if (prob_sum > 0.0f) {
+        for (auto& pair : indexed_probs) { pair.first /= prob_sum; }
+    }
+    return indexed_probs;
+}
 
-    std::vector<float> final_probs(indexed_probs.size());
-    for (size_t i = 0; i < indexed_probs.size(); ++i) { final_probs[i] = indexed_probs[i].first / prob_sum; }
+int GeneralSampler::sampleFromDist(const std::vector<std::pair<float, int>>& dist) {
+    if (dist.empty()) {
+        return -1;
+    }
+    std::uniform_real_distribution<float> uni(0.0f, 1.0f);
+    float rand_val = uni(rng_);
+    float cumsum = 0.0f;
+    for (const auto& pr : dist) {
+        cumsum += pr.first;
+        if (rand_val < cumsum) {
+            return pr.second;
+        }
+    }
+    return dist.back().second; // floating-point slack
+}
 
-    // Sample from renormalized distribution
-    int sampled_idx = sampleFromProbs(final_probs.data(), final_probs.size());
-    return indexed_probs[sampled_idx].second;
+int GeneralSampler::specRejectionSample(const std::vector<std::pair<float, int>>& p_dist,
+                                        const std::vector<std::pair<float, int>>& q_dist, int draft, bool& accepted) {
+    auto prob_of = [](const std::vector<std::pair<float, int>>& dist, int tok) -> float {
+        for (const auto& pr : dist) {
+            if (pr.second == tok) {
+                return pr.first;
+            }
+        }
+        return 0.0f;
+    };
+    const float qd = prob_of(q_dist, draft);
+    const float pd = prob_of(p_dist, draft);
+
+    // Accept the draft with probability min(1, p(draft)/q(draft)). qd > 0 since
+    // the draft was drawn from q_dist; guard defensively anyway.
+    std::uniform_real_distribution<float> uni(0.0f, 1.0f);
+    const float u = uni(rng_);
+    if (qd <= 0.0f || u <= pd / qd) {
+        accepted = true;
+        return draft;
+    }
+
+    // Reject: sample the corrected token from the residual normalize(max(0, p-q))
+    // over the target support. This makes the committed token distributed
+    // exactly as the target p.
+    accepted = false;
+    std::vector<std::pair<float, int>> residual;
+    residual.reserve(p_dist.size());
+    float sum = 0.0f;
+    for (const auto& pr : p_dist) {
+        const float r = pr.first - prob_of(q_dist, pr.second);
+        if (r > 0.0f) {
+            residual.emplace_back(r, pr.second);
+            sum += r;
+        }
+    }
+    if (residual.empty() || sum <= 0.0f) {
+        // p's support is contained in q with no positive residual (rare on a
+        // reject); fall back to a plain sample from the target.
+        return sampleFromDist(p_dist);
+    }
+    for (auto& pr : residual) { pr.first /= sum; }
+    return sampleFromDist(residual);
+}
+
+int GeneralSampler::sample(tensor_t logits, const std::vector<int>* recent_tokens) {
+    return sampleFromDist(truncatedDist(logits, recent_tokens));
 }
 
 void GeneralSampler::applyTemperature(float* logits, size_t size) {

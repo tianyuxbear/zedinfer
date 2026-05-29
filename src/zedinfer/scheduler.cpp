@@ -400,17 +400,31 @@ void Scheduler::process_results(ScheduledBatch& batch, tensor_t logits, sampler:
         req->mtp_pending_draft = -1;
 
         if (is_spec) {
-            // logits[0] -> main's prediction for the position last_token was at.
-            // If argmax matches the draft, the draft was right; we ALSO accept
-            // the t+2 sample (from logits[1]). Otherwise reject — emit only
-            // main's corrected token and let next step overwrite the dirty
-            // K/V slot we just wrote with the wrong input.
+            // logits[0] -> main's distribution p for the draft's position; an
+            // accept also unlocks the t+2 bonus token from logits[1].
+            //
+            // Sampling mode (GeneralSampler + the MTP draft distribution q carried
+            // from the draft step): TRUE rejection sampling — accept the draft d
+            // with probability min(1, p(d)/q(d)), else resample the corrected
+            // token from the residual normalize(max(0, p-q)). The committed token
+            // is distributed exactly as the target p. Greedy/argmax mode: accept
+            // iff main's argmax equals the draft (exact top-1 match).
             auto row0 = logits->slice(0, offset,     offset + 1);
             sampler::Sampler& spec_sampler = pick_sampler(*req);
-            int  t0   = spec_sampler.sample(row0, &req->output_ids);
+            int  t0       = -1;
+            bool accepted = false;
+            if (auto* gs = dynamic_cast<sampler::GeneralSampler*>(&spec_sampler);
+                gs != nullptr && !req->mtp_draft_q.empty()) {
+                auto p_dist = gs->truncatedDist(row0, &req->output_ids);
+                t0          = gs->specRejectionSample(p_dist, req->mtp_draft_q, draft, accepted);
+            } else {
+                t0       = spec_sampler.sample(row0, &req->output_ids);
+                accepted = (t0 == draft);
+            }
+            req->mtp_draft_q.clear();
             t0 = apply_think_budget(req, t0);
 
-            if (t0 == draft) {
+            if (accepted) {
                 // ACCEPT: commit draft + sample next from logits[1].
                 auto row1 = logits->slice(0, offset + 1, offset + 2);
                 int  t1   = spec_sampler.sample(row1, &req->output_ids);
