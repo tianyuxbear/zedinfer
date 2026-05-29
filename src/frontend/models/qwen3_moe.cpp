@@ -27,87 +27,10 @@ size_t detect_intermediate_size(const ModelWeights& weights, const std::string& 
     return 0;
 }
 
-// Try to parse "layers.{L}.mlp.experts.{E}.{proj}.{suffix}" into components.
-// Returns true on match. proj is one of: gate_proj, up_proj, down_proj.
-bool parse_expert_tensor_name(const std::string& name, size_t& layer, size_t& expert_id, std::string& proj,
-                              std::string& suffix) {
-    static const std::string kPrefix = "layers.";
-    static const std::string kMid = ".mlp.experts.";
-    if (name.compare(0, kPrefix.size(), kPrefix) != 0) {
-        return false;
-    }
-    size_t pos = kPrefix.size();
-    size_t dot = name.find('.', pos);
-    if (dot == std::string::npos) {
-        return false;
-    }
-    try {
-        layer = std::stoul(name.substr(pos, dot - pos));
-    } catch (...) { return false; }
-    if (name.compare(dot, kMid.size(), kMid) != 0) {
-        return false;
-    }
-    pos = dot + kMid.size();
-    dot = name.find('.', pos);
-    if (dot == std::string::npos) {
-        return false;
-    }
-    try {
-        expert_id = std::stoul(name.substr(pos, dot - pos));
-    } catch (...) { return false; }
-    pos = dot + 1;
-    dot = name.find('.', pos);
-    if (dot == std::string::npos) {
-        return false;
-    }
-    proj = name.substr(pos, dot - pos);
-    if (proj != "gate_proj" && proj != "up_proj" && proj != "down_proj") {
-        return false;
-    }
-    suffix = name.substr(dot + 1);
-    return true;
-}
-
-// Assign a tensor to the correct slot in ExpertFFN based on proj + suffix.
-void assign_expert_tensor(ExpertFFN& ffn, const std::string& proj, const std::string& suffix, tensor_t tensor) {
-    tensor_t* target = nullptr;
-    if (proj == "gate_proj") {
-        if (suffix == "weight_packed") {
-            target = &ffn.gate_packed;
-        } else if (suffix == "weight_scale") {
-            target = &ffn.gate_scale;
-        } else if (suffix == "weight_g_idx") {
-            target = &ffn.gate_g_idx;
-        } else if (suffix == "weight") {
-            target = &ffn.gate_weight;
-        }
-    } else if (proj == "up_proj") {
-        if (suffix == "weight_packed") {
-            target = &ffn.up_packed;
-        } else if (suffix == "weight_scale") {
-            target = &ffn.up_scale;
-        } else if (suffix == "weight_g_idx") {
-            target = &ffn.up_g_idx;
-        } else if (suffix == "weight") {
-            target = &ffn.up_weight;
-        }
-    } else if (proj == "down_proj") {
-        if (suffix == "weight_packed") {
-            target = &ffn.down_packed;
-        } else if (suffix == "weight_scale") {
-            target = &ffn.down_scale;
-        } else if (suffix == "weight_g_idx") {
-            target = &ffn.down_g_idx;
-        } else if (suffix == "weight") {
-            target = &ffn.down_weight;
-        }
-    }
-    if (target) {
-        *target = std::move(tensor);
-    }
-}
-
 // Move all expert tensors out of ModelWeights into a new ExpertWeights.
+// (parse_expert_tensor_name / assign_expert_tensor are shared helpers declared
+// in expert_weights.hpp — the Qwen3 and Qwen3.5 MoE loaders use the same
+// per-expert naming convention.)
 std::unique_ptr<ExpertWeights> extract_expert_weights(ModelWeights& weights, size_t num_layers,
                                                       size_t num_experts_per_layer) {
     auto experts = std::make_unique<ExpertWeights>(num_layers, num_experts_per_layer);

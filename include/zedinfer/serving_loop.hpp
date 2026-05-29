@@ -67,9 +67,9 @@ private:
     bool mtp_enabled_ = false;
     Scheduler scheduler_;
 
-    // Thread synchronization for serving mode
-    std::mutex work_mutex_;
-    std::condition_variable work_cv_;
+    // Serving-mode run flag. The idle-wait/wakeup coordination lives in the
+    // Scheduler (wait_for_work/wake_waiters) so it shares one mutex with the
+    // request queue. Read by the Scheduler's wait predicate as a const ref.
     std::atomic<bool> running_{false};
 
     std::unique_ptr<InferenceRequest> build_request(const std::vector<int>& input_ids, const GenerationConfig& config);

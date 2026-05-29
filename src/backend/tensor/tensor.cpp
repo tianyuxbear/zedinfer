@@ -362,7 +362,7 @@ void Tensor::load(const void* src_) {
     CHECK_ARGUMENT(src_ != nullptr, "source buffer is nullptr");
 
     // Validate storage: must have non-zero size
-    ASSERT(_storage->size() != 0, "storage size must be no-zero");
+    ASSERT(_storage->size() != 0, "storage size must be non-zero");
 
     // Ensure the runtime device matches this tensor's affinity
     zedinferDeviceType_t device_type = deviceType();
@@ -504,6 +504,24 @@ tensor_t Tensor::to(zedinferDeviceType_t device_type, int device_id) const {
     // If target device matches current device, return a shallow clone (zero-copy)
     if (device_type == deviceType() && device_id == deviceId()) {
         return std::shared_ptr<Tensor>(new Tensor(_meta, _storage, _offset));
+    }
+
+    // The cross-device copy below is a flat memcpy of numel*elementSize bytes
+    // from data() while preserving this tensor's strides. That reproduces the
+    // logical tensor iff its live elements pack into exactly that byte range:
+    // true for contiguous tensors AND for whole-tensor permutations (which keep
+    // every element, only reindexed), but NOT for strided / gappy sub-views
+    // (e.g. slicing a permuted tensor) whose elements span a wider range. Guard
+    // the unsafe case loudly instead of silently copying the wrong bytes — the
+    // caller should materialize a contiguous copy via contiguous() first.
+    if (numel() > 0) {
+        size_t max_elem_offset = 0;
+        for (size_t d = 0; d < _meta.shape.size(); ++d) {
+            max_elem_offset += (_meta.shape[d] - 1) * static_cast<size_t>(_meta.strides[d]);
+        }
+        ASSERT(max_elem_offset + 1 == numel(),
+               "Tensor::to() cannot copy a strided/gappy view (e.g. a slice of a permuted "
+               "tensor); call contiguous() first.");
     }
 
     // Compute total byte size of data to copy

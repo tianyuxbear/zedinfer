@@ -261,7 +261,7 @@ SequenceBlockTable BlockAllocator::allocate_sequence(int estimated_tokens) {
     int total_needed = blocks_per_layer * num_layers_;
     if (total_needed > pool_.available_blocks()) {
         throw std::runtime_error("[BlockAllocator] Not enough blocks: need " + std::to_string(total_needed)
-                                 + ", available " + std::to_string(pool_.free_blocks()));
+                                 + ", available " + std::to_string(pool_.available_blocks()));
     }
 
     SequenceBlockTable table;

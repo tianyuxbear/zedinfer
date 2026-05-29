@@ -124,9 +124,8 @@ std::unique_ptr<InferenceRequest> ServingLoop::build_request(const std::vector<i
 
 std::future<GenerationResult> ServingLoop::submit_async(std::unique_ptr<InferenceRequest> request) {
     auto future = request->result_promise.get_future();
+    // Scheduler::submit() notifies the serving thread's wait_for_work().
     scheduler_.submit(std::move(request));
-    // Wake the serving loop if it's waiting
-    work_cv_.notify_one();
     return future;
 }
 
@@ -160,9 +159,11 @@ bool ServingLoop::step() {
         // mtp_spec is the "active" path (drafts get committed via 2-token verify);
         // mtp_debug just logs. The user-visible default is off — env vars exist
         // so we don't have to touch the binary's CLI surface to A/B test.
-        const bool mtp_spec_env  = std::getenv("ZEDINFER_MTP_SPEC")  != nullptr;
-        const bool mtp_debug_env = std::getenv("ZEDINFER_MTP_DEBUG") != nullptr;
-        const bool mtp_spec      = mtp_enabled_ || mtp_spec_env;
+        // Resolved once per process (env vars are immutable at runtime), so the
+        // per-step path pays no getenv cost.
+        static const bool mtp_spec_env  = std::getenv("ZEDINFER_MTP_SPEC")  != nullptr;
+        static const bool mtp_debug_env = std::getenv("ZEDINFER_MTP_DEBUG") != nullptr;
+        const bool mtp_spec             = mtp_enabled_ || mtp_spec_env;
         if (auto* hybrid_model = dynamic_cast<const model::Qwen3_5Model*>(&engine_->model())) {
             InferenceRequest* req = !batch.decode_requests.empty()
                                        ? batch.decode_requests[0]
@@ -379,10 +380,11 @@ void ServingLoop::run_serving() {
             } catch (const std::exception& e) { LOGE << "[ServingLoop] Unexpected error in run_serving: " << e.what(); }
         }
 
-        // No work — wait for new submissions or stop signal
+        // No work — wait for new submissions or stop signal. The wait lives in
+        // the Scheduler so the wakeup predicate shares submit_mutex_ with
+        // submit(); no lost wakeups, no data race on the queue.
         if (running_) {
-            std::unique_lock<std::mutex> lock(work_mutex_);
-            work_cv_.wait(lock, [this] { return scheduler_.has_work() || !running_; });
+            scheduler_.wait_for_work(running_);
         }
     }
 
@@ -398,7 +400,7 @@ void ServingLoop::run_serving() {
 
 void ServingLoop::stop() {
     running_ = false;
-    work_cv_.notify_one();
+    scheduler_.wake_waiters();
 }
 
 void ServingLoop::fail_batch(ScheduledBatch& batch, const std::string& error_msg) {

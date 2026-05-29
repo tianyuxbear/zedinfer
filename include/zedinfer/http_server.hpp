@@ -61,6 +61,11 @@ private:
         std::unique_ptr<InferenceSession> session;
         std::chrono::steady_clock::time_point last_access;
         std::atomic<bool> busy{false};
+        // Set by delete_session() when a DELETE arrives while the session is
+        // busy (e.g. mid-stream). The entry is kept alive until unlock_session()
+        // observes the flag and reclaims it, so an in-flight streaming response
+        // that still holds a raw InferenceSession* is never freed underneath it.
+        bool pending_delete = false;
     };
     std::unordered_map<std::string, std::unique_ptr<SessionEntry>> sessions_;
     std::mutex sessions_mutex_;

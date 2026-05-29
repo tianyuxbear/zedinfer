@@ -5,6 +5,8 @@
 #include "zedinfer/batch_context.hpp"
 #include "zedinfer/request.hpp"
 
+#include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <deque>
 #include <memory>
@@ -110,6 +112,14 @@ public:
     int pending_count() const;
     int active_count() const;
 
+    // Block the calling (serving) thread until there is work to do or `running`
+    // becomes false. The wait shares submit_mutex_ with submit(), so the wakeup
+    // condition is evaluated under the same lock that guards the queues — no
+    // lost wakeups and no data race on the predicate state.
+    void wait_for_work(const std::atomic<bool>& running);
+    // Wake any thread parked in wait_for_work() (e.g. on stop()).
+    void wake_waiters();
+
     // Remove completed/failed requests from active list (called after fail_batch)
     void cleanup_failed_requests();
 
@@ -144,7 +154,10 @@ private:
     int think_open_token_id_ = -1;
     int think_close_token_id_ = -1;
     int double_newline_token_id_ = -1;
-    std::mutex submit_mutex_;
+    // mutable so the const status queries (has_work/pending_count/active_count)
+    // can lock it; they are called from HTTP threads concurrently with submit().
+    mutable std::mutex submit_mutex_;
+    std::condition_variable work_cv_;
 
     std::deque<std::unique_ptr<InferenceRequest>> waiting_queue_;
     std::vector<std::unique_ptr<InferenceRequest>> active_requests_; // decode phase

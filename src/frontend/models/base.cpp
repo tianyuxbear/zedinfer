@@ -1031,7 +1031,7 @@ std::unique_ptr<ModelWeights> Model::load_weights(const std::string& model_path,
     auto mmap_end = std::chrono::high_resolution_clock::now();
     progress.finish_stage();
     auto mmap_time = std::chrono::duration<double>(mmap_end - load_start).count();
-    LOGI.printf("⏱️  Mmap time: %.4fs", mmap_time);
+    LOGI.printf("[Loader] Mmap time: %.4fs", mmap_time);
 
     auto weights = std::make_unique<ModelWeights>();
     weights->retain_resource(loader);
@@ -1168,7 +1168,7 @@ std::unique_ptr<ModelWeights> Model::load_weights(const std::string& model_path,
                 throw std::runtime_error("Act-order reordering requires packed weights: " + prefix);
             }
 
-            LOGI.printf("🔄 Reordering weights for %s (Act-Order detected)", prefix.c_str());
+            LOGI.printf("[Loader] Reordering weights for %s (Act-Order detected)", prefix.c_str());
 
             const int32_t* g_idx_ptr = reinterpret_cast<const int32_t*>(group.t_g_idx->data());
             const int32_t* packed_ptr = reinterpret_cast<const int32_t*>(group.t_packed->data());
@@ -1282,7 +1282,7 @@ std::unique_ptr<ModelWeights> Model::load_weights(const std::string& model_path,
     auto convert_end = std::chrono::high_resolution_clock::now();
     progress.finish_stage();
     auto convert_time = std::chrono::duration<double>(convert_end - convert_start).count();
-    LOGI.printf("⏱️  Conversion time: %.4fs (%zu tensors)", convert_time, converted_count);
+    LOGI.printf("[Loader] Conversion time: %.4fs (%zu tensors)", convert_time, converted_count);
     if (cpu_pinned_count > 0) {
         LOGI.printf("[Loader] Routed %zu tensors to CPU pinned memory via predicate", cpu_pinned_count);
     }

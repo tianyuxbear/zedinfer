@@ -47,21 +47,43 @@ void Scheduler::submit(std::unique_ptr<InferenceRequest> request) {
     request->request_id = next_request_id_++;
     request->phase = RequestPhase::QUEUED;
     waiting_queue_.push_back(std::move(request));
+    // Wake the serving thread if it is parked in wait_for_work(). Notifying
+    // under the lock is intentional: it pairs the queue mutation with the
+    // wakeup so a concurrent waiter cannot miss it.
+    work_cv_.notify_one();
 }
 
 bool Scheduler::has_work() const {
+    std::lock_guard<std::mutex> lock(submit_mutex_);
     return !waiting_queue_.empty() || !active_requests_.empty();
 }
 
 int Scheduler::pending_count() const {
+    std::lock_guard<std::mutex> lock(submit_mutex_);
     return static_cast<int>(waiting_queue_.size());
 }
 
 int Scheduler::active_count() const {
+    std::lock_guard<std::mutex> lock(submit_mutex_);
     return static_cast<int>(active_requests_.size());
 }
 
+void Scheduler::wait_for_work(const std::atomic<bool>& running) {
+    std::unique_lock<std::mutex> lock(submit_mutex_);
+    work_cv_.wait(lock, [this, &running] {
+        return !waiting_queue_.empty() || !active_requests_.empty() || !running.load();
+    });
+}
+
+void Scheduler::wake_waiters() {
+    // Acquire the lock so a thread between its predicate check and blocking in
+    // wait_for_work() cannot miss this wakeup.
+    { std::lock_guard<std::mutex> lock(submit_mutex_); }
+    work_cv_.notify_all();
+}
+
 void Scheduler::cleanup_failed_requests() {
+    std::lock_guard<std::mutex> lock(submit_mutex_);
     // Clean active requests (decode phase)
     active_requests_.erase(std::remove_if(active_requests_.begin(), active_requests_.end(),
                                           [](const auto& ptr) { return ptr->phase == RequestPhase::COMPLETE; }),
@@ -291,6 +313,14 @@ void Scheduler::process_results(ScheduledBatch& batch, tensor_t logits, sampler:
                                 tokenizer::Tokenizer& tokenizer, const std::vector<int>& stop_token_ids) {
     int offset = 0;
 
+    // Debug toggle resolved once per process (the env var never changes at
+    // runtime). Dumps every committed token id to stderr. Resolving it here
+    // keeps getenv() out of the per-token sampling hot path.
+    static const bool dump_token_ids = [] {
+        const char* env = std::getenv("ZEDINFER_DUMP_TOKEN_IDS");
+        return env && env[0] == '1';
+    }();
+
     // Pick a sampler honoring the request's GenerationConfig overrides. Called
     // immediately before each sample() so per-request temperature / top_p /
     // top_k / seed / repetition_penalty land on the GeneralSampler instance.
@@ -431,7 +461,7 @@ void Scheduler::process_results(ScheduledBatch& batch, tensor_t logits, sampler:
                 // think-budget on the second emitted token too.
                 t1 = apply_think_budget(req, t1);
 
-                if (const char* env = std::getenv("ZEDINFER_DUMP_TOKEN_IDS"); env && env[0] == '1') {
+                if (dump_token_ids) {
                     fprintf(stderr, "[zedinfer-tok] step=%d id=%d (spec-accept)\n",
                             req->generated_count, t0);
                     fprintf(stderr, "[zedinfer-tok] step=%d id=%d (spec-accept+1)\n",
@@ -470,7 +500,7 @@ void Scheduler::process_results(ScheduledBatch& batch, tensor_t logits, sampler:
                 // slot at position N+1 is dirty, but the next decode step is a
                 // 1-token forward at N+1 that overwrites it before any attention
                 // read reaches it.
-                if (const char* env = std::getenv("ZEDINFER_DUMP_TOKEN_IDS"); env && env[0] == '1') {
+                if (dump_token_ids) {
                     fprintf(stderr, "[zedinfer-tok] step=%d id=%d (spec-reject draft=%d)\n",
                             req->generated_count, t0, draft);
                 }
@@ -499,7 +529,7 @@ void Scheduler::process_results(ScheduledBatch& batch, tensor_t logits, sampler:
             int  token = pick_sampler(*req).sample(req_logits, &req->output_ids);
             token = apply_think_budget(req, token);
 
-            if (const char* env = std::getenv("ZEDINFER_DUMP_TOKEN_IDS"); env && env[0] == '1') {
+            if (dump_token_ids) {
                 fprintf(stderr, "[zedinfer-tok] step=%d id=%d\n", req->generated_count, token);
             }
 
@@ -575,7 +605,7 @@ void Scheduler::process_results(ScheduledBatch& batch, tensor_t logits, sampler:
             int token = pick_sampler(*req).sample(req_logits, &req->output_ids);
             token = apply_think_budget(req, token);
 
-            if (const char* env = std::getenv("ZEDINFER_DUMP_TOKEN_IDS"); env && env[0] == '1') {
+            if (dump_token_ids) {
                 fprintf(stderr, "[zedinfer-tok] step=0 id=%d (prefill)\n", token);
             }
 
@@ -599,10 +629,15 @@ void Scheduler::process_results(ScheduledBatch& batch, tensor_t logits, sampler:
         offset += chunk;
     }
 
-    // Remove completed requests
-    active_requests_.erase(std::remove_if(active_requests_.begin(), active_requests_.end(),
-                                          [](const auto& ptr) { return ptr->phase == RequestPhase::COMPLETE; }),
-                           active_requests_.end());
+    // Remove completed requests. Lock submit_mutex_ for the structural mutation
+    // so the HTTP-thread status queries (active_count/has_work) never read the
+    // vector mid-erase.
+    {
+        std::lock_guard<std::mutex> lock(submit_mutex_);
+        active_requests_.erase(std::remove_if(active_requests_.begin(), active_requests_.end(),
+                                              [](const auto& ptr) { return ptr->phase == RequestPhase::COMPLETE; }),
+                               active_requests_.end());
+    }
 }
 
 void Scheduler::complete_request(InferenceRequest& req) {

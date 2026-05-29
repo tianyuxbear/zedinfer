@@ -2,6 +2,7 @@
 
 #include "backend/tensor/tensor.hpp"
 
+#include <string>
 #include <vector>
 
 namespace zedinfer::model {
@@ -54,5 +55,17 @@ private:
     size_t num_experts_per_layer_;
     std::vector<ExpertFFN> slots_;
 };
+
+// Parse a per-expert tensor name of the form
+//   layers.{L}.mlp.experts.{E}.{gate_proj|up_proj|down_proj}.{weight|weight_packed|weight_scale|weight_g_idx}
+// into its components. Returns true on match. Shared by the Qwen3 and Qwen3.5
+// MoE loaders, which use the identical per-expert naming convention (after the
+// loader strips the "model." / "language_model." prefixes).
+bool parse_expert_tensor_name(const std::string& name, size_t& layer, size_t& expert_id, std::string& proj,
+                              std::string& suffix);
+
+// Route a parsed (proj, suffix) tensor into the matching ExpertFFN slot.
+// Unrecognized (proj, suffix) combinations are silently ignored.
+void assign_expert_tensor(ExpertFFN& ffn, const std::string& proj, const std::string& suffix, tensor_t tensor);
 
 } // namespace zedinfer::model

@@ -14,10 +14,6 @@ namespace zedinfer::model {
 struct Qwen3_5Config : public ModelConfig {
     Qwen3_5Config() = default;
     Qwen3_5Config(ModelConfig base) : ModelConfig(std::move(base)) {}
-
-    // Period (in layers) between full_attention layers in the hybrid stack.
-    // Cross-check: must agree with the parsed layer_types pattern.
-    int full_attention_interval = 4;
 };
 
 // MoE variant of Qwen3.5. Inherits hybrid/vision/mrope from Qwen3_5Config and

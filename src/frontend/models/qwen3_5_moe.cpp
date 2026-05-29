@@ -14,85 +14,10 @@ namespace zedinfer::model {
 
 namespace {
 
-// Same naming convention as v0.2.0's Qwen3MoEModel after the loader strips the
-// "model." / "language_model." prefixes — experts live at
-//   layers.{L}.mlp.experts.{E}.{gate_proj|up_proj|down_proj}.{weight|weight_packed|weight_scale|weight_g_idx}
-bool parse_expert_tensor_name(const std::string& name, size_t& layer, size_t& expert_id, std::string& proj,
-                              std::string& suffix) {
-    static const std::string kPrefix = "layers.";
-    static const std::string kMid = ".mlp.experts.";
-    if (name.compare(0, kPrefix.size(), kPrefix) != 0) {
-        return false;
-    }
-    size_t pos = kPrefix.size();
-    size_t dot = name.find('.', pos);
-    if (dot == std::string::npos) {
-        return false;
-    }
-    try {
-        layer = std::stoul(name.substr(pos, dot - pos));
-    } catch (...) { return false; }
-    if (name.compare(dot, kMid.size(), kMid) != 0) {
-        return false;
-    }
-    pos = dot + kMid.size();
-    dot = name.find('.', pos);
-    if (dot == std::string::npos) {
-        return false;
-    }
-    try {
-        expert_id = std::stoul(name.substr(pos, dot - pos));
-    } catch (...) { return false; }
-    pos = dot + 1;
-    dot = name.find('.', pos);
-    if (dot == std::string::npos) {
-        return false;
-    }
-    proj = name.substr(pos, dot - pos);
-    if (proj != "gate_proj" && proj != "up_proj" && proj != "down_proj") {
-        return false;
-    }
-    suffix = name.substr(dot + 1);
-    return true;
-}
-
-void assign_expert_tensor(ExpertFFN& ffn, const std::string& proj, const std::string& suffix, tensor_t tensor) {
-    tensor_t* target = nullptr;
-    if (proj == "gate_proj") {
-        if (suffix == "weight_packed") {
-            target = &ffn.gate_packed;
-        } else if (suffix == "weight_scale") {
-            target = &ffn.gate_scale;
-        } else if (suffix == "weight_g_idx") {
-            target = &ffn.gate_g_idx;
-        } else if (suffix == "weight") {
-            target = &ffn.gate_weight;
-        }
-    } else if (proj == "up_proj") {
-        if (suffix == "weight_packed") {
-            target = &ffn.up_packed;
-        } else if (suffix == "weight_scale") {
-            target = &ffn.up_scale;
-        } else if (suffix == "weight_g_idx") {
-            target = &ffn.up_g_idx;
-        } else if (suffix == "weight") {
-            target = &ffn.up_weight;
-        }
-    } else if (proj == "down_proj") {
-        if (suffix == "weight_packed") {
-            target = &ffn.down_packed;
-        } else if (suffix == "weight_scale") {
-            target = &ffn.down_scale;
-        } else if (suffix == "weight_g_idx") {
-            target = &ffn.down_g_idx;
-        } else if (suffix == "weight") {
-            target = &ffn.down_weight;
-        }
-    }
-    if (target) {
-        *target = std::move(tensor);
-    }
-}
+// parse_expert_tensor_name / assign_expert_tensor are shared with the Qwen3 MoE
+// loader and live in expert_weights.hpp — both use the identical per-expert
+// naming convention after the loader strips the "model." / "language_model."
+// prefixes.
 
 // Parse a fused expert tensor name produced by newer Qwen3.x bf16 releases
 // (e.g. Qwen3.6-35B-A3B), where all experts within a layer share one 3-D

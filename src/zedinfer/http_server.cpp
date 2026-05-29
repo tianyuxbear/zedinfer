@@ -504,6 +504,11 @@ void HttpServer::unlock_session(const std::string& session_id) {
     auto it = sessions_.find(session_id);
     if (it != sessions_.end()) {
         it->second->busy = false;
+        // A DELETE that arrived mid-use deferred reclamation to us.
+        if (it->second->pending_delete) {
+            LOGI << "[HttpServer] Reclaiming deferred-delete session " << session_id;
+            sessions_.erase(it);
+        }
     }
 }
 
@@ -511,6 +516,14 @@ void HttpServer::delete_session(const std::string& session_id) {
     std::lock_guard<std::mutex> lock(sessions_mutex_);
     auto it = sessions_.find(session_id);
     if (it != sessions_.end()) {
+        // Never erase a busy session: a streaming response holds a raw
+        // InferenceSession* into this entry. Defer reclamation to
+        // unlock_session() so the in-flight turn finishes against live memory.
+        if (it->second->busy) {
+            it->second->pending_delete = true;
+            LOGI << "[HttpServer] Deferring delete of busy session " << session_id;
+            return;
+        }
         LOGI << "[HttpServer] Deleted session " << session_id;
         sessions_.erase(it);
     }

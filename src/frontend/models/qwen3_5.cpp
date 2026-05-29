@@ -23,61 +23,6 @@ namespace zedinfer::model {
 
 namespace {
 
-// Per HF modeling_qwen3_5_moe.py Qwen3_5MoeRMSNorm.forward (lines 825-830):
-//   output = (input * rsqrt(mean(input^2) + eps)) * (1.0 + weight)
-// Our ops::rms_norm computes the standard:
-//   output = (input * rsqrt(mean(input^2) + eps)) * weight
-// We compensate by pre-adding 1.0 to the affected weights at load time so the
-// kernel produces the correct Qwen3.5 result without a per-call cost. The init
-// (zeros_) is consistent with (1 + weight) starting at 1.0 at init, and the
-// inspected layer-0 input_layernorm weight values in the GPTQ-Int4 release
-// range from -0.08 to 0.32 (mean 0.028) — i.e. small deltas from 1.0,
-// confirming the convention.
-void add_one_to_norm_weight(tensor_t t) {
-    if (!t) return;
-    const size_t N      = t->numel();
-    const auto   device = t->deviceType();
-    auto*        api    = device::getRuntimeAPI(device);
-
-    if (t->dtype() == ZEDINFER_DTYPE_BF16) {
-        std::vector<uint16_t> host(N);
-        api->memcpy_sync(host.data(), t->data(), N * sizeof(uint16_t), ZEDINFER_MEMCPY_D2H);
-        for (size_t i = 0; i < N; ++i) {
-            uint32_t u = static_cast<uint32_t>(host[i]) << 16;
-            float    f;
-            std::memcpy(&f, &u, sizeof(f));
-            f += 1.0f;
-            std::memcpy(&u, &f, sizeof(u));
-            host[i] = static_cast<uint16_t>(u >> 16); // truncate-to-bf16
-        }
-        api->memcpy_sync(t->data(), host.data(), N * sizeof(uint16_t), ZEDINFER_MEMCPY_H2D);
-    } else if (t->dtype() == ZEDINFER_DTYPE_F32) {
-        std::vector<float> host(N);
-        api->memcpy_sync(host.data(), t->data(), N * sizeof(float), ZEDINFER_MEMCPY_D2H);
-        for (size_t i = 0; i < N; ++i) host[i] += 1.0f;
-        api->memcpy_sync(t->data(), host.data(), N * sizeof(float), ZEDINFER_MEMCPY_H2D);
-    } else {
-        throw std::runtime_error("[Qwen3_5Model] unsupported rmsnorm weight dtype "
-                                 + std::to_string(static_cast<int>(t->dtype())));
-    }
-}
-
-// (1 + weight) compensation for Qwen3_5MoeRMSNorm is now applied at kernel
-// time (ops::rms_norm with add_one_to_weight=true) so the +1.0f shift happens
-// in fp32 against the bf16-precision weight, matching HF's
-// `output * (1.0 + weight.float())`. Pre-baking (1+w) back into a bf16 buffer
-// at load time lost ~6x precision (bf16 mantissa is much coarser around 1.0
-// than around 0.0, where typical Qwen3.5 weights live) and caused the model
-// to drift from HF after ~16 generated tokens under greedy decoding. The
-// fixup helper is intentionally kept as a no-op so the call site doesn't
-// need to change; remove fully once we're confident no other path depends
-// on it.
-void fixup_qwen3_5_rmsnorm_weights(ModelWeights& weights, int num_layers) {
-    (void)weights;
-    (void)num_layers;
-    LOGI.printf("[Qwen3_5Model] (1+w) compensation deferred to kernel-time (no pre-bake)");
-}
-
 // Reorder full-attention `q_proj.weight` so that the first Hq*Dh rows are all
 // query channels and the next Hq*Dh rows are all gate channels.
 //
@@ -196,12 +141,9 @@ void fixup_qwen3_5_q_proj_weights(ModelWeights& weights, const Qwen3_5Config& cf
 Qwen3_5Model::Qwen3_5Model(Qwen3_5Config config, std::unique_ptr<ModelWeights> weights, const ExecutorConfig& exec,
                            int max_concurrent, const std::string& model_path)
     : config_(std::move(config)), weights_(std::move(weights)) {
-    // Compensate for Qwen3.5's (1 + weight) RMSNorm convention by pre-adding 1.0
-    // to every Qwen3_5MoeRMSNorm tensor at load time. Done once here so the
-    // shared ops::rms_norm kernel (which uses the standard `weight * x` form)
-    // produces the correct result throughout the forward path. See HF source
-    // modeling_qwen3_5_moe.py:822-830 for the convention.
-    fixup_qwen3_5_rmsnorm_weights(*weights_, static_cast<int>(config_.num_hidden_layers));
+    // Note: Qwen3.5's (1 + weight) RMSNorm convention is applied at kernel time
+    // (ops::rms_norm with add_one_to_weight=true), not pre-baked at load time —
+    // pre-baking into bf16 lost precision around 1.0 and drifted from HF.
 
     // De-interleave full-attention q_proj.weight so it matches the layout the
     // forward path assumes (contiguous [query | gate] blocks instead of the

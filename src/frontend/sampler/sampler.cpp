@@ -72,6 +72,13 @@ tensor_t Sampler::ensureCPU(tensor_t tensor) {
 // ArgmaxSampler
 // ============================================================================
 int ArgmaxSampler::sample(tensor_t logits, const std::vector<int>* /*recent_tokens*/) {
+    // Debug toggle resolved once per process; keeps getenv() and the full-vocab
+    // logit dump out of the per-token sampling path unless explicitly enabled.
+    static const bool dump_top_logits = [] {
+        const char* env = std::getenv("ZEDINFER_DUMP_TOP_LOGITS");
+        return env && env[0] == '1';
+    }();
+
     tensor_t last_logits = getLastLogits(logits);
 
     // Lazy-init pre-allocated buffers on first call
@@ -99,7 +106,7 @@ int ArgmaxSampler::sample(tensor_t logits, const std::vector<int>* /*recent_toke
         chosen = static_cast<int>(*reinterpret_cast<const int64_t*>(max_idx_dev_->data()));
     }
 
-    if (const char* env = std::getenv("ZEDINFER_DUMP_TOP_LOGITS"); env && env[0] == '1') {
+    if (dump_top_logits) {
         // Copy full logits to host (fp32 path: getLastLogits may have already converted).
         const size_t vocab = static_cast<size_t>(last_logits->numel());
         std::vector<float> host(vocab);
