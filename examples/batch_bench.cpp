@@ -90,6 +90,11 @@ int main(int argc, char* argv[]) {
     // Random token range for input
     int min_id = 100, max_id = 30000;
 
+    // Fixed seed so the random prompts (and therefore the whole batched run) are
+    // reproducible across invocations — required for before/after A/B validation
+    // and for stable throughput comparisons.
+    utils::set_seed(12345);
+
     double total_time_ms = 0.0;
     int total_generated_tokens = 0;
 
