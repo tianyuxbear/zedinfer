@@ -74,15 +74,18 @@ struct LinearAttnConfig {
 };
 
 struct VisionConfig {
-    int depth                      = 0;
-    int hidden_size                = 0;
-    int out_hidden_size            = 0;
-    int num_heads                  = 0;
-    int patch_size                 = 16;
-    int temporal_patch_size        = 2;
-    int spatial_merge_size         = 2;
-    int num_position_embeddings    = 0;
-    int intermediate_size          = 0;
+    int   depth                   = 0;
+    int   hidden_size             = 0;
+    int   out_hidden_size         = 0;
+    int   num_heads               = 0;
+    int   patch_size              = 16;
+    int   temporal_patch_size     = 2;
+    int   spatial_merge_size      = 2;
+    int   num_position_embeddings = 0;
+    int   intermediate_size       = 0;
+    float layer_norm_eps          = 1e-6f;
+    int   max_pixels              = 16777216; // 4096*4096 default; HF preprocessor_config typically caps lower
+    int   min_pixels              = 0;
 };
 
 struct ModelConfig {

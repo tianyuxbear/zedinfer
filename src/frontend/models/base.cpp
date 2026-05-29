@@ -798,6 +798,13 @@ std::unique_ptr<ModelConfig> Model::load_config(const std::string& config_path) 
             base_config.vision.spatial_merge_size = vision_json.value("spatial_merge_size", 2);
             base_config.vision.num_position_embeddings = vision_json.value("num_position_embeddings", 0);
             base_config.vision.intermediate_size = vision_json.value("intermediate_size", 0);
+            base_config.vision.layer_norm_eps = vision_json.value("layer_norm_eps", 1e-6f);
+            // The pixel limits are usually carried by preprocessor_config.json,
+            // not config.json — read them here in case the model author put
+            // them in the model config. If absent we read preprocessor_config
+            // separately during MultiModalProcessor construction below.
+            base_config.vision.max_pixels = vision_json.value("max_pixels", base_config.vision.max_pixels);
+            base_config.vision.min_pixels = vision_json.value("min_pixels", base_config.vision.min_pixels);
         }
 
         // Special-token IDs live at the *top* of the config, not under text_config.
