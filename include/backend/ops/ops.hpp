@@ -32,6 +32,34 @@ void rms_norm(tensor_t out, tensor_t in, tensor_t weight, float eps,
 // with the next sublayer's pre-norm (or the model's final norm at the last layer).
 void fused_add_rms_norm(tensor_t input, tensor_t residual, tensor_t weight, float eps,
                         bool add_one_to_weight = false);
+
+// LayerNorm with affine + bias (the ViT path uses this; the LLM path uses
+// rms_norm). y = (x - mean(x)) / sqrt(var(x) + eps) * weight + bias, over the
+// last dim. Shapes: out/in [N, D]; weight/bias [D].
+void layer_norm_bias(tensor_t out, tensor_t in, tensor_t weight, tensor_t bias, float eps);
+
+// PyTorch gelu_pytorch_tanh (used by Qwen3.5-VL MLP / merger):
+//   y = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+// Element-wise on any shape; in/out same shape and dtype.
+void gelu_tanh(tensor_t out, tensor_t in);
+
+// Bidirectional vision self-attention (Qwen3.5-VL ViT). Naive O(N^2 D) kernel
+// — fine for ViT where N is in the low thousands and forward runs once per
+// image. Declared in include/backend/ops/vision_attention/vision_attention.hpp.
+struct VisionAttentionParams;
+void vision_attention(const VisionAttentionParams& p);
+
+// Scatter image embeddings into the hidden-state stream at <|image_pad|>
+// token positions. In-place on `hidden`. Used right after the embed_tokens
+// lookup in the LLM forward to inject vision-tower output for multimodal
+// inputs. See backend/ops/scatter_image_embeds/scatter_image_embeds.hpp.
+void scatter_image_embeds(tensor_t hidden, tensor_t input_ids, tensor_t image_embeds, int image_token_id);
+
+// Apply rotary positional embedding in-place to a [N, H, D] tensor with
+// pre-computed cos/sin tables of shape [N, D]. Used by Qwen3.5-VL vision
+// attention with 2D (row, col) RoPE. See backend/ops/apply_rotary_emb/.
+void apply_rotary_emb_inplace(tensor_t q, tensor_t cos, tensor_t sin);
+
 void rope(tensor_t out, tensor_t in, tensor_t pos_ids, float theta);
 void rope_qk(tensor_t q_out, tensor_t k_out, tensor_t q_in, tensor_t k_in, tensor_t pos_ids, float theta);
 void swiglu(tensor_t out, tensor_t gate, tensor_t up);
