@@ -6,7 +6,6 @@
 
 #include <atomic>
 #include <chrono>
-#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <future>
@@ -189,25 +188,22 @@ public:
     // Number of tokens committed by the most recent scheduler step. Set by
     // Scheduler::process_results so serving_loop knows how many MTP forwards
     // to run to advance MTP's K/V cache. 1 for normal decode + reject, 2 on
-    // spec accept, 0 on a rolled-back spec reject (nothing committed). Reset
-    // to 0 after consumption.
+    // spec accept. Reset to 0 after consumption.
     int      mtp_last_n_committed = 0;
 
-    // Stage D.1 spec-decode recurrent-state rollback (hybrid Qwen3.5 only).
-    // The 2-token [last_token, draft] verify forward advances the linear-
-    // attention recurrent state (GatedDeltaNet matrix + causal-conv window)
-    // by BOTH tokens in place. The paged KV cache self-heals on reject (the
-    // next step overwrites the draft's slot before any attention read reaches
-    // it), but the recurrent state has no positional addressing and cannot be
-    // corrected in place — a rejected draft would otherwise poison every
-    // subsequent token. serving_loop snapshots the SSM slot's combined
-    // SSM+conv bytes just before the verify forward; on reject the scheduler
-    // restores them, emits nothing, and sets mtp_spec_rolled_back so the MTP
-    // K/V advance is skipped and the next iteration redoes last_token as a
-    // plain 1-token decode. Bytes match SSMStatePool::snapshot_bytes().
-    std::vector<std::byte> mtp_ssm_snapshot;
-    bool                   mtp_ssm_snapshot_valid = false;
-    bool                   mtp_spec_rolled_back   = false;
+    // Stage D.1 spec-decode recurrent-state handling (hybrid Qwen3.5 only).
+    // The 2-token [last_token, draft] verify forward must not let the
+    // speculative draft poison the linear-attention recurrent state (GDN
+    // matrix + causal-conv window), which — unlike the paged KV cache — has no
+    // positional addressing and cannot self-heal on reject. When this flag is
+    // set, forward_linear_attn_layer commits token 0 (last_token) into the
+    // request's real SSM slot and computes token 1 (draft) into the pool's
+    // spec temp slot. On accept the scheduler promotes temp->real
+    // (SSMStatePool::copy_slot_state); on reject the real slot already holds
+    // the correct post-last_token state, so it just emits the corrected token —
+    // no rollback, no redo. serving_loop sets the flag before a verify forward
+    // and clears it after.
+    bool     mtp_spec_verify_active = false;
 };
 
 } // namespace zedinfer

@@ -82,8 +82,14 @@ SSMStatePool::SSMStatePool(const SSMStatePoolConfig& cfg, const ExecutorConfig& 
 
     const size_t elem_bytes = state_dtype_bytes(cfg.state_dtype);
 
+    // One extra slot beyond max_concurrent serves as the MTP spec-decode verify
+    // scratch (spec_temp_slot()): the draft token's recurrent state is computed
+    // there so the request's real slot keeps the post-last_token state and a
+    // reject needs no rollback/redo. acquire_slot never hands this slot out.
+    const size_t alloc_slots = static_cast<size_t>(cfg.max_concurrent) + 1;
+
     // SSM state: [slots, layers, num_v_heads, value_head_dim, d_state]
-    ssm_buffer_ = Tensor::create({static_cast<size_t>(cfg.max_concurrent),
+    ssm_buffer_ = Tensor::create({alloc_slots,
                                   static_cast<size_t>(cfg.num_linear_layers),
                                   static_cast<size_t>(cfg.num_v_heads),
                                   static_cast<size_t>(cfg.value_head_dim),
@@ -93,7 +99,7 @@ SSMStatePool::SSMStatePool(const SSMStatePoolConfig& cfg, const ExecutorConfig& 
     // Conv state: [slots, layers, kernel - 1, qkv_dim]. The "kernel - 1" rows
     // hold the rolling causal-conv1d history; the current step is consumed
     // straight from the in-flight QKV projection, not the buffer.
-    conv_buffer_ = Tensor::create({static_cast<size_t>(cfg.max_concurrent),
+    conv_buffer_ = Tensor::create({alloc_slots,
                                    static_cast<size_t>(cfg.num_linear_layers),
                                    static_cast<size_t>(cfg.conv_kernel_dim - 1),
                                    static_cast<size_t>(cfg.qkv_dim)},
@@ -215,6 +221,53 @@ void SSMStatePool::restore_slot(int slot_idx, const SSMStateSnapshot& snap) {
         auto* api = core::context().runtime().api();
         api->memcpy_sync(ssm_dst, ssm_src, ssm_bytes_per_slot_, ZEDINFER_MEMCPY_H2D);
         api->memcpy_sync(conv_dst, conv_src, conv_bytes_per_slot_, ZEDINFER_MEMCPY_H2D);
+    }
+}
+
+void SSMStatePool::copy_layer_state(int dst_slot, int src_slot, int layer_idx) {
+    if (dst_slot < 0 || dst_slot > cfg_.max_concurrent || src_slot < 0 || src_slot > cfg_.max_concurrent
+        || layer_idx < 0 || layer_idx >= cfg_.num_linear_layers) {
+        throw std::runtime_error("SSMStatePool::copy_layer_state: out-of-range slot/layer");
+    }
+    const size_t ssm_layer  = static_cast<size_t>(view_.ssm_stride_layer);
+    const size_t conv_layer = static_cast<size_t>(view_.conv_stride_layer);
+    auto* ssm  = static_cast<std::byte*>(ssm_buffer_->data());
+    auto* conv = static_cast<std::byte*>(conv_buffer_->data());
+    std::byte* ssm_dst  = ssm + static_cast<size_t>(dst_slot) * ssm_bytes_per_slot_ + static_cast<size_t>(layer_idx) * ssm_layer;
+    std::byte* ssm_src  = ssm + static_cast<size_t>(src_slot) * ssm_bytes_per_slot_ + static_cast<size_t>(layer_idx) * ssm_layer;
+    std::byte* conv_dst = conv + static_cast<size_t>(dst_slot) * conv_bytes_per_slot_ + static_cast<size_t>(layer_idx) * conv_layer;
+    std::byte* conv_src = conv + static_cast<size_t>(src_slot) * conv_bytes_per_slot_ + static_cast<size_t>(layer_idx) * conv_layer;
+
+    if (ssm_buffer_->deviceType() == ZEDINFER_DEVICE_CPU) {
+        std::memcpy(ssm_dst, ssm_src, ssm_layer);
+        std::memcpy(conv_dst, conv_src, conv_layer);
+    } else {
+        auto* api    = core::context().runtime().api();
+        auto  stream = core::context().runtime().stream();
+        api->memcpy_async(ssm_dst, ssm_src, ssm_layer, ZEDINFER_MEMCPY_D2D, stream);
+        api->memcpy_async(conv_dst, conv_src, conv_layer, ZEDINFER_MEMCPY_D2D, stream);
+    }
+}
+
+void SSMStatePool::copy_slot_state(int dst_slot, int src_slot) {
+    if (dst_slot < 0 || dst_slot > cfg_.max_concurrent || src_slot < 0 || src_slot > cfg_.max_concurrent) {
+        throw std::runtime_error("SSMStatePool::copy_slot_state: out-of-range slot");
+    }
+    auto* ssm  = static_cast<std::byte*>(ssm_buffer_->data());
+    auto* conv = static_cast<std::byte*>(conv_buffer_->data());
+    std::byte* ssm_dst  = ssm + static_cast<size_t>(dst_slot) * ssm_bytes_per_slot_;
+    std::byte* ssm_src  = ssm + static_cast<size_t>(src_slot) * ssm_bytes_per_slot_;
+    std::byte* conv_dst = conv + static_cast<size_t>(dst_slot) * conv_bytes_per_slot_;
+    std::byte* conv_src = conv + static_cast<size_t>(src_slot) * conv_bytes_per_slot_;
+
+    if (ssm_buffer_->deviceType() == ZEDINFER_DEVICE_CPU) {
+        std::memcpy(ssm_dst, ssm_src, ssm_bytes_per_slot_);
+        std::memcpy(conv_dst, conv_src, conv_bytes_per_slot_);
+    } else {
+        auto* api    = core::context().runtime().api();
+        auto  stream = core::context().runtime().stream();
+        api->memcpy_async(ssm_dst, ssm_src, ssm_bytes_per_slot_, ZEDINFER_MEMCPY_D2D, stream);
+        api->memcpy_async(conv_dst, conv_src, conv_bytes_per_slot_, ZEDINFER_MEMCPY_D2D, stream);
     }
 }
 

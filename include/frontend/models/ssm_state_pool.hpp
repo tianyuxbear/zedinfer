@@ -103,6 +103,25 @@ public:
     // lifetime of the pool.
     size_t snapshot_bytes() const { return ssm_bytes_per_slot_ + conv_bytes_per_slot_; }
 
+    // Index of a dedicated scratch slot, never handed out by acquire_slot, used
+    // by Qwen3.5 MTP spec-decode verify. The 2-token [last_token, draft] verify
+    // commits token 0 into the request's real slot (-> post-last_token state)
+    // and token 1 into this temp slot (-> post-draft state); on accept the
+    // scheduler promotes temp->real via copy_slot_state, on reject the temp is
+    // simply discarded (real already holds the correct post-last_token state),
+    // so reject costs no extra forward. The pool over-allocates one slot for it.
+    int spec_temp_slot() const { return cfg_.max_concurrent; }
+
+    // Device-to-device copy of one layer's combined SSM + conv state from
+    // src_slot to dst_slot. Stream-ordered on the compute stream so it composes
+    // with the gdn/conv kernels that read/write the same slots. Used to seed the
+    // spec temp slot with the post-last_token state before the draft is applied.
+    void copy_layer_state(int dst_slot, int src_slot, int layer_idx);
+
+    // Device-to-device copy of a whole slot (all layers, SSM + conv). Used to
+    // promote the spec temp slot into the real slot on a spec-decode accept.
+    void copy_slot_state(int dst_slot, int src_slot);
+
     // Returns a snapshot of the layout. The fields stay valid for the lifetime
     // of the pool; the snapshot itself is a value copy so callers cannot
     // accidentally mutate pool state.

@@ -486,51 +486,64 @@ static tensor_t forward_linear_attn_layer(const HybridForwardConfig& m, tensor_t
     ops::linear(a,   h_in, m.W(p + "in_proj_a.weight"));
     ops::linear(b,   h_in, m.W(p + "in_proj_b.weight"));
 
-    // 2. Depthwise causal conv1d (kernel=4) with conv state from SSMStatePool.
-    //    Kernel folds silu into its output, so qkv_conv = silu(conv1d(qkv)).
+    // 2-4. Stateful core: depthwise causal conv1d (kernel=4, folds in silu) ->
+    //       split into q/k/v -> L2-normalize q/k (HF use_qk_l2norm_in_kernel=True,
+    //       scale q by 1/sqrt(Dk)) -> GatedDeltaNet delta-rule recurrence
+    //       (in-place SSM state update + per-token readout y). Factored into a
+    //       per-(row-range, slot) helper so MTP spec-decode verify can route the
+    //       draft token's recurrence to the pool's temp slot, keeping the real
+    //       slot at the post-last_token state (free reject, no rollback).
     auto qkv_conv = use_la_scratch ? la_view(s_la_scratch.qkv_conv) : make({N, qkv_dim});
-    ops::mamba::causal_conv1d(qkv_conv, qkv, m.W(p + "conv1d.weight"),
-                                m.ssm_pool->view(), req.ssm_slot_idx(),
-                                m.linear_layer_index(L));
+    auto q_ssm    = use_la_scratch ? la_view(s_la_scratch.q_ssm)    : make({N, Hk_Dk});
+    auto k_ssm    = use_la_scratch ? la_view(s_la_scratch.k_ssm)    : make({N, Hk_Dk});
+    auto v_ssm    = use_la_scratch ? la_view(s_la_scratch.v_ssm)    : make({N, Hv_Dv});
+    auto y        = use_la_scratch ? la_view(s_la_scratch.y)        : make({N, Hv_Dv});
+    const size_t elt        = utils::dsize(exec.data_type);
+    const float  qk_scale_q = 1.0f / std::sqrt(static_cast<float>(Dk));
+    tensor_t     conv_w     = m.W(p + "conv1d.weight");
+    tensor_t     A_log_w    = m.W(p + "A_log");
+    tensor_t     dt_bias_w  = m.W(p + "dt_bias");
+    const int    layer_idx  = m.linear_layer_index(L);
 
-    // 3. Split qkv_conv [N, qkv_dim] into contiguous q [N, Hk_Dk], k [N, Hk_Dk],
-    //    v [N, Hv_Dv] for the SSU kernel. Strided copy lives in ops-nvidia.
-    auto q_ssm = use_la_scratch ? la_view(s_la_scratch.q_ssm) : make({N, Hk_Dk});
-    auto k_ssm = use_la_scratch ? la_view(s_la_scratch.k_ssm) : make({N, Hk_Dk});
-    auto v_ssm = use_la_scratch ? la_view(s_la_scratch.v_ssm) : make({N, Hv_Dv});
-    const size_t elt = utils::dsize(exec.data_type);
-    ops::mamba::copy_strided_rows(q_ssm, qkv_conv, 0,         Hk_Dk, qkv_dim, N, elt);
-    ops::mamba::copy_strided_rows(k_ssm, qkv_conv, Hk_Dk,     Hk_Dk, qkv_dim, N, elt);
-    ops::mamba::copy_strided_rows(v_ssm, qkv_conv, 2 * Hk_Dk, Hv_Dv, qkv_dim, N, elt);
+    auto run_stateful = [&](size_t r0, size_t r1, int slot) {
+        const size_t n     = r1 - r0;
+        auto         qkv_c = qkv_conv->slice(0, r0, r1);
+        ops::mamba::causal_conv1d(qkv_c, qkv->slice(0, r0, r1), conv_w, m.ssm_pool->view(), slot, layer_idx);
+        auto q_s = q_ssm->slice(0, r0, r1);
+        auto k_s = k_ssm->slice(0, r0, r1);
+        auto v_s = v_ssm->slice(0, r0, r1);
+        ops::mamba::copy_strided_rows(q_s, qkv_c, 0,         Hk_Dk, qkv_dim, n, elt);
+        ops::mamba::copy_strided_rows(k_s, qkv_c, Hk_Dk,     Hk_Dk, qkv_dim, n, elt);
+        ops::mamba::copy_strided_rows(v_s, qkv_c, 2 * Hk_Dk, Hv_Dv, qkv_dim, n, elt);
+        ops::mamba::qk_l2norm_inplace(q_s, Hk, Dk, qk_scale_q, 1e-6f);
+        ops::mamba::qk_l2norm_inplace(k_s, Hk, Dk, 1.0f,       1e-6f);
+        ops::mamba::GDNParams gp;
+        gp.state_view = m.ssm_pool->view();
+        gp.slot_idx   = slot;
+        gp.layer_idx  = layer_idx;
+        gp.q = q_s; gp.k = k_s; gp.v = v_s;
+        gp.b = b->slice(0, r0, r1); gp.a = a->slice(0, r0, r1);
+        gp.A_log   = A_log_w;
+        gp.dt_bias = dt_bias_w;
+        gp.out        = y->slice(0, r0, r1);
+        gp.num_tokens = static_cast<int>(n);
+        ops::mamba::gdn(gp);
+    };
 
-    // 3b. L2-normalize q and k per (token, k-head) row; scale q by 1/sqrt(Dk).
-    //     HF Qwen3_5MoeGatedDeltaNet.forward calls recurrent_gated_delta_rule
-    //     with use_qk_l2norm_in_kernel=True (see modeling_qwen3_5_moe.py:528,539),
-    //     which inside torch_recurrent_gated_delta_rule applies l2norm(q, k,
-    //     eps=1e-6) and then scale = 1/sqrt(head_k_dim) to q. Our GDN kernel
-    //     consumes pre-normalized inputs (matches the fixture contract).
-    const float qk_scale_q = 1.0f / std::sqrt(static_cast<float>(Dk));
-    ops::mamba::qk_l2norm_inplace(q_ssm, Hk, Dk, qk_scale_q, 1e-6f);
-    ops::mamba::qk_l2norm_inplace(k_ssm, Hk, Dk, 1.0f,       1e-6f);
-
-    // 4. GDN: in-place update of SSMStatePool slot's state buffer + write out y.
-    //    Per P3 retrospective: Qwen3.5's linear-attn is GatedDeltaNet, not
-    //    Mamba2 SSM. The kernel applies sigmoid(b), softplus(a+dt_bias), and
-    //    the delta-rule recurrence S = decay * S + beta * outer(v - S k, k).
-    //    The silu(z) output gate is applied separately below (Step 7), not
-    //    inside the kernel.
-    auto y = use_la_scratch ? la_view(s_la_scratch.y) : make({N, Hv_Dv});
-    ops::mamba::GDNParams gp;
-    gp.state_view = m.ssm_pool->view();
-    gp.slot_idx   = req.ssm_slot_idx();
-    gp.layer_idx  = m.linear_layer_index(L);
-    gp.q = q_ssm; gp.k = k_ssm; gp.v = v_ssm;
-    gp.b = b;     gp.a = a;
-    gp.A_log   = m.W(p + "A_log");
-    gp.dt_bias = m.W(p + "dt_bias");
-    gp.out = y;
-    gp.num_tokens = static_cast<int>(N);
-    ops::mamba::gdn(gp);
+    if (req.mtp_spec_verify_active && N == 2) {
+        // MTP spec-decode verify. Commit token 0 (last_token) into the request's
+        // real slot -> post-last_token state. Seed the pool's temp slot with that
+        // state and apply token 1 (draft) there -> post-draft state. The real slot
+        // is left at the post-last_token state, so a reject needs no rollback and
+        // an accept just promotes temp->real (Scheduler::process_results).
+        const int real_slot = req.ssm_slot_idx();
+        const int temp_slot = m.ssm_pool->spec_temp_slot();
+        run_stateful(0, 1, real_slot);
+        m.ssm_pool->copy_layer_state(temp_slot, real_slot, layer_idx);
+        run_stateful(1, 2, temp_slot);
+    } else {
+        run_stateful(0, N, req.ssm_slot_idx());
+    }
 
     // 6. RMSNorm on per-V-head value_head_dim axis. Qwen3.5 stores the norm
     //    weight as fp32 (`mamba_ssm_dtype=float32`) on disk but we pre-cast it

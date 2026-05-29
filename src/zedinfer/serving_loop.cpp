@@ -8,7 +8,6 @@
 #include "frontend/models/qwen3_5.hpp"
 #include "frontend/models/qwen3_5_moe.hpp"
 #include "frontend/models/paged_forward_context.hpp"
-#include "frontend/models/ssm_state_pool.hpp"
 #include "utils/logging.hpp"
 #include "zedinfer/engine.hpp"
 
@@ -202,20 +201,18 @@ bool ServingLoop::step() {
                                                    Hkv, Dh,
                                                    engine_->exec_config());
                 } else if (req->mtp_pending_draft >= 0 && req->ssm_slot_idx() >= 0) {
-                    // Spec verify step: this 2-token [last_token, draft] forward
-                    // advances the recurrent SSM/conv state by BOTH tokens in
-                    // place. Snapshot the slot now so process_results can roll
-                    // it back if the draft is rejected — the KV cache self-heals
-                    // but the recurrent state cannot (see Request::mtp_ssm_snapshot).
-                    if (auto* pool = engine_->ssm_state_pool()) {
-                        model::SSMStateSnapshot snap = pool->snapshot_slot(req->ssm_slot_idx());
-                        req->mtp_ssm_snapshot       = std::move(snap.bytes);
-                        req->mtp_ssm_snapshot_valid = true;
-                    }
+                    // Spec verify step: tell forward_linear_attn_layer to route
+                    // the draft token's recurrent (GDN + conv) update to the
+                    // pool's temp slot so the request's real SSM slot keeps the
+                    // post-last_token state. On accept the scheduler promotes
+                    // temp->real; on reject the real slot is already correct so
+                    // it just emits the corrected token — no rollback, no redo.
+                    req->mtp_spec_verify_active = true;
                 }
             }
             logits = model::hybrid_transformer_forward(hcfg, ctx, *req, engine_->exec_config(), scratch,
                                                          req->input_embeds(), hidden_out_ptr);
+            req->mtp_spec_verify_active = false;
         } else {
             logits = model::transformer_forward(engine_->model().forward_config(), ctx, engine_->exec_config(),
                                                   scratch);
@@ -264,11 +261,7 @@ bool ServingLoop::step() {
                                            ? batch.decode_requests[0]
                                            : (!batch.prefill_requests.empty() ? batch.prefill_requests[0]
                                                                               : nullptr);
-                // A rolled-back spec reject committed no token and restored the
-                // recurrent state to before the verify; the next 1-token decode
-                // redoes last_token and advances MTP then. Skip the advance now
-                // (advancing here would double-count the last committed token).
-                if (req && req->phase != RequestPhase::COMPLETE && !req->mtp_spec_rolled_back) {
+                if (req && req->phase != RequestPhase::COMPLETE) {
                     const auto& w = mtp_owner->weights();
                     auto embed_w  = w.has_tensor("embed_tokens.weight")
                                         ? w.get_tensor("embed_tokens.weight") : nullptr;
@@ -332,10 +325,9 @@ bool ServingLoop::step() {
                     }
                 }
                 if (req) {
-                    // Consume the per-step flags so a future iteration doesn't
-                    // accidentally pick a stale n or skip the MTP advance.
+                    // Consume the per-step flag so a future iteration doesn't
+                    // accidentally pick a stale n.
                     req->mtp_last_n_committed = 0;
-                    req->mtp_spec_rolled_back = false;
                 }
             } catch (const std::exception& e) {
                 LOGW << "[ServingLoop] MTP branch raised: " << e.what();
