@@ -139,6 +139,10 @@ void SafeTensorFile::load_metadata() {
         info.shape = value["shape"].get<std::vector<size_t>>();
 
         auto data_offsets = value["data_offsets"].get<std::vector<size_t>>();
+        if (data_offsets.size() != 2 || data_offsets[1] < data_offsets[0]) {
+            throw std::runtime_error("Malformed safetensors header: tensor '" + key
+                                     + "' has invalid data_offsets");
+        }
         info.data_offset = data_offsets[0];
         info.num_bytes = data_offsets[1] - data_offsets[0];
 
@@ -225,7 +229,15 @@ const void* SafeTensorFile::get_tensor_data(const std::string& name) const {
     }
 
     const TensorInfo& info = it->second;
-    // data_offset is the start of tensor data section; info.data_offset is relative to that
+    // data_offset is the start of the tensor data section; info.data_offset is relative to it.
+    // Validate the tensor's byte span lies within the mapped file so a corrupt or truncated
+    // checkpoint fails with a clear error instead of reading past the mmap. (info.num_bytes was
+    // validated as data_offsets[1] - data_offsets[0] at parse time.)
+    const size_t tensor_end = data_offset + info.data_offset + info.num_bytes;
+    if (tensor_end > file_size || tensor_end < info.num_bytes) {
+        throw std::runtime_error("safetensors tensor '" + name
+                                 + "' data extends past end of file (corrupt or truncated checkpoint)");
+    }
     return static_cast<const char*>(mmap_data) + data_offset + info.data_offset;
 }
 

@@ -294,6 +294,13 @@ bool ServingLoop::step() {
                             //                  i.e. output_ids[end - n_committed + k]
                             const int n = std::max(1, req->mtp_last_n_committed);
                             const size_t end = req->output_ids.size();
+                            // The n committed tokens were just appended to output_ids, so
+                            // end >= n always holds here. Guard it explicitly: the unsigned
+                            // (end - n) indexing below would wrap catastrophically if a future
+                            // change ever broke that invariant.
+                            if (end < static_cast<size_t>(n)) {
+                                throw std::runtime_error("MTP decode: output_ids shorter than committed count");
+                            }
                             for (int k = 0; k < n; ++k) {
                                 auto hrow = mtp_hidden_last->slice(0, k, k + 1);
                                 int  tok  = req->output_ids[end - n + k];
