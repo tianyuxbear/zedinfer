@@ -1,6 +1,7 @@
 #include "frontend/models/qwen3_5.hpp"
 
 #include "backend/device/runtime_api.hpp"
+#include "frontend/models/mtp_module.hpp"
 #include "frontend/models/vision_tower.hpp"
 #include "zedinfer.h"
 #include "zedinfer/chat_template_jinja.hpp"
@@ -275,6 +276,14 @@ Qwen3_5Model::Qwen3_5Model(Qwen3_5Config config, std::unique_ptr<ModelWeights> w
         } else {
             LOGI << "[Qwen3_5Model] No chat_template.jinja in " << model_path << "; skipping Jinja loader";
         }
+    }
+
+    // Optional MTP speculative-decode head. Build it here for DENSE MTP layers
+    // (Qwen3.5/3.6-27B: mtp.layers.0.mlp.{gate,up,down}_proj). The MoE subclass
+    // (Qwen3_5MoeModel) builds the MoE-expert MTP head itself after this ctor
+    // using moe_config_, so skip when the MoE router weight is present.
+    if (weights_->has_tensor("mtp.fc.weight") && !weights_->has_tensor("mtp.layers.0.mlp.gate.weight")) {
+        mtp_ = std::make_unique<MTPModule>(config_, *weights_, exec);
     }
 }
 

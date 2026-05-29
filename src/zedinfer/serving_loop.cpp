@@ -152,7 +152,7 @@ bool ServingLoop::step() {
         // present. Multi-request batched hybrid is M5 territory.
         tensor_t logits;
         tensor_t mtp_hidden_last;  // captured iff MTP active (see below)
-        const model::Qwen3_5MoeModel* mtp_owner = nullptr;
+        const model::Qwen3_5Model* mtp_owner = nullptr;
         // Three independent ways to enable MTP, in priority order:
         //   1. --mtp CLI flag (mtp_enabled_, the user-facing knob, default off).
         //   2. ZEDINFER_MTP_SPEC env var (research/legacy active spec mode).
@@ -182,22 +182,24 @@ bool ServingLoop::step() {
             // and the NEXT scheduled step submits 2 tokens [last, draft] so
             // main can verify in a single forward. ZEDINFER_MTP_DEBUG keeps
             // working as a no-op observer (just logs draft vs main argmax).
+            // MTP head lives on the base Qwen3_5Model now, so dense (27B) and
+            // MoE (35B-A3B) are both supported through the same accessor.
             const bool mtp_active    = (mtp_spec || mtp_debug_env)
-                                       && moe_model && moe_model->mtp_module()
-                                       && moe_model->mtp_module()->ready();
+                                       && hybrid_model->mtp_module()
+                                       && hybrid_model->mtp_module()->ready();
             tensor_t* hidden_out_ptr = nullptr;
             if (mtp_active) {
                 hidden_out_ptr = &mtp_hidden_last;
-                mtp_owner      = moe_model;
+                mtp_owner      = hybrid_model;
                 if (!batch.prefill_requests.empty()) {
                     // Lazily allocate + reset MTP K/V state on this request.
                     // Stage D.0: state is per-request now, not module-global.
-                    const auto& mcfg = moe_model->moe_config();
+                    const auto& mcfg = hybrid_model->config();
                     const size_t Hkv = mcfg.num_key_value_heads;
                     const size_t Dh  = mcfg.head_dim > 0 ? mcfg.head_dim
                                                          : (mcfg.hidden_size / mcfg.num_attention_heads);
                     model::mtp_reset_request_state(*batch.prefill_requests[0],
-                                                   moe_model->mtp_module()->max_kv_len(),
+                                                   hybrid_model->mtp_module()->max_kv_len(),
                                                    Hkv, Dh,
                                                    engine_->exec_config());
                 } else if (req->mtp_pending_draft >= 0 && req->ssm_slot_idx() >= 0) {

@@ -75,10 +75,17 @@ struct MTPScratch {
     tensor_t moe_sh_down;       // [1, H]
     tensor_t moe_sh_gate_logit; // [1, 1]
 
+    // mtp_dense_ffn_one_token (dense MTP layer: 27B). Sized [1, dense_inter].
+    tensor_t ffn_gate;          // [1, dense_inter]
+    tensor_t ffn_up;            // [1, dense_inter]
+    tensor_t ffn_act;           // [1, dense_inter]
+    tensor_t ffn_down;          // [1, H]
+
     // Cached shape signature.
+    bool   is_moe = true;
     size_t H = 0, q_dim = 0, kv_dim = 0, V = 0;
     size_t Hq = 0, Dh = 0;
-    size_t num_experts = 0, moe_inter = 0, shared_inter = 0;
+    size_t num_experts = 0, moe_inter = 0, shared_inter = 0, dense_inter = 0;
     zedinferDeviceType_t device_type = ZEDINFER_DEVICE_CPU;
     int    device_id = -1;
     zedinferDataType_t dtype = ZEDINFER_DTYPE_F32;
@@ -86,7 +93,8 @@ struct MTPScratch {
 
 static thread_local MTPScratch s_mtp_scratch;
 
-static MTPScratch& ensure_mtp_scratch(const Qwen3_5MoEConfig& cfg, const ExecutorConfig& exec) {
+static MTPScratch& ensure_mtp_scratch(const Qwen3_5Config& cfg, const ExecutorConfig& exec,
+                                      bool is_moe, size_t dense_inter) {
     const size_t H = cfg.hidden_size;
     const size_t Hq  = cfg.num_attention_heads;
     const size_t Hkv = cfg.num_key_value_heads;
@@ -94,13 +102,20 @@ static MTPScratch& ensure_mtp_scratch(const Qwen3_5MoEConfig& cfg, const Executo
     const size_t q_dim   = Hq  * Dh;
     const size_t kv_dim  = Hkv * Dh;
     const size_t V       = cfg.vocab_size;
-    const size_t num_e   = static_cast<size_t>(cfg.num_experts);
-    const size_t moe_int = static_cast<size_t>(cfg.moe_intermediate_size);
-    const size_t sh_int  = static_cast<size_t>(cfg.shared_expert_intermediate_size);
+    // MoE-only fields live on the derived Qwen3_5MoEConfig; read them only on
+    // the MoE path (the MoE model passes a real Qwen3_5MoEConfig here).
+    size_t num_e = 0, moe_int = 0, sh_int = 0;
+    if (is_moe) {
+        const auto& mcfg = static_cast<const Qwen3_5MoEConfig&>(cfg);
+        num_e   = static_cast<size_t>(mcfg.num_experts);
+        moe_int = static_cast<size_t>(mcfg.moe_intermediate_size);
+        sh_int  = static_cast<size_t>(mcfg.shared_expert_intermediate_size);
+    }
 
     auto& s = s_mtp_scratch;
-    if (s.ready && s.H == H && s.q_dim == q_dim && s.kv_dim == kv_dim && s.V == V && s.Hq == Hq && s.Dh == Dh
-        && s.num_experts == num_e && s.moe_inter == moe_int && s.shared_inter == sh_int
+    if (s.ready && s.is_moe == is_moe && s.H == H && s.q_dim == q_dim && s.kv_dim == kv_dim && s.V == V
+        && s.Hq == Hq && s.Dh == Dh && s.num_experts == num_e && s.moe_inter == moe_int && s.shared_inter == sh_int
+        && s.dense_inter == dense_inter
         && s.device_type == exec.device_type && s.device_id == exec.device_id && s.dtype == exec.data_type) {
         return s;
     }
@@ -134,27 +149,35 @@ static MTPScratch& ensure_mtp_scratch(const Qwen3_5MoEConfig& cfg, const Executo
     s.att_attn     = mkf({1, Hq, Dh});
     s.att_out      = mkf({1, H});
 
-    s.moe_router_logits = mkf({1, num_e});
-    s.moe_out           = mkf({1, H});
-    s.moe_gate_buf      = mkf({1, moe_int});
-    s.moe_up_buf        = mkf({1, moe_int});
-    s.moe_act_buf       = mkf({1, moe_int});
-    s.moe_down_buf      = mkf({1, H});
-    if (sh_int > 0) {
-        s.moe_sh_gate       = mkf({1, sh_int});
-        s.moe_sh_up         = mkf({1, sh_int});
-        s.moe_sh_act        = mkf({1, sh_int});
-        s.moe_sh_down       = mkf({1, H});
-        s.moe_sh_gate_logit = mkf({1, 1});
+    if (is_moe) {
+        s.moe_router_logits = mkf({1, num_e});
+        s.moe_out           = mkf({1, H});
+        s.moe_gate_buf      = mkf({1, moe_int});
+        s.moe_up_buf        = mkf({1, moe_int});
+        s.moe_act_buf       = mkf({1, moe_int});
+        s.moe_down_buf      = mkf({1, H});
+        if (sh_int > 0) {
+            s.moe_sh_gate       = mkf({1, sh_int});
+            s.moe_sh_up         = mkf({1, sh_int});
+            s.moe_sh_act        = mkf({1, sh_int});
+            s.moe_sh_down       = mkf({1, H});
+            s.moe_sh_gate_logit = mkf({1, 1});
+        }
+    } else {
+        s.ffn_gate = mkf({1, dense_inter});
+        s.ffn_up   = mkf({1, dense_inter});
+        s.ffn_act  = mkf({1, dense_inter});
+        s.ffn_down = mkf({1, H});
     }
+    s.is_moe = is_moe;
     s.H = H; s.q_dim = q_dim; s.kv_dim = kv_dim; s.V = V; s.Hq = Hq; s.Dh = Dh;
-    s.num_experts = num_e; s.moe_inter = moe_int; s.shared_inter = sh_int;
+    s.num_experts = num_e; s.moe_inter = moe_int; s.shared_inter = sh_int; s.dense_inter = dense_inter;
     s.device_type = exec.device_type;
     s.device_id   = exec.device_id;
     s.dtype       = exec.data_type;
     s.ready       = true;
-    LOGI.printf("[MTPScratch] allocated H=%zu V=%zu q_dim=%zu kv_dim=%zu num_e=%zu moe_int=%zu sh_int=%zu",
-                H, V, q_dim, kv_dim, num_e, moe_int, sh_int);
+    LOGI.printf("[MTPScratch] allocated H=%zu V=%zu q_dim=%zu kv_dim=%zu is_moe=%d num_e=%zu moe_int=%zu sh_int=%zu dense_int=%zu",
+                H, V, q_dim, kv_dim, (int)is_moe, num_e, moe_int, sh_int, dense_inter);
     return s;
 }
 
@@ -260,7 +283,7 @@ tensor_t fetch(const ModelWeights& weights, const std::string& name) {
 
 } // namespace
 
-MTPModule::MTPModule(const Qwen3_5MoEConfig& main_cfg, ModelWeights& weights, const ExecutorConfig& exec)
+MTPModule::MTPModule(const Qwen3_5Config& main_cfg, ModelWeights& weights, const ExecutorConfig& exec)
     : main_cfg_(main_cfg), exec_(exec) {
     // If the user-provided model doesn't ship MTP (e.g. base Qwen3, DeepSeek
     // distill), bail early. ready() will return false and callers (engine /
@@ -286,28 +309,40 @@ MTPModule::MTPModule(const Qwen3_5MoEConfig& main_cfg, ModelWeights& weights, co
     q_norm_         = fetch(weights, p + "self_attn.q_norm.weight");
     k_norm_         = fetch(weights, p + "self_attn.k_norm.weight");
 
-    // ----- MoE router + shared expert -----
-    mlp_gate_router_           = fetch(weights, p + "mlp.gate.weight");
-    shared_expert_gate_        = fetch(weights, p + "mlp.shared_expert_gate.weight");
-    shared_expert_gate_proj_   = fetch(weights, p + "mlp.shared_expert.gate_proj.weight");
-    shared_expert_up_proj_     = fetch(weights, p + "mlp.shared_expert.up_proj.weight");
-    shared_expert_down_proj_   = fetch(weights, p + "mlp.shared_expert.down_proj.weight");
+    // ----- FFN: MoE (35B-A3B) or dense (27B), detected from the weights -----
+    // MoE ships "mtp.layers.0.mlp.gate.weight" (the router); the dense 27B
+    // ships "mtp.layers.0.mlp.gate_proj.weight" (a plain FFN) instead.
+    is_moe_ = weights.has_tensor(p + "mlp.gate.weight");
+    if (is_moe_) {
+        // MoE router + shared expert. main_cfg_ is really a Qwen3_5MoEConfig
+        // here (the MoE model passed it); read the MoE fields via static_cast.
+        const auto& moe_cfg = static_cast<const Qwen3_5MoEConfig&>(main_cfg_);
+        mlp_gate_router_           = fetch(weights, p + "mlp.gate.weight");
+        shared_expert_gate_        = fetch(weights, p + "mlp.shared_expert_gate.weight");
+        shared_expert_gate_proj_   = fetch(weights, p + "mlp.shared_expert.gate_proj.weight");
+        shared_expert_up_proj_     = fetch(weights, p + "mlp.shared_expert.up_proj.weight");
+        shared_expert_down_proj_   = fetch(weights, p + "mlp.shared_expert.down_proj.weight");
 
-    // ----- 256 experts via fused-tensor split -----
-    const size_t num_experts = static_cast<size_t>(main_cfg_.num_experts);
-    if (num_experts == 0) {
-        throw std::runtime_error("[MTPModule] main_cfg.num_experts is 0; cannot build MTP MoE");
+        const size_t num_experts = static_cast<size_t>(moe_cfg.num_experts);
+        if (num_experts == 0) {
+            throw std::runtime_error("[MTPModule] main_cfg.num_experts is 0; cannot build MTP MoE");
+        }
+        experts_ = std::make_unique<ExpertWeights>(/*num_layers=*/1, num_experts);
+        wire_mtp_experts(weights, *experts_, num_experts);
+    } else {
+        // Dense FFN MTP layer (Qwen3.5/3.6-27B): a single gate/up/down_proj.
+        mlp_gate_proj_ = fetch(weights, p + "mlp.gate_proj.weight");
+        mlp_up_proj_   = fetch(weights, p + "mlp.up_proj.weight");
+        mlp_down_proj_ = fetch(weights, p + "mlp.down_proj.weight");
+        dense_inter_   = mlp_gate_proj_->shape()[0]; // gate_proj is [inter, H]
     }
-    experts_ = std::make_unique<ExpertWeights>(/*num_layers=*/1, num_experts);
-    wire_mtp_experts(weights, *experts_, num_experts);
 
     // ----- Final norm -----
     final_norm_ = fetch(weights, "mtp.norm.weight");
 
     ready_ = true;
-    LOGI.printf("[MTPModule] loaded: 1 transformer layer + fc(2H->H) + final_norm; "
-                "fused experts expanded to %zu per-expert views",
-                num_experts);
+    LOGI.printf("[MTPModule] loaded: 1 transformer layer + fc(2H->H) + final_norm; FFN=%s inter=%zu",
+                is_moe_ ? "MoE" : "dense", dense_inter_);
 }
 
 MTPModule::~MTPModule() = default;
@@ -533,6 +568,19 @@ tensor_t mtp_moe_one_token(tensor_t h_post,
     return out_bf16;
 }
 
+// Dense MTP FFN (Qwen3.5/3.6-27B): out = down_proj(swiglu(gate_proj(h), up_proj(h))).
+// The 27B's MTP layer has a plain MLP (no router / experts / shared expert), so
+// this is just the single-expert path the MoE loop runs per expert.
+tensor_t mtp_dense_ffn_one_token(tensor_t h_post,
+                                 tensor_t gate_proj, tensor_t up_proj, tensor_t down_proj,
+                                 MTPScratch& s) {
+    ops::linear(s.ffn_gate, h_post, gate_proj);
+    ops::linear(s.ffn_up,   h_post, up_proj);
+    ops::swiglu(s.ffn_act,  s.ffn_gate, s.ffn_up);
+    ops::linear(s.ffn_down, s.ffn_act, down_proj);
+    return s.ffn_down;
+}
+
 } // namespace
 
 // Public helper — lazily allocates request's MTP buffers, resets past.
@@ -577,7 +625,7 @@ tensor_t MTPModule::forward(InferenceRequest& req,
     // subsequent calls just reuse them. Without this each MTP call paid ~30 ms
     // of BestFitPool round-trips alone (the Stage E perf write-up has the
     // detailed breakdown).
-    auto& s = ensure_mtp_scratch(main_cfg_, exec);
+    auto& s = ensure_mtp_scratch(main_cfg_, exec, is_moe_, dense_inter_);
 
     auto* api = device::getRuntimeAPI(exec.device_type);
     const size_t elt = utils::dsize(exec.data_type);
@@ -646,11 +694,16 @@ tensor_t MTPModule::forward(InferenceRequest& req,
     ops::rms_norm(s.h_post, s.h1, post_layernorm_, main_cfg_.rms_norm_eps,
                   /*add_one_to_weight=*/true);
 
-    // 9. MoE block.
-    auto mlp_out = mtp_moe_one_token(s.h_post, mlp_gate_router_, shared_expert_gate_,
-                                     shared_expert_gate_proj_, shared_expert_up_proj_,
-                                     shared_expert_down_proj_, *experts_,
-                                     main_cfg_, exec, s);
+    // 9. FFN block: MoE (35B-A3B) or dense (27B).
+    tensor_t mlp_out;
+    if (is_moe_) {
+        mlp_out = mtp_moe_one_token(s.h_post, mlp_gate_router_, shared_expert_gate_,
+                                    shared_expert_gate_proj_, shared_expert_up_proj_,
+                                    shared_expert_down_proj_, *experts_,
+                                    static_cast<const Qwen3_5MoEConfig&>(main_cfg_), exec, s);
+    } else {
+        mlp_out = mtp_dense_ffn_one_token(s.h_post, mlp_gate_proj_, mlp_up_proj_, mlp_down_proj_, s);
+    }
 
     // 10. Residual after MoE.
     ops::add(s.h_after_moe, s.h1, mlp_out);

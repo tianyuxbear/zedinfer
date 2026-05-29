@@ -37,7 +37,13 @@ public:
     // MoE loader), constructs an ExpertWeights pool for layer 0's experts,
     // and stashes pointers to the standalone tensors (fc, norms).
     // Throws std::runtime_error with the missing key name on any miss.
-    MTPModule(const Qwen3_5MoEConfig& main_cfg, ModelWeights& weights, const ExecutorConfig& exec);
+    // main_cfg is the base Qwen3.5 config; the MTP layer's FFN is dense
+    // (mtp.layers.0.mlp.{gate,up,down}_proj — Qwen3.5/3.6-27B) or MoE
+    // (mtp.layers.0.mlp.gate + experts + shared_expert — 35B-A3B), detected
+    // from the weights. The MoE branch reads expert-routing fields by
+    // static_cast'ing main_cfg to Qwen3_5MoEConfig (valid: the MoE model
+    // passes its Qwen3_5MoEConfig here).
+    MTPModule(const Qwen3_5Config& main_cfg, ModelWeights& weights, const ExecutorConfig& exec);
     ~MTPModule();
 
     MTPModule(const MTPModule&) = delete;
@@ -93,9 +99,18 @@ public:
     bool ready() const { return ready_; }
 
 private:
-    const Qwen3_5MoEConfig& main_cfg_;
-    ExecutorConfig          exec_;
-    bool                 ready_ = false;
+    const Qwen3_5Config& main_cfg_;
+    ExecutorConfig       exec_;
+    bool                 ready_  = false;
+    // True if the MTP layer's FFN is MoE (experts + router + shared expert);
+    // false if it is a plain dense FFN (gate/up/down_proj). Set in the ctor.
+    bool                 is_moe_ = false;
+    // Dense-FFN MTP path (is_moe_ == false): the single MLP's projections and
+    // the inferred intermediate size. Null/0 on the MoE path.
+    tensor_t             mlp_gate_proj_; // [inter, H]
+    tensor_t             mlp_up_proj_;   // [inter, H]
+    tensor_t             mlp_down_proj_; // [H, inter]
+    size_t               dense_inter_ = 0;
 
     // Pre-fc projection norms (Qwen3_5MoeRMSNorm, (1+w) at kernel time).
     tensor_t pre_fc_norm_embedding_; // [hidden]

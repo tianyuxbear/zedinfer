@@ -17,6 +17,7 @@ namespace zedinfer::model {
 // Forward-declare the vision tower so this header does not have to pull in
 // backend/tensor/tensor.hpp transitively for every TU that includes us.
 class VisionTower;
+class MTPModule;
 
 // Dense Qwen3.5 model skeleton (M0). The ctor owns:
 //   * Qwen3_5Config — parsed by Model::load_config
@@ -51,12 +52,20 @@ public:
     // from the model directory (e.g. unit-test fixtures without the file).
     const ChatTemplateJinja* chat_template() const { return chat_template_.get(); }
 
+    // Qwen3.5 MTP speculative-decode head. Non-null and ready() iff the model
+    // shipped MTP weights. The base ctor builds it for DENSE MTP layers (27B);
+    // the MoE subclass builds it for MoE MTP layers (35B-A3B). The scheduler
+    // probes mtp_module()->ready() to gate spec decode for both.
+    const MTPModule* mtp_module() const { return mtp_.get(); }
+    MTPModule*       mtp_module() { return mtp_.get(); }
+
 protected:
     Qwen3_5Config config_;
     std::unique_ptr<ModelWeights> weights_;
     std::unique_ptr<SSMStatePool> ssm_pool_;
     std::unique_ptr<VisionTower> vision_;
     std::shared_ptr<ChatTemplateJinja> chat_template_;
+    std::unique_ptr<MTPModule> mtp_;
 };
 
 } // namespace zedinfer::model

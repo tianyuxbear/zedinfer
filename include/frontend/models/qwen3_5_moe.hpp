@@ -43,12 +43,8 @@ public:
     ExpertPool& expert_pool() { return *expert_pool_; }
     const ExpertPool& expert_pool() const { return *expert_pool_; }
 
-    // Optional MTP head. Returns nullptr when the release didn't ship MTP
-    // weights (e.g. older Qwen3 base, DeepSeek distill) or when the loader
-    // failed to find the full set. The scheduler probes mtp_module()->ready()
-    // before enabling speculative decoding.
-    const MTPModule* mtp_module() const { return mtp_.get(); }
-    MTPModule*       mtp_module() { return mtp_.get(); }
+    // mtp_module() is inherited from Qwen3_5Model; the MoE ctor builds the MoE
+    // MTP head into the base mtp_ member.
 
     void log_runtime_stats() const override {
         if (expert_pool_) {
@@ -59,7 +55,6 @@ public:
 private:
     Qwen3_5MoEConfig            moe_config_;
     std::unique_ptr<ExpertPool> expert_pool_;
-    std::unique_ptr<MTPModule>  mtp_;
 };
 
 } // namespace zedinfer::model
