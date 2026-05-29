@@ -71,6 +71,14 @@ See `docs/debug/mtp_correctness_dense_and_deployment.md` for the MTP findings (w
 | attend() decomposition | Split into decode_single/decode_batched/prefill |
 | ensure_blocks extraction | Shared by scheduler and profiler |
 | CPU memcpy kind fix | Accept all memcpy kinds on CPU |
+| Dead-code removal (review pass) | `NaiveAllocator`, unused `full_attention_interval`, no-op `fixup_qwen3_5_rmsnorm_weights` |
+| Scheduler concurrency fix (review pass) | Idle-wait CV moved into Scheduler under `submit_mutex_`; status queries locked — no data race / lost wakeup |
+| Session UAF fix (review pass) | `delete_session` defers reclamation of a busy (mid-stream) session |
+| `Tensor::to()` guard (review pass) | Rejects strided/gappy views that would silently mis-copy under preserved strides |
+| Hot-path getenv hoist (review pass) | `ZEDINFER_DUMP_TOKEN_IDS` / `DUMP_TOP_LOGITS` / `MTP_*` resolved once, not per token |
+| Expert-parse dedup (review pass) | Shared `parse_expert_tensor_name` / `assign_expert_tensor` in `expert_weights.cpp` |
+| Docs refresh (review pass) | `architecture.md` updated for Qwen3.5/3.6 + MoE/MTP/vision/GPTQ; env-var table; FlashInfer prerequisite |
+| `SequenceBlockTable` decoupling (review pass) | FlashInfer plan/index cache grouped into `FlashInferSeqCache fi`; `clear_runtime_caches()` is one assignment; copy carries only logical state. Validated byte-identical across single-decode / batched-decode (batch_bench seeded) / prefill (ppl). See `docs/plan/refactor_sequence_block_table.md` |
 
 ---
 
@@ -126,6 +134,9 @@ See `docs/debug/mtp_correctness_dense_and_deployment.md` for the MTP findings (w
 | Operator correctness coverage is still incomplete | Medium | More parity tests across operators and serving flows |
 | No scheduler/serving integration tests | Medium | — |
 | build_decode_cache per-context rebuild | Low | More metadata/cache reuse across iterations |
+| Two parallel forward loops (`transformer_forward` vs `hybrid_transformer_forward`) duplicate the skeleton | Medium | Design: `docs/plan/forward-unification.md` |
+| `forward_config()` rebuilt every decode step (re-resolves `router_weights` etc. via string lookups) | Low (measured) | Measured 0.03% of a decode step on MoE, ~0% dense — deprioritized; GEMMs dominate. See `docs/plan/per_layer_weight_resolution.md` |
+| Op dispatch keeps an unreachable `case ZEDINFER_DEVICE_CPU` after an early CPU return (~11 ops) | Low | Cosmetic; harmless dead branch |
 
 ---
 
