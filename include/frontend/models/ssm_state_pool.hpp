@@ -3,6 +3,7 @@
 #include "backend/tensor/tensor.hpp"
 #include "zedinfer.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 
@@ -45,6 +46,16 @@ struct SSMStateView {
     zedinferDataType_t dtype             = ZEDINFER_DTYPE_BF16;
 };
 
+// Frozen byte-level copy of one slot's combined SSM + conv state. Used by the
+// SSMSnapshotCache to persist a prefilled prefix's linear-attention state so a
+// future request with the same prompt can restore it instead of paying the
+// prefill cost (and, more importantly, so prefix-cache reuse of the KV blocks
+// produces output identical to a cold-cache run). Snapshot bytes live in
+// pinned host memory; D2H copy on snapshot, H2D copy on restore.
+struct SSMStateSnapshot {
+    std::vector<std::byte> bytes; // length == SSMStatePool::snapshot_bytes()
+};
+
 // Engine-level slot pool for Mamba2 SSM state + conv state used by Qwen3.5
 // linear-attention layers. The pool owns two contiguous tensors:
 //   ssm_buffer_  shape: [max_concurrent, num_linear_layers, num_v_heads, value_head_dim, d_state]
@@ -76,6 +87,21 @@ public:
     // layers. Out-of-range indices are silently ignored. Dispatches by the
     // backing tensor's device type — no kernels are written here.
     void reset_slot(int slot_idx);
+
+    // Capture the slot's full SSM + conv state into a host-resident snapshot.
+    // Throws on out-of-range slot_idx. Synchronous D2H copy on NVIDIA so
+    // callers can safely move-store the result; the runtime stream is drained
+    // through memcpy_sync.
+    SSMStateSnapshot snapshot_slot(int slot_idx) const;
+
+    // Inverse of snapshot_slot. Restores the snapshot bytes into the slot's
+    // state buffers (H2D on NVIDIA, memcpy on CPU). Snapshot size must equal
+    // snapshot_bytes(); throws on mismatch or out-of-range slot_idx.
+    void restore_slot(int slot_idx, const SSMStateSnapshot& snapshot);
+
+    // Total bytes per snapshot (ssm + conv slot bytes). Stays constant for the
+    // lifetime of the pool.
+    size_t snapshot_bytes() const { return ssm_bytes_per_slot_ + conv_bytes_per_slot_; }
 
     // Returns a snapshot of the layout. The fields stay valid for the lifetime
     // of the pool; the snapshot itself is a value copy so callers cannot

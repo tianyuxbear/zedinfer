@@ -1,5 +1,7 @@
 #include "frontend/models/ssm_state_pool.hpp"
 
+#include "backend/core/context/context.hpp"
+#include "backend/device/runtime_api.hpp"
 #include "backend/ops/fill_zero/cpu/fill_zero_cpu.hpp"
 #include "backend/tensor/tensor.hpp"
 #include "zedinfer/activation.hpp"
@@ -8,6 +10,7 @@
 #include "backend/ops/fill_zero/nvidia/fill_zero_nvidia.cuh"
 #endif
 
+#include <cstring>
 #include <plog/Log.h>
 
 #include <cstddef>
@@ -157,6 +160,62 @@ void SSMStatePool::reset_slot(int slot_idx) {
     std::byte* conv_byte_base = conv_buffer_->data();
     zero_bytes(device, ssm_byte_base + static_cast<size_t>(slot_idx) * ssm_bytes_per_slot_, ssm_bytes_per_slot_);
     zero_bytes(device, conv_byte_base + static_cast<size_t>(slot_idx) * conv_bytes_per_slot_, conv_bytes_per_slot_);
+}
+
+SSMStateSnapshot SSMStatePool::snapshot_slot(int slot_idx) const {
+    if (slot_idx < 0 || slot_idx >= cfg_.max_concurrent) {
+        throw std::runtime_error("SSMStatePool::snapshot_slot: slot_idx out of range "
+                                 + std::to_string(slot_idx));
+    }
+    SSMStateSnapshot snap;
+    snap.bytes.resize(ssm_bytes_per_slot_ + conv_bytes_per_slot_);
+
+    const zedinferDeviceType_t device = ssm_buffer_->deviceType();
+    const std::byte*           ssm_src
+        = static_cast<const std::byte*>(ssm_buffer_->data()) + static_cast<size_t>(slot_idx) * ssm_bytes_per_slot_;
+    const std::byte*           conv_src
+        = static_cast<const std::byte*>(conv_buffer_->data()) + static_cast<size_t>(slot_idx) * conv_bytes_per_slot_;
+    std::byte*                 ssm_dst  = snap.bytes.data();
+    std::byte*                 conv_dst = snap.bytes.data() + ssm_bytes_per_slot_;
+
+    if (device == ZEDINFER_DEVICE_CPU) {
+        std::memcpy(ssm_dst, ssm_src, ssm_bytes_per_slot_);
+        std::memcpy(conv_dst, conv_src, conv_bytes_per_slot_);
+    } else {
+        auto* api = core::context().runtime().api();
+        api->memcpy_sync(ssm_dst, ssm_src, ssm_bytes_per_slot_, ZEDINFER_MEMCPY_D2H);
+        api->memcpy_sync(conv_dst, conv_src, conv_bytes_per_slot_, ZEDINFER_MEMCPY_D2H);
+    }
+    return snap;
+}
+
+void SSMStatePool::restore_slot(int slot_idx, const SSMStateSnapshot& snap) {
+    if (slot_idx < 0 || slot_idx >= cfg_.max_concurrent) {
+        throw std::runtime_error("SSMStatePool::restore_slot: slot_idx out of range "
+                                 + std::to_string(slot_idx));
+    }
+    if (snap.bytes.size() != ssm_bytes_per_slot_ + conv_bytes_per_slot_) {
+        throw std::runtime_error("SSMStatePool::restore_slot: snapshot size "
+                                 + std::to_string(snap.bytes.size()) + " != expected "
+                                 + std::to_string(ssm_bytes_per_slot_ + conv_bytes_per_slot_));
+    }
+
+    const zedinferDeviceType_t device = ssm_buffer_->deviceType();
+    std::byte*                 ssm_dst
+        = static_cast<std::byte*>(ssm_buffer_->data()) + static_cast<size_t>(slot_idx) * ssm_bytes_per_slot_;
+    std::byte*                 conv_dst
+        = static_cast<std::byte*>(conv_buffer_->data()) + static_cast<size_t>(slot_idx) * conv_bytes_per_slot_;
+    const std::byte*           ssm_src  = snap.bytes.data();
+    const std::byte*           conv_src = snap.bytes.data() + ssm_bytes_per_slot_;
+
+    if (device == ZEDINFER_DEVICE_CPU) {
+        std::memcpy(ssm_dst, ssm_src, ssm_bytes_per_slot_);
+        std::memcpy(conv_dst, conv_src, conv_bytes_per_slot_);
+    } else {
+        auto* api = core::context().runtime().api();
+        api->memcpy_sync(ssm_dst, ssm_src, ssm_bytes_per_slot_, ZEDINFER_MEMCPY_H2D);
+        api->memcpy_sync(conv_dst, conv_src, conv_bytes_per_slot_, ZEDINFER_MEMCPY_H2D);
+    }
 }
 
 int SSMStatePool::num_free_slots() const {
