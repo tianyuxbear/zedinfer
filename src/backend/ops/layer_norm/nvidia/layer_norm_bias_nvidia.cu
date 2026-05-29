@@ -40,21 +40,19 @@ template <> __device__ __forceinline__ half from_f32_dev<half>(float v) {
 // up to a few thousand which covers Qwen3.5-VL's 1152.
 template <typename T, int BLOCK = 256>
 __global__ void layer_norm_bias_kernel(T* y, const T* x, const T* w, const T* b, int D, float eps) {
-    const int n   = blockIdx.x;
+    const int n = blockIdx.x;
     const int tid = threadIdx.x;
 
     const T* xr = x + static_cast<size_t>(n) * D;
-    T*       yr = y + static_cast<size_t>(n) * D;
+    T* yr = y + static_cast<size_t>(n) * D;
 
     // 1. Compute mean.
     float local_sum = 0.0f;
-    for (int j = tid; j < D; j += BLOCK) {
-        local_sum += to_f32_dev<T>(xr[j]);
-    }
+    for (int j = tid; j < D; j += BLOCK) { local_sum += to_f32_dev<T>(xr[j]); }
     __shared__ float ssum;
-    typedef cub::BlockReduce<float, BLOCK>     BR;
-    __shared__ typename BR::TempStorage         tmp;
-    float                                       total = BR(tmp).Sum(local_sum);
+    typedef cub::BlockReduce<float, BLOCK> BR;
+    __shared__ typename BR::TempStorage tmp;
+    float total = BR(tmp).Sum(local_sum);
     if (tid == 0) {
         ssum = total;
     }
@@ -68,7 +66,7 @@ __global__ void layer_norm_bias_kernel(T* y, const T* x, const T* w, const T* b,
         local_sq += d * d;
     }
     __shared__ float svar;
-    float            var_total = BR(tmp).Sum(local_sq);
+    float var_total = BR(tmp).Sum(local_sq);
     if (tid == 0) {
         svar = var_total / static_cast<float>(D) + eps;
     }
@@ -78,9 +76,9 @@ __global__ void layer_norm_bias_kernel(T* y, const T* x, const T* w, const T* b,
     // 3. Affine + bias.
     for (int j = tid; j < D; j += BLOCK) {
         const float normed = (to_f32_dev<T>(xr[j]) - mean) * inv_std;
-        const float wv     = to_f32_dev<T>(w[j]);
-        const float bv     = to_f32_dev<T>(b[j]);
-        yr[j]              = from_f32_dev<T>(normed * wv + bv);
+        const float wv = to_f32_dev<T>(w[j]);
+        const float bv = to_f32_dev<T>(b[j]);
+        yr[j] = from_f32_dev<T>(normed * wv + bv);
     }
 }
 
@@ -88,8 +86,8 @@ template <typename T>
 void launch_layer_norm_bias(T* y, const T* x, const T* w, const T* b, float eps, size_t seq_len, size_t hidden_size,
                             cudaStream_t stream) {
     constexpr int BLOCK = 256;
-    dim3          grid(static_cast<unsigned int>(seq_len));
-    dim3          block(BLOCK);
+    dim3 grid(static_cast<unsigned int>(seq_len));
+    dim3 block(BLOCK);
     layer_norm_bias_kernel<T, BLOCK><<<grid, block, 0, stream>>>(y, x, w, b, static_cast<int>(hidden_size), eps);
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
@@ -104,14 +102,12 @@ void layer_norm_bias(std::byte* output, const std::byte* input, const std::byte*
     auto stream = reinterpret_cast<cudaStream_t>(core::context().runtime().stream());
     switch (type) {
         case ZEDINFER_DTYPE_F32:
-            return launch_layer_norm_bias<float>(reinterpret_cast<float*>(output),
-                                                 reinterpret_cast<const float*>(input),
-                                                 reinterpret_cast<const float*>(weight),
-                                                 reinterpret_cast<const float*>(bias), eps, seq_len, hidden_size,
-                                                 stream);
+            return launch_layer_norm_bias<float>(
+                reinterpret_cast<float*>(output), reinterpret_cast<const float*>(input),
+                reinterpret_cast<const float*>(weight), reinterpret_cast<const float*>(bias), eps, seq_len, hidden_size,
+                stream);
         case ZEDINFER_DTYPE_F16:
-            return launch_layer_norm_bias<half>(reinterpret_cast<half*>(output),
-                                                reinterpret_cast<const half*>(input),
+            return launch_layer_norm_bias<half>(reinterpret_cast<half*>(output), reinterpret_cast<const half*>(input),
                                                 reinterpret_cast<const half*>(weight),
                                                 reinterpret_cast<const half*>(bias), eps, seq_len, hidden_size, stream);
         case ZEDINFER_DTYPE_BF16:

@@ -31,15 +31,15 @@ public:
     const VisionConfig& config() const { return cfg_; }
 
 private:
-    VisionConfig          cfg_;
-    const ModelWeights*   weights_ = nullptr; // borrowed, valid for lifetime
+    VisionConfig cfg_;
+    const ModelWeights* weights_ = nullptr; // borrowed, valid for lifetime
 
     // Pre-computed static resources captured at ctor — invariant across all
     // images / requests. Caching them here avoids per-request D2H of the
     // pos_embed table (~5 MB for Qwen3.5-VL) and re-computation of the RoPE
     // inv_freq vector.
     std::vector<float> pos_embed_table_f32_; // [num_position_embeddings, hidden_size]
-    int                num_grid_per_side_ = 0;
+    int num_grid_per_side_ = 0;
     std::vector<float> rope_inv_freq_;       // [head_dim/4]
 };
 

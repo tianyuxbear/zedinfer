@@ -145,19 +145,15 @@ static std::string flatten_message_content(const json& msg) {
 // blocks stays as content text. Malformed JSON inside a block is preserved
 // verbatim as inline text so we do not silently swallow data.
 struct ToolCallParseResult {
-    std::string content;      // text outside any <tool_call> block
-    json        tool_calls;   // array; each entry {id, type:"function", function:{name,arguments}}
-    bool        has_tool_calls = false;
+    std::string content; // text outside any <tool_call> block
+    json tool_calls;     // array; each entry {id, type:"function", function:{name,arguments}}
+    bool has_tool_calls = false;
 };
 
 static std::string trim_ascii_ws(std::string s) {
     auto issp = [](char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; };
-    while (!s.empty() && issp(s.front())) {
-        s.erase(s.begin());
-    }
-    while (!s.empty() && issp(s.back())) {
-        s.pop_back();
-    }
+    while (!s.empty() && issp(s.front())) { s.erase(s.begin()); }
+    while (!s.empty() && issp(s.back())) { s.pop_back(); }
     return s;
 }
 
@@ -212,9 +208,7 @@ static bool parse_xml_tool_call_inner(const std::string& inner, std::string& nam
         // fall back to the raw string when not valid JSON.
         try {
             args_json[key] = json::parse(raw_value);
-        } catch (const std::exception&) {
-            args_json[key] = raw_value;
-        }
+        } catch (const std::exception&) { args_json[key] = raw_value; }
         pos = p_close + 12; // strlen("</parameter>")
     }
     return true;
@@ -253,7 +247,7 @@ static ToolCallParseResult parse_qwen3_tool_calls(const std::string& text) {
             if (j.is_object() && j.contains("name") && j["name"].is_string()) {
                 fn_name = j["name"].get<std::string>();
                 fn_args = j.contains("arguments") ? j["arguments"]
-                          : (j.contains("parameters") ? j["parameters"] : json::object());
+                                                  : (j.contains("parameters") ? j["parameters"] : json::object());
                 consumed = true;
             }
         } catch (const std::exception&) {
@@ -591,8 +585,7 @@ HttpServer::HttpServer(ServerConfig config, std::shared_ptr<InferenceEngine> eng
                 return httplib::Server::HandlerResponse::Unhandled;
             }
             const std::string& path = req.path;
-            bool needs_auth = (path.rfind("/v1/", 0) == 0) || (path == "/tokenize")
-                              || (path == "/detokenize");
+            bool needs_auth = (path.rfind("/v1/", 0) == 0) || (path == "/tokenize") || (path == "/detokenize");
             if (!needs_auth) {
                 return httplib::Server::HandlerResponse::Unhandled;
             }
@@ -874,7 +867,8 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
         const auto& rf = body["response_format"];
         std::string ftype = rf.value("type", "");
         if (ftype == "json_object" || ftype == "json_schema") {
-            std::string instruction = "You must respond with valid JSON only. Do not include any text outside the JSON object.";
+            std::string instruction
+                = "You must respond with valid JSON only. Do not include any text outside the JSON object.";
             if (ftype == "json_schema" && rf.contains("json_schema")) {
                 instruction += " The JSON must conform to this schema: " + rf["json_schema"].dump();
             }
@@ -905,8 +899,7 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
     if (body.contains("tools") && body["tools"].is_array() && !body["tools"].empty()) {
         try {
             nlohmann::ordered_json ordered_body = nlohmann::ordered_json::parse(req.body);
-            if (ordered_body.contains("tools") && ordered_body["tools"].is_array()
-                && !ordered_body["tools"].empty()) {
+            if (ordered_body.contains("tools") && ordered_body["tools"].is_array() && !ordered_body["tools"].empty()) {
                 tools_ordered = ordered_body["tools"];
                 has_tools = true;
             }
@@ -923,8 +916,7 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
                 mm_messages.push_back(parse_openai_message(msg, any_image_part));
             }
             return jinja_tpl->render(mm_messages, /*add_generation_prompt=*/true,
-                                     /*enable_thinking=*/enable_thinking,
-                                     has_tools ? &tools_ordered : nullptr);
+                                     /*enable_thinking=*/enable_thinking, has_tools ? &tools_ordered : nullptr);
         }
         std::vector<std::pair<std::string, std::string>> messages;
         messages.reserve(body["messages"].size());
@@ -932,8 +924,7 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
             // Detect images for the warning; legacy template ignores them.
             if (msg.contains("content") && msg["content"].is_array()) {
                 for (const auto& p : msg["content"]) {
-                    if (p.is_object()
-                        && (p.value("type", "") == "image_url" || p.value("type", "") == "image")) {
+                    if (p.is_object() && (p.value("type", "") == "image_url" || p.value("type", "") == "image")) {
                         any_image_part = true;
                         break;
                     }
@@ -1005,7 +996,7 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
                     continue;
                 }
                 const std::string ptype = part.value("type", "");
-                std::string       uri;
+                std::string uri;
                 if (ptype == "image_url" && part.contains("image_url")) {
                     const auto& iu = part["image_url"];
                     if (iu.is_string()) {
@@ -1022,8 +1013,7 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
                 try {
                     image_chunks.push_back(engine_->encode_image_data_uri(uri));
                 } catch (const std::exception& e) {
-                    send_error(res, 400,
-                               std::string("Failed to decode / encode image: ") + e.what(),
+                    send_error(res, 400, std::string("Failed to decode / encode image: ") + e.what(),
                                "invalid_request_error", "invalid_image_data");
                     LOGW << "[HttpServer] Image encode failed: " << e.what();
                     return;
@@ -1033,10 +1023,10 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
 
         if (!image_chunks.empty()) {
             // 2. Re-render the prompt and expand each <|image_pad|> to num_image_tokens copies.
-            const int          pad_id   = engine_->image_pad_token_id();
-            const std::string  pad_str  = "<|image_pad|>";
-            std::string        prompt   = build_prompt_from_messages();
-            std::string        expanded;
+            const int pad_id = engine_->image_pad_token_id();
+            const std::string pad_str = "<|image_pad|>";
+            std::string prompt = build_prompt_from_messages();
+            std::string expanded;
             expanded.reserve(prompt.size() + image_chunks.size() * 4096);
             size_t pos = 0, img_idx = 0;
             while (pos < prompt.size() && img_idx < image_chunks.size()) {
@@ -1046,9 +1036,7 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
                 }
                 expanded.append(prompt, pos, hit - pos);
                 const int n_tok = static_cast<int>(image_chunks[img_idx]->dim(0));
-                for (int k = 0; k < n_tok; ++k) {
-                    expanded.append(pad_str);
-                }
+                for (int k = 0; k < n_tok; ++k) { expanded.append(pad_str); }
                 pos = hit + pad_str.size();
                 ++img_idx;
             }
@@ -1062,16 +1050,14 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
             //    from the expanded form (image placeholder expansion happens
             //    after the assistant <think> marker so this is identical).
             prompt_opens_think = detect_open_think(expanded);
-            input_ids          = engine_->tokenizer().encode(expanded);
+            input_ids = engine_->tokenizer().encode(expanded);
 
             try {
                 multimodal_input_embeds = engine_->build_multimodal_input_embeds(input_ids, image_chunks);
-                LOGI.printf(
-                    "[HttpServer] Multimodal: %zu image chunk(s), %zu prompt tokens, pad_id=%d",
-                    image_chunks.size(), input_ids.size(), pad_id);
+                LOGI.printf("[HttpServer] Multimodal: %zu image chunk(s), %zu prompt tokens, pad_id=%d",
+                            image_chunks.size(), input_ids.size(), pad_id);
             } catch (const std::exception& e) {
-                send_error(res, 500,
-                           std::string("Failed to build multimodal input embeddings: ") + e.what(),
+                send_error(res, 500, std::string("Failed to build multimodal input embeddings: ") + e.what(),
                            "internal_error", "multimodal_embeds_failed");
                 LOGW << "[HttpServer] build_multimodal_input_embeds failed: " << e.what();
                 return;
@@ -1220,7 +1206,7 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
             // holds a short tail of bytes that *might* be the start of a
             // <think>/</think> tag — they are withheld from emission until the
             // next chunk arrives so we never split a tag across deltas.
-            bool        in_thinking = false;
+            bool in_thinking = false;
             std::string reasoning_carry;
             // Stop-sequence filter. When stop_sequences is non-empty, the
             // flush pipeline scans the cumulative byte stream for any stop
@@ -1230,18 +1216,18 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
             // stop string (so a stop can be detected even when split across
             // two SSE chunks).
             std::vector<std::string> stop_sequences;
-            std::string              stop_pending;
-            bool                     stop_hit = false;
+            std::string stop_pending;
+            bool stop_hit = false;
             // Tool-call streaming state machine. Recognises Qwen3-style
             // <tool_call>...</tool_call> blocks, accumulates the inner text,
             // parses it (JSON or XML), and emits delta.tool_calls chunks.
             // tool_carry holds a short tail that might be a partial prefix of
             // <tool_call> / </tool_call>.
-            bool        in_tool_call = false;
+            bool in_tool_call = false;
             std::string tool_buf;
             std::string tool_carry;
-            int         tool_id_counter      = 0;
-            bool        has_emitted_tool_call = false;
+            int tool_id_counter = 0;
+            bool has_emitted_tool_call = false;
         };
 
         auto ctx = std::make_shared<Ctx>();
@@ -1302,8 +1288,7 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
                             delta["content"] = text;
                         }
                         json c = base();
-                        c["choices"]
-                            = json::array({{{"index", 0}, {"delta", delta}, {"finish_reason", nullptr}}});
+                        c["choices"] = json::array({{{"index", 0}, {"delta", delta}, {"finish_reason", nullptr}}});
                         sse(c);
                     };
                     // Route `chunk` into reasoning / content deltas honoring the
@@ -1321,7 +1306,7 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
                             for (size_t k = std::min(chunk.size(), maxK); k > 0; --k) {
                                 std::string suffix = chunk.substr(chunk.size() - k);
                                 bool match = (std::string(kReasoningOpenTag).compare(0, k, suffix) == 0)
-                                             || (std::string(kReasoningCloseTag).compare(0, k, suffix) == 0);
+                                          || (std::string(kReasoningCloseTag).compare(0, k, suffix) == 0);
                                 if (match) {
                                     safe_end = chunk.size() - k;
                                     break;
@@ -1359,8 +1344,7 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
                     // SSE chunk. Increments tool_id_counter; flips
                     // has_emitted_tool_call so the completion chunk uses
                     // finish_reason="tool_calls".
-                    auto emit_tool_call_delta = [&ctx, &sse, &base](const std::string& fn_name,
-                                                                      const json& fn_args) {
+                    auto emit_tool_call_delta = [&ctx, &sse, &base](const std::string& fn_name, const json& fn_args) {
                         if (fn_name.empty()) {
                             return;
                         }
@@ -1375,8 +1359,7 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
                         json delta;
                         delta["tool_calls"] = json::array({call});
                         json c = base();
-                        c["choices"]
-                            = json::array({{{"index", 0}, {"delta", delta}, {"finish_reason", nullptr}}});
+                        c["choices"] = json::array({{{"index", 0}, {"delta", delta}, {"finish_reason", nullptr}}});
                         sse(c);
                         ctx->has_emitted_tool_call = true;
                     };
@@ -1397,7 +1380,7 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
                             for (size_t k = std::min(chunk.size(), maxK); k > 0; --k) {
                                 std::string suffix = chunk.substr(chunk.size() - k);
                                 bool match = (std::string(TOPEN).compare(0, k, suffix) == 0)
-                                             || (std::string(TCLOSE).compare(0, k, suffix) == 0);
+                                          || (std::string(TCLOSE).compare(0, k, suffix) == 0);
                                 if (match) {
                                     safe_end = chunk.size() - k;
                                     break;
@@ -1420,16 +1403,15 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
                                     std::string trimmed = trim_ascii_ws(ctx->tool_buf);
                                     ctx->tool_buf.clear();
                                     std::string fn_name;
-                                    json        fn_args;
-                                    bool        ok = false;
+                                    json fn_args;
+                                    bool ok = false;
                                     try {
                                         auto j = json::parse(trimmed);
                                         if (j.is_object() && j.contains("name") && j["name"].is_string()) {
                                             fn_name = j["name"].get<std::string>();
                                             fn_args = j.contains("arguments")
-                                                          ? j["arguments"]
-                                                          : (j.contains("parameters") ? j["parameters"]
-                                                                                       : json::object());
+                                                        ? j["arguments"]
+                                                        : (j.contains("parameters") ? j["parameters"] : json::object());
                                             ok = true;
                                         }
                                     } catch (const std::exception&) {
@@ -1507,9 +1489,8 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
                         if (ctx->stop_hit) {
                             return;
                         }
-                        const bool has_carry = !ctx->reasoning_carry.empty()
-                                               || !ctx->tool_carry.empty()
-                                               || !ctx->stop_pending.empty();
+                        const bool has_carry
+                            = !ctx->reasoning_carry.empty() || !ctx->tool_carry.empty() || !ctx->stop_pending.empty();
                         if (ctx->utf8_buf.empty() && !(force && has_carry)) {
                             return;
                         }
@@ -1727,9 +1708,8 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
         //      output token is already inside the thinking block. In that case
         //      output_text contains a </think> with no preceding <think>; treat
         //      everything before the first </think> as reasoning.
-        bool initial_in_think = !output_prefix.empty()
-                                && (output_prefix.find(kReasoningOpenTag) != std::string::npos)
-                                && (output_prefix.find(kReasoningCloseTag) == std::string::npos);
+        bool initial_in_think = !output_prefix.empty() && (output_prefix.find(kReasoningOpenTag) != std::string::npos)
+                             && (output_prefix.find(kReasoningCloseTag) == std::string::npos);
         if (!initial_in_think && output_text.find(kReasoningCloseTag) != std::string::npos
             && output_text.find(kReasoningOpenTag) == std::string::npos) {
             initial_in_think = true;
@@ -1765,8 +1745,8 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
         response["object"] = "chat.completion";
         response["created"] = epoch;
         response["model"] = display_model_name_;
-        response["choices"] = json::array(
-            {{{"index", 0}, {"message", std::move(message)}, {"finish_reason", result.finish_reason}}});
+        response["choices"]
+            = json::array({{{"index", 0}, {"message", std::move(message)}, {"finish_reason", result.finish_reason}}});
         response["usage"] = {{"prompt_tokens", result.stats.prompt_tokens},
                              {"completion_tokens", result.stats.generated_tokens},
                              {"total_tokens", result.stats.total_tokens}};

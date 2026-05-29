@@ -33,9 +33,7 @@ TEST(Qwen3_5Load, LoadsDenseModelEndToEnd) {
     // are not a regression of this task.
     try {
         zedinfer::core::context().setDevice(ZEDINFER_DEVICE_NVIDIA, 0);
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "NVIDIA runtime init failed: " << e.what();
-    }
+    } catch (const std::exception& e) { GTEST_SKIP() << "NVIDIA runtime init failed: " << e.what(); }
 
     std::shared_ptr<zedinfer::model::Model> model;
     try {
@@ -73,9 +71,7 @@ TEST(Qwen3_5Load, LoadsMoEModelEndToEnd) {
 
     try {
         zedinfer::core::context().setDevice(ZEDINFER_DEVICE_NVIDIA, 0);
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "NVIDIA runtime init failed: " << e.what();
-    }
+    } catch (const std::exception& e) { GTEST_SKIP() << "NVIDIA runtime init failed: " << e.what(); }
 
     std::shared_ptr<zedinfer::model::Model> model;
     try {

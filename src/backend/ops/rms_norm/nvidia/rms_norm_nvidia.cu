@@ -1,5 +1,5 @@
-#include "backend/ops/rms_norm/nvidia/rms_norm_nvidia.cuh"
 #include "backend/core/context/context.hpp"
+#include "backend/ops/rms_norm/nvidia/rms_norm_nvidia.cuh"
 #include "utils/check.hpp"
 
 #include <cuda_bf16.h>
@@ -20,17 +20,17 @@ namespace zedinfer::ops::nvidia {
 template <typename T>
 static void launch_rms_norm(T* output, const T* input, const T* weight, float eps, size_t batch_size,
                             size_t hidden_size, bool add_one_to_weight, cudaStream_t stream) {
-    auto* in  = const_cast<T*>(input);
-    auto* w   = const_cast<T*>(weight);
+    auto* in = const_cast<T*>(input);
+    auto* w = const_cast<T*>(weight);
     const uint32_t bs = static_cast<uint32_t>(batch_size);
-    const uint32_t d  = static_cast<uint32_t>(hidden_size);
+    const uint32_t d = static_cast<uint32_t>(hidden_size);
     cudaError_t err;
     if (add_one_to_weight) {
         err = flashinfer::norm::GemmaRMSNorm<T>(in, w, output, bs, d, /*stride_input=*/d,
-                                          /*stride_output=*/d, eps, /*enable_pdl=*/false, stream);
+                                                /*stride_output=*/d, eps, /*enable_pdl=*/false, stream);
     } else {
         err = flashinfer::norm::RMSNorm<T>(in, w, output, bs, d, /*stride_input=*/d,
-                                      /*stride_output=*/d, eps, /*enable_pdl=*/false, stream);
+                                           /*stride_output=*/d, eps, /*enable_pdl=*/false, stream);
     }
     if (err != cudaSuccess) {
         throw std::runtime_error(std::string("FlashInfer RMSNorm failed: ") + cudaGetErrorString(err));
@@ -42,20 +42,17 @@ void rms_norm(std::byte* output, const std::byte* input, const std::byte* weight
     auto stream = reinterpret_cast<cudaStream_t>(core::context().runtime().stream());
     switch (type) {
         case ZEDINFER_DTYPE_F32:
-            return launch_rms_norm<float>(reinterpret_cast<float*>(output),
-                                          reinterpret_cast<const float*>(input),
-                                          reinterpret_cast<const float*>(weight), eps, seq_len,
-                                          hidden_size, add_one_to_weight, stream);
+            return launch_rms_norm<float>(reinterpret_cast<float*>(output), reinterpret_cast<const float*>(input),
+                                          reinterpret_cast<const float*>(weight), eps, seq_len, hidden_size,
+                                          add_one_to_weight, stream);
         case ZEDINFER_DTYPE_F16:
-            return launch_rms_norm<half>(reinterpret_cast<half*>(output),
-                                         reinterpret_cast<const half*>(input),
-                                         reinterpret_cast<const half*>(weight), eps, seq_len,
-                                         hidden_size, add_one_to_weight, stream);
+            return launch_rms_norm<half>(reinterpret_cast<half*>(output), reinterpret_cast<const half*>(input),
+                                         reinterpret_cast<const half*>(weight), eps, seq_len, hidden_size,
+                                         add_one_to_weight, stream);
         case ZEDINFER_DTYPE_BF16:
-            return launch_rms_norm<__nv_bfloat16>(reinterpret_cast<__nv_bfloat16*>(output),
-                                                   reinterpret_cast<const __nv_bfloat16*>(input),
-                                                   reinterpret_cast<const __nv_bfloat16*>(weight), eps,
-                                                   seq_len, hidden_size, add_one_to_weight, stream);
+            return launch_rms_norm<__nv_bfloat16>(
+                reinterpret_cast<__nv_bfloat16*>(output), reinterpret_cast<const __nv_bfloat16*>(input),
+                reinterpret_cast<const __nv_bfloat16*>(weight), eps, seq_len, hidden_size, add_one_to_weight, stream);
         default:
             EXCEPTION_UNSUPPORTED_DATATYPE(type);
     }
@@ -67,20 +64,17 @@ static void launch_fused_add_rms_norm(T* input, T* residual, const T* weight, fl
                                       size_t hidden_size, bool add_one_to_weight, cudaStream_t stream) {
     auto* w = const_cast<T*>(weight);
     const uint32_t bs = static_cast<uint32_t>(batch_size);
-    const uint32_t d  = static_cast<uint32_t>(hidden_size);
+    const uint32_t d = static_cast<uint32_t>(hidden_size);
     cudaError_t err;
     if (add_one_to_weight) {
         err = flashinfer::norm::GemmaFusedAddRMSNorm<T>(input, residual, w, bs, d, /*stride_input=*/d,
-                                                  /*stride_residual=*/d, eps, /*enable_pdl=*/false,
-                                                  stream);
+                                                        /*stride_residual=*/d, eps, /*enable_pdl=*/false, stream);
     } else {
         err = flashinfer::norm::FusedAddRMSNorm<T>(input, residual, w, bs, d, /*stride_input=*/d,
-                                              /*stride_residual=*/d, eps, /*enable_pdl=*/false,
-                                              stream);
+                                                   /*stride_residual=*/d, eps, /*enable_pdl=*/false, stream);
     }
     if (err != cudaSuccess) {
-        throw std::runtime_error(std::string("FlashInfer FusedAddRMSNorm failed: ")
-                                 + cudaGetErrorString(err));
+        throw std::runtime_error(std::string("FlashInfer FusedAddRMSNorm failed: ") + cudaGetErrorString(err));
     }
 }
 
@@ -89,20 +83,17 @@ void fused_add_rms_norm(std::byte* input, std::byte* residual, const std::byte* 
     auto stream = reinterpret_cast<cudaStream_t>(core::context().runtime().stream());
     switch (type) {
         case ZEDINFER_DTYPE_F32:
-            return launch_fused_add_rms_norm<float>(reinterpret_cast<float*>(input),
-                                                    reinterpret_cast<float*>(residual),
-                                                    reinterpret_cast<const float*>(weight), eps, seq_len,
-                                                    hidden_size, add_one_to_weight, stream);
+            return launch_fused_add_rms_norm<float>(reinterpret_cast<float*>(input), reinterpret_cast<float*>(residual),
+                                                    reinterpret_cast<const float*>(weight), eps, seq_len, hidden_size,
+                                                    add_one_to_weight, stream);
         case ZEDINFER_DTYPE_F16:
-            return launch_fused_add_rms_norm<half>(reinterpret_cast<half*>(input),
-                                                    reinterpret_cast<half*>(residual),
-                                                    reinterpret_cast<const half*>(weight), eps, seq_len,
-                                                    hidden_size, add_one_to_weight, stream);
+            return launch_fused_add_rms_norm<half>(reinterpret_cast<half*>(input), reinterpret_cast<half*>(residual),
+                                                   reinterpret_cast<const half*>(weight), eps, seq_len, hidden_size,
+                                                   add_one_to_weight, stream);
         case ZEDINFER_DTYPE_BF16:
             return launch_fused_add_rms_norm<__nv_bfloat16>(
                 reinterpret_cast<__nv_bfloat16*>(input), reinterpret_cast<__nv_bfloat16*>(residual),
-                reinterpret_cast<const __nv_bfloat16*>(weight), eps, seq_len, hidden_size,
-                add_one_to_weight, stream);
+                reinterpret_cast<const __nv_bfloat16*>(weight), eps, seq_len, hidden_size, add_one_to_weight, stream);
         default:
             EXCEPTION_UNSUPPORTED_DATATYPE(type);
     }

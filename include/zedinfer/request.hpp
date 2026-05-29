@@ -76,7 +76,7 @@ struct InferenceRequest {
     // and passes them to Scheduler::process_results. Non-reasoning models
     // never enter a thinking state, so these fields stay at defaults.
     bool in_thinking = false;
-    int  think_token_count = 0;
+    int think_token_count = 0;
 
     // After scheduler force-emits </think>, the model's natural follow-up is
     // "\n\n" before the answer (see Qwen3.5's chat_template.jinja). When we
@@ -135,13 +135,13 @@ struct InferenceRequest {
     // pos_ids_thw_        : [3, N_total] int32 (t, h, w) positions per token
     //                       for 3D MRoPE; null for non-hybrid models
     // has_input_embeds_   : convenience flag mirroring input_embeds_ != nullptr
-    int  ssm_slot_idx() const { return ssm_slot_idx_; }
+    int ssm_slot_idx() const { return ssm_slot_idx_; }
     void set_ssm_slot_idx(int idx) { ssm_slot_idx_ = idx; }
 
-    bool     has_input_embeds() const { return has_input_embeds_; }
+    bool has_input_embeds() const { return has_input_embeds_; }
     tensor_t input_embeds() const { return input_embeds_; }
-    void     set_input_embeds(tensor_t e) {
-        input_embeds_     = std::move(e);
+    void set_input_embeds(tensor_t e) {
+        input_embeds_ = std::move(e);
         has_input_embeds_ = static_cast<bool>(input_embeds_);
     }
 
@@ -153,10 +153,10 @@ private:
     kvcache::SequenceBlockTable owned_block_table_;
     bool owns_block_table_ = false;
 
-    int      ssm_slot_idx_ = -1;
+    int ssm_slot_idx_ = -1;
     tensor_t input_embeds_;
     tensor_t pos_ids_thw_;
-    bool     has_input_embeds_ = false;
+    bool has_input_embeds_ = false;
 
 public:
     // ----- Qwen3.5 MTP (Stage D) per-request K/V state -----
@@ -170,15 +170,15 @@ public:
     // logical past_seq_len resets between conversation turns.
     tensor_t mtp_k_cache;
     tensor_t mtp_v_cache;
-    tensor_t mtp_page_table_dev;       // [1] int32 = {0}
-    int      mtp_past_seq_len = 0;     // committed K/V positions in cache
+    tensor_t mtp_page_table_dev; // [1] int32 = {0}
+    int mtp_past_seq_len = 0;    // committed K/V positions in cache
 
     // Stage D.1 speculative-decode pending draft. After each main forward
     // the engine asks MTP for the t+2 prediction; we stash it here so the
     // NEXT scheduled step can feed [last_token, mtp_pending_draft] to main
     // as a 2-token verify batch. -1 = no draft pending (regular 1-token
     // decode this step).
-    int      mtp_pending_draft = -1;
+    int mtp_pending_draft = -1;
 
     // Stage D.2 spec-decode rejection sampling (sampling mode only). When the
     // active sampler is GeneralSampler the draft is DRAWN from the MTP head's
@@ -193,14 +193,14 @@ public:
     // Stage D.1 spec-decode counters (per request, lifetime of the request).
     // Useful for logging the accept rate observed during actual generation,
     // distinct from the off-line measurements done during Stage C tuning.
-    int      mtp_accept_count = 0;
-    int      mtp_reject_count = 0;
+    int mtp_accept_count = 0;
+    int mtp_reject_count = 0;
 
     // Number of tokens committed by the most recent scheduler step. Set by
     // Scheduler::process_results so serving_loop knows how many MTP forwards
     // to run to advance MTP's K/V cache. 1 for normal decode + reject, 2 on
     // spec accept. Reset to 0 after consumption.
-    int      mtp_last_n_committed = 0;
+    int mtp_last_n_committed = 0;
 
     // Stage D.1 spec-decode recurrent-state handling (hybrid Qwen3.5 only).
     // The 2-token [last_token, draft] verify forward must not let the
@@ -214,7 +214,7 @@ public:
     // the correct post-last_token state, so it just emits the corrected token —
     // no rollback, no redo. serving_loop sets the flag before a verify forward
     // and clears it after.
-    bool     mtp_spec_verify_active = false;
+    bool mtp_spec_verify_active = false;
 };
 
 } // namespace zedinfer

@@ -62,8 +62,7 @@ public:
     //                          Jinja template can format function definitions
     //                          into the prompt. Empty / null disables tool use.
     std::string render(const std::vector<ChatMessageMM>& messages, bool add_generation_prompt = true,
-                       bool enable_thinking = true,
-                       const nlohmann::ordered_json* tools = nullptr) const;
+                       bool enable_thinking = true, const nlohmann::ordered_json* tools = nullptr) const;
 
 private:
     struct Impl;

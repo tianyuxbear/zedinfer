@@ -35,9 +35,7 @@ protected:
     void SetUp() override {
         try {
             context().setDevice(ZEDINFER_DEVICE_NVIDIA, 0);
-        } catch (const std::exception& e) {
-            GTEST_SKIP() << "NVIDIA runtime init failed: " << e.what();
-        }
+        } catch (const std::exception& e) { GTEST_SKIP() << "NVIDIA runtime init failed: " << e.what(); }
     }
 };
 
@@ -82,29 +80,31 @@ void expect_finite_and_nonzero(zedinfer::tensor_t t) {
         std::memcpy(&f, &u, sizeof(f));
         ASSERT_FALSE(std::isnan(f)) << "NaN in SSU output";
         ASSERT_FALSE(std::isinf(f)) << "Inf in SSU output";
-        if (f != 0.0f) any_nonzero = true;
+        if (f != 0.0f) {
+            any_nonzero = true;
+        }
     }
     EXPECT_TRUE(any_nonzero) << "SSU output is all-zero; kernel likely no-op";
 }
 
 // Build inputs sized to match Qwen3.5's value/key head dims (Dv=128, Dk=128)
 // but small Hv/Hk and dstate so the test stays sub-second.
-constexpr int kHv = 8;     // value heads (small subset of Qwen3.5's 32-48)
+constexpr int kHv = 8; // value heads (small subset of Qwen3.5's 32-48)
 constexpr int kDv = 128;
-constexpr int kHk = 4;     // key heads
+constexpr int kHk = 4; // key heads
 constexpr int kDk = 128;
 constexpr int kDstate = 128;
 
 SSMStatePoolConfig make_test_pool_cfg() {
     SSMStatePoolConfig cfg;
     cfg.num_linear_layers = 1;
-    cfg.num_v_heads       = kHv;
-    cfg.value_head_dim    = kDv;
-    cfg.d_state           = kDstate;
-    cfg.conv_kernel_dim   = 4;
-    cfg.qkv_dim           = 2 * kHk * kDk + kHv * kDv;
-    cfg.max_concurrent    = 1;
-    cfg.state_dtype       = ZEDINFER_DTYPE_BF16;
+    cfg.num_v_heads = kHv;
+    cfg.value_head_dim = kDv;
+    cfg.d_state = kDstate;
+    cfg.conv_kernel_dim = 4;
+    cfg.qkv_dim = 2 * kHk * kDk + kHv * kDv;
+    cfg.max_concurrent = 1;
+    cfg.state_dtype = ZEDINFER_DTYPE_BF16;
     return cfg;
 }
 
@@ -118,27 +118,32 @@ TEST_F(OpsMambaSSU, DecodeSingleTokenRuns) {
     // N=1 decode: small randomized-looking inputs (deterministic seed).
     auto fill_seq = [](size_t n, float base, float step) {
         std::vector<float> v(n);
-        for (size_t i = 0; i < n; ++i) v[i] = base + step * static_cast<float>(i);
+        for (size_t i = 0; i < n; ++i) { v[i] = base + step * static_cast<float>(i); }
         return v;
     };
 
     auto q = make_bf16({1, static_cast<size_t>(kHk * kDk)}, fill_seq(kHk * kDk, 0.01f, 0.001f));
     auto k = make_bf16({1, static_cast<size_t>(kHk * kDk)}, fill_seq(kHk * kDk, 0.02f, 0.001f));
     auto v = make_bf16({1, static_cast<size_t>(kHv * kDv)}, fill_seq(kHv * kDv, 0.03f, 0.001f));
-    auto a = make_bf16({1, static_cast<size_t>(kHv)},       fill_seq(kHv, -0.5f, 0.05f));
-    auto b = make_bf16({1, static_cast<size_t>(kHv)},       fill_seq(kHv, 0.4f, 0.05f));
-    auto A_log   = make_f32({static_cast<size_t>(kHv)},     fill_seq(kHv, -0.1f, 0.01f));
-    auto dt_bias = make_bf16({static_cast<size_t>(kHv)},    fill_seq(kHv, -0.2f, 0.02f));
-    auto z       = make_bf16({1, static_cast<size_t>(kHv * kDv)}, fill_seq(kHv * kDv, 0.05f, 0.001f));
-    auto out     = Tensor::create({1, static_cast<size_t>(kHv * kDv)},
-                                   ZEDINFER_DTYPE_BF16, ZEDINFER_DEVICE_NVIDIA, 0);
+    auto a = make_bf16({1, static_cast<size_t>(kHv)}, fill_seq(kHv, -0.5f, 0.05f));
+    auto b = make_bf16({1, static_cast<size_t>(kHv)}, fill_seq(kHv, 0.4f, 0.05f));
+    auto A_log = make_f32({static_cast<size_t>(kHv)}, fill_seq(kHv, -0.1f, 0.01f));
+    auto dt_bias = make_bf16({static_cast<size_t>(kHv)}, fill_seq(kHv, -0.2f, 0.02f));
+    auto z = make_bf16({1, static_cast<size_t>(kHv * kDv)}, fill_seq(kHv * kDv, 0.05f, 0.001f));
+    auto out = Tensor::create({1, static_cast<size_t>(kHv * kDv)}, ZEDINFER_DTYPE_BF16, ZEDINFER_DEVICE_NVIDIA, 0);
 
     SSUParams p;
     p.state_view = pool.view();
-    p.slot_idx   = slot;
-    p.layer_idx  = 0;
-    p.q = q; p.k = k; p.v = v; p.a = a; p.b = b;
-    p.A_log = A_log; p.dt_bias = dt_bias; p.z = z;
+    p.slot_idx = slot;
+    p.layer_idx = 0;
+    p.q = q;
+    p.k = k;
+    p.v = v;
+    p.a = a;
+    p.b = b;
+    p.A_log = A_log;
+    p.dt_bias = dt_bias;
+    p.z = z;
     p.out = out;
     p.num_tokens = 1;
 
@@ -159,27 +164,37 @@ TEST_F(OpsMambaSSU, PrefillVarlenFourTokensRuns) {
 
     auto fill_seq = [](size_t n, float base, float step) {
         std::vector<float> v(n);
-        for (size_t i = 0; i < n; ++i) v[i] = base + step * static_cast<float>(i);
+        for (size_t i = 0; i < n; ++i) { v[i] = base + step * static_cast<float>(i); }
         return v;
     };
 
-    auto q = make_bf16({static_cast<size_t>(N), static_cast<size_t>(kHk * kDk)}, fill_seq(N * kHk * kDk, 0.01f, 0.0005f));
-    auto k = make_bf16({static_cast<size_t>(N), static_cast<size_t>(kHk * kDk)}, fill_seq(N * kHk * kDk, 0.02f, 0.0005f));
-    auto v = make_bf16({static_cast<size_t>(N), static_cast<size_t>(kHv * kDv)}, fill_seq(N * kHv * kDv, 0.03f, 0.0005f));
+    auto q
+        = make_bf16({static_cast<size_t>(N), static_cast<size_t>(kHk * kDk)}, fill_seq(N * kHk * kDk, 0.01f, 0.0005f));
+    auto k
+        = make_bf16({static_cast<size_t>(N), static_cast<size_t>(kHk * kDk)}, fill_seq(N * kHk * kDk, 0.02f, 0.0005f));
+    auto v
+        = make_bf16({static_cast<size_t>(N), static_cast<size_t>(kHv * kDv)}, fill_seq(N * kHv * kDv, 0.03f, 0.0005f));
     auto a = make_bf16({static_cast<size_t>(N), static_cast<size_t>(kHv)}, fill_seq(N * kHv, -0.5f, 0.02f));
     auto b = make_bf16({static_cast<size_t>(N), static_cast<size_t>(kHv)}, fill_seq(N * kHv, 0.4f, 0.02f));
-    auto A_log   = make_f32({static_cast<size_t>(kHv)},                  fill_seq(kHv, -0.1f, 0.01f));
-    auto dt_bias = make_bf16({static_cast<size_t>(kHv)},                  fill_seq(kHv, -0.2f, 0.02f));
-    auto z       = make_bf16({static_cast<size_t>(N), static_cast<size_t>(kHv * kDv)}, fill_seq(N * kHv * kDv, 0.05f, 0.0005f));
-    auto out     = Tensor::create({static_cast<size_t>(N), static_cast<size_t>(kHv * kDv)},
-                                   ZEDINFER_DTYPE_BF16, ZEDINFER_DEVICE_NVIDIA, 0);
+    auto A_log = make_f32({static_cast<size_t>(kHv)}, fill_seq(kHv, -0.1f, 0.01f));
+    auto dt_bias = make_bf16({static_cast<size_t>(kHv)}, fill_seq(kHv, -0.2f, 0.02f));
+    auto z
+        = make_bf16({static_cast<size_t>(N), static_cast<size_t>(kHv * kDv)}, fill_seq(N * kHv * kDv, 0.05f, 0.0005f));
+    auto out = Tensor::create({static_cast<size_t>(N), static_cast<size_t>(kHv * kDv)}, ZEDINFER_DTYPE_BF16,
+                              ZEDINFER_DEVICE_NVIDIA, 0);
 
     SSUParams p;
     p.state_view = pool.view();
-    p.slot_idx   = slot;
-    p.layer_idx  = 0;
-    p.q = q; p.k = k; p.v = v; p.a = a; p.b = b;
-    p.A_log = A_log; p.dt_bias = dt_bias; p.z = z;
+    p.slot_idx = slot;
+    p.layer_idx = 0;
+    p.q = q;
+    p.k = k;
+    p.v = v;
+    p.a = a;
+    p.b = b;
+    p.A_log = A_log;
+    p.dt_bias = dt_bias;
+    p.z = z;
     p.out = out;
     p.num_tokens = N;
 
@@ -190,7 +205,7 @@ TEST_F(OpsMambaSSU, PrefillVarlenFourTokensRuns) {
     pool.release_slot(slot);
 }
 
-#else  // !ENABLE_NVIDIA_API
+#else // !ENABLE_NVIDIA_API
 
 TEST(OpsMambaSSU, RequiresNvidiaBackend) {
     GTEST_SKIP() << "ops::mamba::ssu has only an NVIDIA impl; CPU build skips this suite";

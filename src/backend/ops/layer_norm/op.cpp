@@ -14,7 +14,7 @@ void layer_norm_bias(tensor_t output, tensor_t input, tensor_t weight, tensor_t 
     ASSERT(output->isContiguous() && input->isContiguous() && weight->isContiguous() && bias->isContiguous(),
            "layer_norm_bias: all tensors must be contiguous.");
 
-    const size_t seq_len     = output->dim(0);
+    const size_t seq_len = output->dim(0);
     const size_t hidden_size = output->dim(1);
 
     if (output->deviceType() == ZEDINFER_DEVICE_CPU) {

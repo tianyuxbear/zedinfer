@@ -47,9 +47,15 @@ __device__ __forceinline__ float to_float_bf16(uint16_t v) {
     return f;
 }
 
-__device__ __forceinline__ float to_float(__nv_bfloat16 v) { return __bfloat162float(v); }
-__device__ __forceinline__ float to_float(half v) { return __half2float(v); }
-__device__ __forceinline__ float to_float(float v) { return v; }
+__device__ __forceinline__ float to_float(__nv_bfloat16 v) {
+    return __bfloat162float(v);
+}
+__device__ __forceinline__ float to_float(half v) {
+    return __half2float(v);
+}
+__device__ __forceinline__ float to_float(float v) {
+    return v;
+}
 
 // Block reduction helpers using two-stage warp shuffle + shared memory.
 // BLOCK_THREADS is assumed ≤ 1024 (32 warps max).
@@ -65,7 +71,9 @@ template <int BLOCK_THREADS> __device__ __forceinline__ float block_reduce_max(f
         float other = __shfl_xor_sync(0xffffffffu, val, off);
         val = fmaxf(val, other);
     }
-    if (lane == 0) smem[warp] = val;
+    if (lane == 0) {
+        smem[warp] = val;
+    }
     __syncthreads();
     if (warp == 0) {
         val = (lane < kNumWarps) ? smem[lane] : -FLT_MAX;
@@ -74,7 +82,9 @@ template <int BLOCK_THREADS> __device__ __forceinline__ float block_reduce_max(f
             float other = __shfl_xor_sync(0xffffffffu, val, off);
             val = fmaxf(val, other);
         }
-        if (lane == 0) smem[0] = val;
+        if (lane == 0) {
+            smem[0] = val;
+        }
     }
     __syncthreads();
     return smem[0];
@@ -88,18 +98,18 @@ template <int BLOCK_THREADS> __device__ __forceinline__ float block_reduce_sum(f
     constexpr int kNumWarps = (BLOCK_THREADS + kWarpSize - 1) / kWarpSize;
 
 #pragma unroll
-    for (int off = kWarpSize / 2; off > 0; off >>= 1) {
-        val += __shfl_xor_sync(0xffffffffu, val, off);
+    for (int off = kWarpSize / 2; off > 0; off >>= 1) { val += __shfl_xor_sync(0xffffffffu, val, off); }
+    if (lane == 0) {
+        smem[warp] = val;
     }
-    if (lane == 0) smem[warp] = val;
     __syncthreads();
     if (warp == 0) {
         val = (lane < kNumWarps) ? smem[lane] : 0.0f;
 #pragma unroll
-        for (int off = kWarpSize / 2; off > 0; off >>= 1) {
-            val += __shfl_xor_sync(0xffffffffu, val, off);
+        for (int off = kWarpSize / 2; off > 0; off >>= 1) { val += __shfl_xor_sync(0xffffffffu, val, off); }
+        if (lane == 0) {
+            smem[0] = val;
         }
-        if (lane == 0) smem[0] = val;
     }
     __syncthreads();
     return smem[0];
@@ -110,7 +120,7 @@ template <int BLOCK_THREADS> __device__ __forceinline__ float block_reduce_sum(f
 // smaller index on ties (matches CPU std::partial_sort's stable order).
 template <int BLOCK_THREADS>
 __device__ __forceinline__ void block_argmax(float val, int idx, float& out_val, int& out_idx, float* smem_val,
-                                              int* smem_idx) {
+                                             int* smem_idx) {
     const int tid = threadIdx.x;
     const int lane = tid & (kWarpSize - 1);
     const int warp = tid >> 5;
@@ -192,7 +202,9 @@ __global__ void topk_softmax_kernel(const DType* __restrict__ logits, int32_t* _
     float topk_sum = 0.0f;
 #pragma unroll 1
     for (int k = 0; k < MAX_TOP_K; ++k) {
-        if (k >= top_k) break;
+        if (k >= top_k) {
+            break;
+        }
         float winner_val;
         int winner_idx;
         block_argmax<BLOCK_THREADS>(mask_val, tid, winner_val, winner_idx, smem_red, smem_red_idx);
@@ -213,9 +225,7 @@ __global__ void topk_softmax_kernel(const DType* __restrict__ logits, int32_t* _
     // 7. Optional renormalization of the K weights to sum to 1.
     if (norm_topk_prob && tid == 0 && topk_sum > 0.0f) {
         const float inv_topk = 1.0f / topk_sum;
-        for (int k = 0; k < top_k; ++k) {
-            expert_weights[row * top_k + k] *= inv_topk;
-        }
+        for (int k = 0; k < top_k; ++k) { expert_weights[row * top_k + k] *= inv_topk; }
     }
 }
 
@@ -224,11 +234,21 @@ void launch_topk_softmax(const DType* logits, int32_t* expert_ids, float* expert
                          int top_k, bool norm_topk_prob, cudaStream_t stream) {
     // Round block size up to the next warp multiple, capped at 1024.
     auto round_to_block = [](int n) -> int {
-        if (n <= 32) return 32;
-        if (n <= 64) return 64;
-        if (n <= 128) return 128;
-        if (n <= 256) return 256;
-        if (n <= 512) return 512;
+        if (n <= 32) {
+            return 32;
+        }
+        if (n <= 64) {
+            return 64;
+        }
+        if (n <= 128) {
+            return 128;
+        }
+        if (n <= 256) {
+            return 256;
+        }
+        if (n <= 512) {
+            return 512;
+        }
         return 1024;
     };
     const int block = round_to_block(num_experts);
@@ -237,23 +257,23 @@ void launch_topk_softmax(const DType* logits, int32_t* expert_ids, float* expert
     // Template specialize on (block_size, max_top_k=16) — covers all known
     // Qwen3-MoE / Qwen3.5 / DeepSeek-V3 router widths.
     if (block == 256) {
-        topk_softmax_kernel<256, 16, DType><<<grid, dim3(256), 0, stream>>>(
-            logits, expert_ids, expert_weights, num_experts, top_k, norm_topk_prob);
+        topk_softmax_kernel<256, 16, DType>
+            <<<grid, dim3(256), 0, stream>>>(logits, expert_ids, expert_weights, num_experts, top_k, norm_topk_prob);
     } else if (block == 128) {
-        topk_softmax_kernel<128, 16, DType><<<grid, dim3(128), 0, stream>>>(
-            logits, expert_ids, expert_weights, num_experts, top_k, norm_topk_prob);
+        topk_softmax_kernel<128, 16, DType>
+            <<<grid, dim3(128), 0, stream>>>(logits, expert_ids, expert_weights, num_experts, top_k, norm_topk_prob);
     } else if (block == 512) {
-        topk_softmax_kernel<512, 16, DType><<<grid, dim3(512), 0, stream>>>(
-            logits, expert_ids, expert_weights, num_experts, top_k, norm_topk_prob);
+        topk_softmax_kernel<512, 16, DType>
+            <<<grid, dim3(512), 0, stream>>>(logits, expert_ids, expert_weights, num_experts, top_k, norm_topk_prob);
     } else if (block == 1024) {
-        topk_softmax_kernel<1024, 16, DType><<<grid, dim3(1024), 0, stream>>>(
-            logits, expert_ids, expert_weights, num_experts, top_k, norm_topk_prob);
+        topk_softmax_kernel<1024, 16, DType>
+            <<<grid, dim3(1024), 0, stream>>>(logits, expert_ids, expert_weights, num_experts, top_k, norm_topk_prob);
     } else if (block == 64) {
-        topk_softmax_kernel<64, 16, DType><<<grid, dim3(64), 0, stream>>>(
-            logits, expert_ids, expert_weights, num_experts, top_k, norm_topk_prob);
+        topk_softmax_kernel<64, 16, DType>
+            <<<grid, dim3(64), 0, stream>>>(logits, expert_ids, expert_weights, num_experts, top_k, norm_topk_prob);
     } else {
-        topk_softmax_kernel<32, 16, DType><<<grid, dim3(32), 0, stream>>>(
-            logits, expert_ids, expert_weights, num_experts, top_k, norm_topk_prob);
+        topk_softmax_kernel<32, 16, DType>
+            <<<grid, dim3(32), 0, stream>>>(logits, expert_ids, expert_weights, num_experts, top_k, norm_topk_prob);
     }
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
@@ -287,17 +307,17 @@ void topk_softmax_gpu(tensor_t expert_ids, tensor_t expert_weights, tensor_t log
 
     switch (logits->dtype()) {
         case ZEDINFER_DTYPE_BF16:
-            return launch_topk_softmax<__nv_bfloat16>(
-                reinterpret_cast<const __nv_bfloat16*>(logits->data()), eid_p, ew_p, static_cast<int>(N),
-                static_cast<int>(num_experts), static_cast<int>(top_k), norm_topk_prob, stream);
+            return launch_topk_softmax<__nv_bfloat16>(reinterpret_cast<const __nv_bfloat16*>(logits->data()), eid_p,
+                                                      ew_p, static_cast<int>(N), static_cast<int>(num_experts),
+                                                      static_cast<int>(top_k), norm_topk_prob, stream);
         case ZEDINFER_DTYPE_F16:
             return launch_topk_softmax<half>(reinterpret_cast<const half*>(logits->data()), eid_p, ew_p,
-                                              static_cast<int>(N), static_cast<int>(num_experts),
-                                              static_cast<int>(top_k), norm_topk_prob, stream);
+                                             static_cast<int>(N), static_cast<int>(num_experts),
+                                             static_cast<int>(top_k), norm_topk_prob, stream);
         case ZEDINFER_DTYPE_F32:
             return launch_topk_softmax<float>(reinterpret_cast<const float*>(logits->data()), eid_p, ew_p,
-                                               static_cast<int>(N), static_cast<int>(num_experts),
-                                               static_cast<int>(top_k), norm_topk_prob, stream);
+                                              static_cast<int>(N), static_cast<int>(num_experts),
+                                              static_cast<int>(top_k), norm_topk_prob, stream);
         default:
             EXCEPTION_UNSUPPORTED_DATATYPE(logits->dtype());
     }

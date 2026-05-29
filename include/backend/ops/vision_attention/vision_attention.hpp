@@ -22,7 +22,7 @@ struct VisionAttentionParams {
     tensor_t k;
     tensor_t v;
     tensor_t out;
-    float    scale;
+    float scale;
 };
 
 void vision_attention(const VisionAttentionParams& p);

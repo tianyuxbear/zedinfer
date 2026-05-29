@@ -13,9 +13,8 @@ namespace {
 // One CTA per (n, head). 32 threads (1 warp) cooperate over `head_dim`
 // elements. Each lane handles `head_dim / 32` strided elements. Works for
 // any `head_dim` that's a multiple of 32 (Qwen3.5 uses 128).
-__global__ void qk_l2norm_kernel(__nv_bfloat16* __restrict__ qk,
-                                  int head_dim, float scale, float eps) {
-    const int row  = blockIdx.x;
+__global__ void qk_l2norm_kernel(__nv_bfloat16* __restrict__ qk, int head_dim, float scale, float eps) {
+    const int row = blockIdx.x;
     const int lane = threadIdx.x;
 
     __nv_bfloat16* row_ptr = qk + (size_t)row * head_dim;
@@ -26,9 +25,7 @@ __global__ void qk_l2norm_kernel(__nv_bfloat16* __restrict__ qk,
         float v = __bfloat162float(row_ptr[j]);
         sq += v * v;
     }
-    for (int off = 16; off > 0; off >>= 1) {
-        sq += __shfl_xor_sync(0xffffffff, sq, off);
-    }
+    for (int off = 16; off > 0; off >>= 1) { sq += __shfl_xor_sync(0xffffffff, sq, off); }
 
     const float norm = rsqrtf(sq + eps) * scale;
 
@@ -41,8 +38,7 @@ __global__ void qk_l2norm_kernel(__nv_bfloat16* __restrict__ qk,
 
 } // namespace
 
-void qk_l2norm_inplace(tensor_t qk, int num_heads, int head_dim,
-                       float scale, float eps) {
+void qk_l2norm_inplace(tensor_t qk, int num_heads, int head_dim, float scale, float eps) {
     if (qk->dtype() != ZEDINFER_DTYPE_BF16) {
         throw std::runtime_error("[qk_l2norm_inplace] only bf16 is supported");
     }
@@ -52,15 +48,15 @@ void qk_l2norm_inplace(tensor_t qk, int num_heads, int head_dim,
 
     const size_t total = qk->numel();
     const size_t row_count = total / static_cast<size_t>(head_dim);
-    if (row_count == 0) return;
+    if (row_count == 0) {
+        return;
+    }
 
     auto stream = reinterpret_cast<cudaStream_t>(core::context().runtime().stream());
 
     dim3 grid(static_cast<unsigned>(row_count));
     dim3 block(32);
-    qk_l2norm_kernel<<<grid, block, 0, stream>>>(
-        reinterpret_cast<__nv_bfloat16*>(qk->data()),
-        head_dim, scale, eps);
+    qk_l2norm_kernel<<<grid, block, 0, stream>>>(reinterpret_cast<__nv_bfloat16*>(qk->data()), head_dim, scale, eps);
 
     cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) {

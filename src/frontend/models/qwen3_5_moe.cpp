@@ -31,7 +31,7 @@ namespace {
 // deliberately don't match — they're not consumed by the main forward path.
 bool parse_fused_expert_tensor_name(const std::string& name, size_t& layer, std::string& proj) {
     static const std::string kPrefix = "layers.";
-    static const std::string kMid    = ".mlp.experts.";
+    static const std::string kMid = ".mlp.experts.";
     if (name.compare(0, kPrefix.size(), kPrefix) != 0) {
         return false;
     }
@@ -71,13 +71,13 @@ void expand_fused_expert_weights(ModelWeights& weights, size_t num_layers, size_
     // invalidated by add_tensor / remove_tensor mutations below.
     struct Hit {
         std::string name;
-        tensor_t    tensor;
-        size_t      layer;
+        tensor_t tensor;
+        size_t layer;
         std::string proj;
     };
     std::vector<Hit> hits;
     for (const auto& [name, tensor] : weights.get_all_weights()) {
-        size_t      layer = 0;
+        size_t layer = 0;
         std::string proj;
         if (parse_fused_expert_tensor_name(name, layer, proj) && layer < num_layers) {
             hits.push_back({name, tensor, layer, proj});
@@ -90,21 +90,20 @@ void expand_fused_expert_weights(ModelWeights& weights, size_t num_layers, size_
     int n_views = 0;
     for (const auto& hit : hits) {
         const std::string prefix = "layers." + std::to_string(hit.layer) + ".mlp.experts.";
-        const auto&       shape  = hit.tensor->shape();
+        const auto& shape = hit.tensor->shape();
         if (shape.size() != 3) {
-            throw std::runtime_error("[Qwen3_5MoE] expected 3-D fused expert tensor for " + hit.name
-                                     + " but got " + std::to_string(shape.size()) + "-D");
+            throw std::runtime_error("[Qwen3_5MoE] expected 3-D fused expert tensor for " + hit.name + " but got "
+                                     + std::to_string(shape.size()) + "-D");
         }
         const size_t E = shape[0];
         const size_t want_E = num_experts_per_layer;
         if (E != want_E) {
             throw std::runtime_error("[Qwen3_5MoE] " + hit.name + " has " + std::to_string(E)
-                                     + " experts on dim 0 but config says num_experts="
-                                     + std::to_string(want_E));
+                                     + " experts on dim 0 but config says num_experts=" + std::to_string(want_E));
         }
         if (hit.proj == "gate_up_proj") {
             const size_t two_M = shape[1];
-            const size_t H     = shape[2];
+            const size_t H = shape[2];
             if (two_M % 2 != 0) {
                 throw std::runtime_error("[Qwen3_5MoE] " + hit.name + " dim 1 = " + std::to_string(two_M)
                                          + " is not even; cannot split gate/up");
@@ -117,8 +116,8 @@ void expand_fused_expert_weights(ModelWeights& weights, size_t num_layers, size_
                 // (second half), matching HF's gate-then-up param init.
                 auto row_3d = hit.tensor->slice(0, i, i + 1);
                 auto row_2d = row_3d->view({two_M, H});
-                auto gate   = row_2d->slice(0, 0, M);
-                auto up     = row_2d->slice(0, M, two_M);
+                auto gate = row_2d->slice(0, 0, M);
+                auto up = row_2d->slice(0, M, two_M);
                 weights.add_tensor(prefix + std::to_string(i) + ".gate_proj.weight", gate);
                 weights.add_tensor(prefix + std::to_string(i) + ".up_proj.weight", up);
             }
@@ -128,7 +127,7 @@ void expand_fused_expert_weights(ModelWeights& weights, size_t num_layers, size_
             const size_t M = shape[2];
             for (size_t i = 0; i < E; ++i) {
                 auto row_3d = hit.tensor->slice(0, i, i + 1);
-                auto down   = row_3d->view({H, M});
+                auto down = row_3d->view({H, M});
                 weights.add_tensor(prefix + std::to_string(i) + ".down_proj.weight", down);
             }
             n_views += static_cast<int>(E);
@@ -188,19 +187,17 @@ Qwen3_5MoeModel::Qwen3_5MoeModel(Qwen3_5MoEConfig config, std::unique_ptr<ModelW
     // inside the M1 forward path. Catch it at construction time so misconfigured models
     // (e.g. text_config.num_experts absent from config.json) fail fast and clearly.
     if (moe_config_.num_experts <= 0 || moe_config_.num_experts_per_tok <= 0) {
-        throw std::runtime_error(
-            "[Qwen3_5MoeModel] invalid MoE config: num_experts="
-            + std::to_string(moe_config_.num_experts)
-            + ", num_experts_per_tok=" + std::to_string(moe_config_.num_experts_per_tok)
-            + " (both must be > 0; check config.json text_config)");
+        throw std::runtime_error("[Qwen3_5MoeModel] invalid MoE config: num_experts="
+                                 + std::to_string(moe_config_.num_experts)
+                                 + ", num_experts_per_tok=" + std::to_string(moe_config_.num_experts_per_tok)
+                                 + " (both must be > 0; check config.json text_config)");
     }
     // Some bf16 releases (Qwen3.6-35B-A3B) store all experts of a layer in one
     // 3-D tensor (experts.gate_up_proj / experts.down_proj). The GPTQ-Int4
     // release we originally bring-up'd against uses per-expert tensors. Detect
     // the fused layout and expand it into per-expert views first; the rest of
     // the loader is then format-agnostic.
-    expand_fused_expert_weights(*weights_, moe_config_.num_hidden_layers,
-                                static_cast<size_t>(moe_config_.num_experts));
+    expand_fused_expert_weights(*weights_, moe_config_.num_hidden_layers, static_cast<size_t>(moe_config_.num_experts));
     auto experts = extract_expert_weights(*weights_, moe_config_.num_hidden_layers,
                                           static_cast<size_t>(moe_config_.num_experts));
     expert_pool_ = std::make_unique<ExpertPool>(std::move(experts), pool_cfg);
@@ -214,8 +211,7 @@ Qwen3_5MoeModel::Qwen3_5MoeModel(Qwen3_5MoEConfig config, std::unique_ptr<ModelW
     mtp_ = std::make_unique<MTPModule>(moe_config_, *weights_, exec);
 
     LOGI.printf("[Qwen3_5MoeModel] constructed: experts=%d top_k=%d shared_expert_size=%d mtp=%s",
-                moe_config_.num_experts, moe_config_.num_experts_per_tok,
-                moe_config_.shared_expert_intermediate_size,
+                moe_config_.num_experts, moe_config_.num_experts_per_tok, moe_config_.shared_expert_intermediate_size,
                 (mtp_ && mtp_->ready()) ? "yes" : "no");
 }
 
@@ -238,8 +234,8 @@ HybridForwardConfig Qwen3_5MoeModel::hybrid_forward_config_moe() const {
     // the MoE output, yielding context-independent degenerate generation.
     h.norm_topk_prob = true;
     h.has_shared_expert = h.shared_expert_intermediate_size > 0
-                          && (weights_->has_tensor("layers.0.mlp.shared_expert.gate_proj.weight")
-                              || weights_->has_tensor("layers.0.mlp.shared_expert.gate_proj.weight_packed"));
+                       && (weights_->has_tensor("layers.0.mlp.shared_expert.gate_proj.weight")
+                           || weights_->has_tensor("layers.0.mlp.shared_expert.gate_proj.weight_packed"));
     h.expert_pool = expert_pool_.get();
 
     // Cache per-layer router weights for moe_layer_forward's compute_router_topk

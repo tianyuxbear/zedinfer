@@ -45,16 +45,16 @@ struct DecodeScratch {
     tensor_t logits;       // {1, V}
 
     // MoE-specific buffers (nullptr for dense models)
-    tensor_t router_logits; // {1, num_experts}
-    tensor_t moe_output;    // {1, H} — accumulator for weighted expert outputs
-    tensor_t expert_gate;   // {1, moe_intermediate_size}
-    tensor_t expert_up;     // {1, moe_intermediate_size}
-    tensor_t expert_act;    // {1, moe_intermediate_size}
-    tensor_t expert_down;   // {1, H}
-    tensor_t shared_gate;       // {1, shared_expert_intermediate_size}
-    tensor_t shared_up;         // {1, shared_expert_intermediate_size}
-    tensor_t shared_act;        // {1, shared_expert_intermediate_size}
-    tensor_t shared_down;       // {1, H}
+    tensor_t router_logits;      // {1, num_experts}
+    tensor_t moe_output;         // {1, H} — accumulator for weighted expert outputs
+    tensor_t expert_gate;        // {1, moe_intermediate_size}
+    tensor_t expert_up;          // {1, moe_intermediate_size}
+    tensor_t expert_act;         // {1, moe_intermediate_size}
+    tensor_t expert_down;        // {1, H}
+    tensor_t shared_gate;        // {1, shared_expert_intermediate_size}
+    tensor_t shared_up;          // {1, shared_expert_intermediate_size}
+    tensor_t shared_act;         // {1, shared_expert_intermediate_size}
+    tensor_t shared_down;        // {1, H}
     tensor_t shared_gate_logits; // {1, 1} — Qwen3.5 shared_expert_gate scalar
 
     static std::unique_ptr<DecodeScratch> create(const ModelConfig& cfg, const struct ModelForwardConfig& fwd_cfg,

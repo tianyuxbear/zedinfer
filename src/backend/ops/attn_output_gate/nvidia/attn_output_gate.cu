@@ -8,9 +8,8 @@ namespace zedinfer::ops {
 
 namespace {
 
-__global__ void attn_output_gate_kernel(__nv_bfloat16* __restrict__ attn,
-                                          const __nv_bfloat16* __restrict__ g,
-                                          int total) {
+__global__ void attn_output_gate_kernel(__nv_bfloat16* __restrict__ attn, const __nv_bfloat16* __restrict__ g,
+                                        int total) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= total) {
         return;
@@ -29,9 +28,8 @@ void attn_output_gate(tensor_t attn, tensor_t g) {
     auto stream = reinterpret_cast<cudaStream_t>(core::context().runtime().stream());
     const dim3 block(256);
     const dim3 grid(static_cast<unsigned int>((total + 255) / 256));
-    attn_output_gate_kernel<<<grid, block, 0, stream>>>(
-        reinterpret_cast<__nv_bfloat16*>(attn->data()),
-        reinterpret_cast<const __nv_bfloat16*>(g->data()), total);
+    attn_output_gate_kernel<<<grid, block, 0, stream>>>(reinterpret_cast<__nv_bfloat16*>(attn->data()),
+                                                        reinterpret_cast<const __nv_bfloat16*>(g->data()), total);
 }
 
 } // namespace zedinfer::ops

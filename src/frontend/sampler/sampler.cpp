@@ -111,8 +111,8 @@ int ArgmaxSampler::sample(tensor_t logits, const std::vector<int>* /*recent_toke
         const size_t vocab = static_cast<size_t>(last_logits->numel());
         std::vector<float> host(vocab);
         if (last_logits->dtype() == ZEDINFER_DTYPE_F32) {
-            core::context().runtime().api()->memcpy_sync(host.data(), last_logits->data(),
-                                                         vocab * sizeof(float), ZEDINFER_MEMCPY_D2H);
+            core::context().runtime().api()->memcpy_sync(host.data(), last_logits->data(), vocab * sizeof(float),
+                                                         ZEDINFER_MEMCPY_D2H);
         } else if (last_logits->dtype() == ZEDINFER_DTYPE_BF16) {
             std::vector<uint16_t> bf16_host(vocab);
             core::context().runtime().api()->memcpy_sync(bf16_host.data(), last_logits->data(),
@@ -123,13 +123,11 @@ int ArgmaxSampler::sample(tensor_t logits, const std::vector<int>* /*recent_toke
             }
         }
         std::vector<std::pair<int, float>> idx_val(vocab);
-        for (size_t i = 0; i < vocab; ++i) idx_val[i] = {static_cast<int>(i), host[i]};
+        for (size_t i = 0; i < vocab; ++i) { idx_val[i] = {static_cast<int>(i), host[i]}; }
         std::partial_sort(idx_val.begin(), idx_val.begin() + 5, idx_val.end(),
                           [](const auto& a, const auto& b) { return a.second > b.second; });
         fprintf(stderr, "[zedinfer-logits] chose=%d top5:", chosen);
-        for (int k = 0; k < 5; ++k) {
-            fprintf(stderr, " #%d=%d(logit=%.4f)", k, idx_val[k].first, idx_val[k].second);
-        }
+        for (int k = 0; k < 5; ++k) { fprintf(stderr, " #%d=%d(logit=%.4f)", k, idx_val[k].first, idx_val[k].second); }
         fprintf(stderr, "\n");
     }
 
@@ -190,7 +188,7 @@ void GeneralSampler::setTopP(float top_p) {
 }
 
 std::vector<std::pair<float, int>> GeneralSampler::truncatedDist(tensor_t logits,
-                                                                const std::vector<int>* recent_tokens) {
+                                                                 const std::vector<int>* recent_tokens) {
     // Extract and ensure logits are on CPU
     tensor_t last_logits = getLastLogits(logits);
     last_logits = ensureCPU(last_logits);
@@ -339,8 +337,7 @@ void GeneralSampler::applyTemperature(float* logits, size_t size) {
 // generated tokens, not the prompt. Penalizing only generated tokens is a
 // common middle ground that doesn't trigger on benign prompt repeats (e.g.
 // quoted text in the user's question).
-void GeneralSampler::applyRepetitionPenalty(float* logits, size_t size,
-                                            const std::vector<int>* recent_tokens) {
+void GeneralSampler::applyRepetitionPenalty(float* logits, size_t size, const std::vector<int>* recent_tokens) {
     if (params_.repetition_penalty == 1.0f || !recent_tokens || recent_tokens->empty()) {
         return;
     }

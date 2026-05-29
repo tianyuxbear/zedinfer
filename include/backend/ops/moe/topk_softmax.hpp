@@ -33,7 +33,6 @@ TopKResult topk_softmax(const float* logits, size_t N, size_t num_experts, size_
 //
 // The kernel assumes num_experts ≤ 1024 and top_k ≤ 32 (sized in registers /
 // shared memory). For Qwen3.5 (num_experts=256, top_k=8) this is far inside.
-void topk_softmax_gpu(tensor_t expert_ids, tensor_t expert_weights, tensor_t logits, size_t top_k,
-                      bool norm_topk_prob);
+void topk_softmax_gpu(tensor_t expert_ids, tensor_t expert_weights, tensor_t logits, size_t top_k, bool norm_topk_prob);
 
 } // namespace zedinfer::ops::moe

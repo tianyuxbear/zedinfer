@@ -26,7 +26,7 @@ BatchContext ScheduledBatch::build_context() const {
     ctx.decode_token_offset = 0;
     for (auto* req : decode_requests) {
         const bool spec = (req->mtp_pending_draft >= 0);
-        const int  n    = spec ? 2 : 1;
+        const int n = spec ? 2 : 1;
 
         // Normal decode: 1 token. Spec verify: 2 tokens [last_token, draft] so
         // main can validate the MTP-proposed t+2 in the same forward.

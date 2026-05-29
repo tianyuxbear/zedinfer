@@ -30,7 +30,7 @@ class SSMStatePool;
 namespace sampler {
 class Sampler;
 class GeneralSampler;
-}
+} // namespace sampler
 namespace tokenizer {
 class Tokenizer;
 }

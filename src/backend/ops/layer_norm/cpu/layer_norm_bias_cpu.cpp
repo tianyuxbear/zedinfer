@@ -46,8 +46,8 @@ void layer_norm_bias_(T* output, const T* input, const T* weight, const T* bias,
 
     std::vector<float> row(hidden_size);
     for (size_t i = 0; i < seq_len; ++i) {
-        const T* in_row  = input + i * hidden_size;
-        T*       out_row = output + i * hidden_size;
+        const T* in_row = input + i * hidden_size;
+        T* out_row = output + i * hidden_size;
 
         float sum = 0.0f;
         for (size_t j = 0; j < hidden_size; ++j) {
@@ -65,7 +65,7 @@ void layer_norm_bias_(T* output, const T* input, const T* weight, const T* bias,
 
         for (size_t j = 0; j < hidden_size; ++j) {
             const float normed = (row[j] - mean) * inv_std;
-            out_row[j]         = from_f32<T>(normed * w_f32[j] + b_f32[j]);
+            out_row[j] = from_f32<T>(normed * w_f32[j] + b_f32[j]);
         }
     }
 }

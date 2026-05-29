@@ -11,9 +11,9 @@ namespace zedinfer::ops::nvidia {
 namespace {
 
 __device__ __forceinline__ float gelu_tanh_scalar(float x) {
-    constexpr float k     = 0.7978845608028654f; // sqrt(2/pi)
-    constexpr float c     = 0.044715f;
-    const float     inner = k * (x + c * x * x * x);
+    constexpr float k = 0.7978845608028654f; // sqrt(2/pi)
+    constexpr float c = 0.044715f;
+    const float inner = k * (x + c * x * x * x);
     return 0.5f * x * (1.0f + tanhf(inner));
 }
 
@@ -47,7 +47,7 @@ template <typename T> __global__ void gelu_tanh_kernel(T* y, const T* x, size_t 
 
 template <typename T> void launch_gelu_tanh(T* y, const T* x, size_t n, cudaStream_t stream) {
     constexpr int BLOCK = 256;
-    const size_t  grid  = (n + BLOCK - 1) / BLOCK;
+    const size_t grid = (n + BLOCK - 1) / BLOCK;
     gelu_tanh_kernel<T><<<static_cast<unsigned int>(grid), BLOCK, 0, stream>>>(y, x, n);
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {

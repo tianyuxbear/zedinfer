@@ -2,16 +2,16 @@
 #include "backend/core/context/context.hpp"
 #include "backend/device/runtime_api.hpp"
 #include "backend/kvcache/block_pool.hpp"
+#include "backend/ops/ops.hpp"
+#include "backend/ops/scatter_image_embeds/scatter_image_embeds.hpp"
 #include "frontend/models/forward_config.hpp"
 #include "frontend/models/paged_forward_context.hpp"
 #include "frontend/models/qwen3_5.hpp"
+#include "frontend/models/vision_tower.hpp"
 #include "frontend/sampler/sampler.hpp"
 #include "frontend/tokenizer/hf_tokenizer.hpp"
 #include "utils/logging.hpp"
 #include "utils/types.hpp"
-#include "backend/ops/ops.hpp"
-#include "backend/ops/scatter_image_embeds/scatter_image_embeds.hpp"
-#include "frontend/models/vision_tower.hpp"
 #include "zedinfer/chat_template_jinja.hpp"
 #include "zedinfer/multimodal_processor.hpp"
 #include "zedinfer/session.hpp"
@@ -44,7 +44,7 @@ namespace {
 // (e.g. CoT "Wait, ..." patterns); honoring the model's own do_sample=true is
 // the canonical fix.
 std::shared_ptr<sampler::Sampler> create_sampler_from_generation_config(const std::string& model_path,
-                                                                       const ExecutorConfig& exec_config) {
+                                                                        const ExecutorConfig& exec_config) {
     namespace fs = std::filesystem;
     // Debug override: if ZEDINFER_FORCE_ARGMAX is set, ignore generation_config
     // and use deterministic greedy sampling. Useful for reproducible debugging
@@ -56,8 +56,7 @@ std::shared_ptr<sampler::Sampler> create_sampler_from_generation_config(const st
     }
     fs::path gen_cfg_path = fs::path(model_path) / "generation_config.json";
     if (!fs::exists(gen_cfg_path)) {
-        LOGI << "[Sampler] No generation_config.json at " << gen_cfg_path.string()
-             << "; defaulting to ARGMAX (greedy)";
+        LOGI << "[Sampler] No generation_config.json at " << gen_cfg_path.string() << "; defaulting to ARGMAX (greedy)";
         return sampler::createSampler(exec_config, sampler::SamplerType::ARGMAX);
     }
     try {
@@ -93,8 +92,7 @@ std::shared_ptr<sampler::Sampler> create_sampler_from_generation_config(const st
         // generation_config value entirely. Useful when validating whether
         // the default 1.1 (introduced to suppress thinking-loop attractors)
         // is interfering with non-reasoning prompts.
-        if (const char* env_rp = std::getenv("ZEDINFER_REPETITION_PENALTY");
-            env_rp != nullptr && *env_rp != '\0') {
+        if (const char* env_rp = std::getenv("ZEDINFER_REPETITION_PENALTY"); env_rp != nullptr && *env_rp != '\0') {
             try {
                 params.repetition_penalty = std::stof(env_rp);
                 LOGI.printf("[Sampler] ZEDINFER_REPETITION_PENALTY=%.3f overriding generation_config",
@@ -109,8 +107,8 @@ std::shared_ptr<sampler::Sampler> create_sampler_from_generation_config(const st
         params.seed = j.value("seed", 0u);
 
         if (!params.validate()) {
-            LOGW << "[Sampler] generation_config.json params failed validation ("
-                 << params.info() << "); falling back to ARGMAX";
+            LOGW << "[Sampler] generation_config.json params failed validation (" << params.info()
+                 << "); falling back to ARGMAX";
             return sampler::createSampler(exec_config, sampler::SamplerType::ARGMAX);
         }
 
@@ -119,8 +117,7 @@ std::shared_ptr<sampler::Sampler> create_sampler_from_generation_config(const st
                     params.temperature, params.top_k, params.top_p, params.repetition_penalty);
         return sampler::createSampler(exec_config, sampler::SamplerType::GENERAL, params);
     } catch (const std::exception& e) {
-        LOGW << "[Sampler] Failed to parse " << gen_cfg_path.string() << ": " << e.what()
-             << "; defaulting to ARGMAX";
+        LOGW << "[Sampler] Failed to parse " << gen_cfg_path.string() << ": " << e.what() << "; defaulting to ARGMAX";
         return sampler::createSampler(exec_config, sampler::SamplerType::ARGMAX);
     }
 }
@@ -236,9 +233,8 @@ std::shared_ptr<InferenceEngine> InferenceEngine::create(const std::string& mode
     engine->argmax_sampler_ = sampler::createSampler(exec_config, sampler::SamplerType::ARGMAX);
     {
         sampler::SamplerParams default_general_params;
-        engine->general_sampler_
-            = std::static_pointer_cast<sampler::GeneralSampler>(
-                sampler::createSampler(exec_config, sampler::SamplerType::GENERAL, default_general_params));
+        engine->general_sampler_ = std::static_pointer_cast<sampler::GeneralSampler>(
+            sampler::createSampler(exec_config, sampler::SamplerType::GENERAL, default_general_params));
     }
 
     // Try to load a Jinja chat template from common HF locations so every model
@@ -253,12 +249,10 @@ std::shared_ptr<InferenceEngine> InferenceEngine::create(const std::string& mode
         fs::path jinja_file = fs::path(model_path) / "chat_template.jinja";
         if (fs::exists(jinja_file)) {
             try {
-                engine->chat_template_jinja_ = std::make_shared<ChatTemplateJinja>(
-                    ChatTemplateJinja::load(jinja_file.string()));
+                engine->chat_template_jinja_
+                    = std::make_shared<ChatTemplateJinja>(ChatTemplateJinja::load(jinja_file.string()));
                 LOGI << "[Engine] Loaded Jinja chat template from " << jinja_file;
-            } catch (const std::exception& e) {
-                LOGW << "[Engine] chat_template.jinja load failed: " << e.what();
-            }
+            } catch (const std::exception& e) { LOGW << "[Engine] chat_template.jinja load failed: " << e.what(); }
         }
         if (!engine->chat_template_jinja_) {
             fs::path tcfg = fs::path(model_path) / "tokenizer_config.json";
@@ -270,8 +264,8 @@ std::shared_ptr<InferenceEngine> InferenceEngine::create(const std::string& mode
                     if (j.contains("chat_template") && j["chat_template"].is_string()) {
                         std::string src = j["chat_template"].get<std::string>();
                         if (!src.empty()) {
-                            engine->chat_template_jinja_ = std::make_shared<ChatTemplateJinja>(
-                                ChatTemplateJinja::load_from_source(src));
+                            engine->chat_template_jinja_
+                                = std::make_shared<ChatTemplateJinja>(ChatTemplateJinja::load_from_source(src));
                             LOGI.printf("[Engine] Loaded Jinja chat template from tokenizer_config.json (%zu bytes)",
                                         src.size());
                         }
@@ -304,8 +298,7 @@ std::shared_ptr<InferenceEngine> InferenceEngine::create(const std::string& mode
         engine->double_newline_token_id_ = nl_ids.empty() ? -1 : nl_ids.back();
     }
     LOGI << "[Engine] Think tokens: <think>=" << engine->think_open_token_id_
-         << " </think>=" << engine->think_close_token_id_
-         << " \\n\\n=" << engine->double_newline_token_id_;
+         << " </think>=" << engine->think_close_token_id_ << " \\n\\n=" << engine->double_newline_token_id_;
 
     engine->model_name_ = model_name;
     engine->scheduler_config_ = sched_config;
@@ -336,8 +329,8 @@ std::shared_ptr<InferenceEngine> InferenceEngine::create(const std::string& mode
     // (stb_image decode + resize + patchify) happens per request.
     if (auto* q35 = dynamic_cast<model::Qwen3_5Model*>(engine->model_.get())) {
         if (q35->vision_tower() != nullptr) {
-            engine->mm_processor_ = std::make_unique<MultiModalProcessor>(
-                static_cast<const model::Qwen3_5Config&>(q35->config()).vision);
+            engine->mm_processor_
+                = std::make_unique<MultiModalProcessor>(static_cast<const model::Qwen3_5Config&>(q35->config()).vision);
             engine->image_pad_token_id_ = engine->tokenizer_->get_special_token_id("<|image_pad|>");
             LOGI.printf("[Engine] Vision pipeline enabled; <|image_pad|>=%d", engine->image_pad_token_id_);
         }
@@ -361,8 +354,8 @@ std::shared_ptr<InferenceEngine> InferenceEngine::create(const std::string& mode
     // SSM+attention forward without a real InferenceRequest (for the SSM slot).
     // Real generation goes through ServingLoop which acquires SSM slots and
     // routes to hybrid_transformer_forward.
-    const bool is_hybrid_qwen3_5 = (engine->model_->model_type() == "qwen3_5"
-                                    || engine->model_->model_type() == "qwen3_5_moe");
+    const bool is_hybrid_qwen3_5
+        = (engine->model_->model_type() == "qwen3_5" || engine->model_->model_type() == "qwen3_5_moe");
     if (std::getenv("ZEDINFER_DISABLE_WARMUP") == nullptr && !is_hybrid_qwen3_5) {
         LOG_VERBOSE_(utils::BOTH) << "[Engine] Performing warmup...";
         engine->profiler_->warmup();
@@ -691,27 +684,29 @@ bool InferenceEngine::has_vision() const {
     return false;
 }
 
-int InferenceEngine::image_pad_token_id() const { return image_pad_token_id_; }
+int InferenceEngine::image_pad_token_id() const {
+    return image_pad_token_id_;
+}
 
 tensor_t InferenceEngine::encode_image_data_uri(std::string_view data_uri) {
     auto* q35 = dynamic_cast<model::Qwen3_5Model*>(model_.get());
     if (!q35 || !q35->vision_tower() || !mm_processor_) {
         throw std::runtime_error("[Engine] encode_image_data_uri called on a non-vision model");
     }
-    ImagePayload   payload   = MultiModalProcessor::decode_data_uri(data_uri);
+    ImagePayload payload = MultiModalProcessor::decode_data_uri(data_uri);
     ProcessedImage processed = mm_processor_->process(payload, exec_config_);
     return q35->vision_tower()->forward(processed.patches, processed.pos_ids_thw, processed.grid_h, processed.grid_w,
                                         exec_config_);
 }
 
-tensor_t InferenceEngine::build_multimodal_input_embeds(const std::vector<int>&      input_ids,
+tensor_t InferenceEngine::build_multimodal_input_embeds(const std::vector<int>& input_ids,
                                                         const std::vector<tensor_t>& image_embeds_chunks) {
     if (image_pad_token_id_ < 0) {
         throw std::runtime_error("[Engine] build_multimodal_input_embeds: model has no <|image_pad|> token");
     }
-    const size_t N            = input_ids.size();
-    const size_t hidden_size  = model_->config().hidden_size;
-    auto*        api          = core::context().runtime().api();
+    const size_t N = input_ids.size();
+    const size_t hidden_size = model_->config().hidden_size;
+    auto* api = core::context().runtime().api();
 
     // 1. Host → device upload of input_ids.
     auto ids_dev = Tensor::create({N}, ZEDINFER_DTYPE_I32, exec_config_.device_type, exec_config_.device_id);
@@ -719,8 +714,8 @@ tensor_t InferenceEngine::build_multimodal_input_embeds(const std::vector<int>& 
                      exec_config_.device_type == ZEDINFER_DEVICE_CPU ? ZEDINFER_MEMCPY_H2H : ZEDINFER_MEMCPY_H2D);
 
     // 2. Text token embed lookup.
-    auto embeds = Tensor::create({N, hidden_size}, exec_config_.data_type, exec_config_.device_type,
-                                 exec_config_.device_id);
+    auto embeds
+        = Tensor::create({N, hidden_size}, exec_config_.data_type, exec_config_.device_type, exec_config_.device_id);
     ops::embedding(embeds, ids_dev, model_->weights().get_tensor("embed_tokens.weight"));
 
     if (image_embeds_chunks.empty()) {
@@ -736,15 +731,12 @@ tensor_t InferenceEngine::build_multimodal_input_embeds(const std::vector<int>& 
         image_embeds = image_embeds_chunks.front();
     } else {
         size_t total_rows = 0;
-        for (const auto& c : image_embeds_chunks) {
-            total_rows += c->dim(0);
-        }
-        image_embeds        = Tensor::create({total_rows, hidden_size}, exec_config_.data_type, exec_config_.device_type,
-                                              exec_config_.device_id);
-        auto*  stream       = core::context().runtime().stream();
-        size_t off_bytes    = 0;
-        const auto kind     = exec_config_.device_type == ZEDINFER_DEVICE_CPU ? ZEDINFER_MEMCPY_H2H
-                                                                              : ZEDINFER_MEMCPY_D2D;
+        for (const auto& c : image_embeds_chunks) { total_rows += c->dim(0); }
+        image_embeds = Tensor::create({total_rows, hidden_size}, exec_config_.data_type, exec_config_.device_type,
+                                      exec_config_.device_id);
+        auto* stream = core::context().runtime().stream();
+        size_t off_bytes = 0;
+        const auto kind = exec_config_.device_type == ZEDINFER_DEVICE_CPU ? ZEDINFER_MEMCPY_H2H : ZEDINFER_MEMCPY_D2D;
         for (const auto& c : image_embeds_chunks) {
             const size_t bytes = c->numel() * c->elementSize();
             api->memcpy_async(reinterpret_cast<std::byte*>(image_embeds->data()) + off_bytes, c->data(), bytes, kind,

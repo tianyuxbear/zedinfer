@@ -3,13 +3,13 @@
 #include "backend/core/context/context.hpp"
 #include "backend/device/runtime_api.hpp"
 #include "backend/ops/attn_output_gate/attn_output_gate.hpp"
-#include "backend/ops/mrope/mrope_3d.hpp"
 #include "backend/ops/moe/topk_softmax.hpp"
+#include "backend/ops/mrope/mrope_3d.hpp"
 #include "backend/ops/ops.hpp"
 #include "backend/ops/shared_expert_gate/shared_expert_gate.hpp"
 #include "backend/tensor/tensor.hpp"
 #include "frontend/models/base.hpp"
-#include "frontend/models/hybrid_forward_config.hpp"  // MRoPEConfig
+#include "frontend/models/hybrid_forward_config.hpp" // MRoPEConfig
 #include "utils/types.hpp"
 
 #include <plog/Log.h>
@@ -38,29 +38,29 @@ namespace {
 struct MTPScratch {
     bool ready = false;
     // top of MTPModule::forward
-    tensor_t id_tensor;     // [1]   I32
-    tensor_t emb;           // [1, H]
-    tensor_t norm_e;        // [1, H]
-    tensor_t norm_h;        // [1, H]
-    tensor_t concat;        // [1, 2H]
-    tensor_t h_in_raw;      // [1, H]
-    tensor_t h_in;          // [1, H]
-    tensor_t h1;            // [1, H]
-    tensor_t h_post;        // [1, H]
-    tensor_t h_after_moe;   // [1, H]
-    tensor_t final_normed;  // [1, H]
-    tensor_t logits;        // [1, V]
+    tensor_t id_tensor;    // [1]   I32
+    tensor_t emb;          // [1, H]
+    tensor_t norm_e;       // [1, H]
+    tensor_t norm_h;       // [1, H]
+    tensor_t concat;       // [1, 2H]
+    tensor_t h_in_raw;     // [1, H]
+    tensor_t h_in;         // [1, H]
+    tensor_t h1;           // [1, H]
+    tensor_t h_post;       // [1, H]
+    tensor_t h_after_moe;  // [1, H]
+    tensor_t final_normed; // [1, H]
+    tensor_t logits;       // [1, V]
 
     // mtp_attention_decode
-    tensor_t att_q_raw;     // [1, q_dim]
-    tensor_t att_gate;      // [1, q_dim]
-    tensor_t att_k_raw;     // [1, kv_dim]
-    tensor_t att_v;         // [1, kv_dim]
-    tensor_t att_q_normed;  // [1, q_dim]
-    tensor_t att_k_normed;  // [1, kv_dim]
-    tensor_t att_pos_thw;   // [3, 1] I32
-    tensor_t att_attn;      // [1, Hq, Dh]
-    tensor_t att_out;       // [1, H]
+    tensor_t att_q_raw;    // [1, q_dim]
+    tensor_t att_gate;     // [1, q_dim]
+    tensor_t att_k_raw;    // [1, kv_dim]
+    tensor_t att_v;        // [1, kv_dim]
+    tensor_t att_q_normed; // [1, q_dim]
+    tensor_t att_k_normed; // [1, kv_dim]
+    tensor_t att_pos_thw;  // [3, 1] I32
+    tensor_t att_attn;     // [1, Hq, Dh]
+    tensor_t att_out;      // [1, H]
 
     // mtp_moe_one_token
     tensor_t moe_router_logits; // [1, num_experts]
@@ -76,112 +76,121 @@ struct MTPScratch {
     tensor_t moe_sh_gate_logit; // [1, 1]
 
     // mtp_dense_ffn_one_token (dense MTP layer: 27B). Sized [1, dense_inter].
-    tensor_t ffn_gate;          // [1, dense_inter]
-    tensor_t ffn_up;            // [1, dense_inter]
-    tensor_t ffn_act;           // [1, dense_inter]
-    tensor_t ffn_down;          // [1, H]
+    tensor_t ffn_gate; // [1, dense_inter]
+    tensor_t ffn_up;   // [1, dense_inter]
+    tensor_t ffn_act;  // [1, dense_inter]
+    tensor_t ffn_down; // [1, H]
 
     // Cached shape signature.
-    bool   is_moe = true;
+    bool is_moe = true;
     size_t H = 0, q_dim = 0, kv_dim = 0, V = 0;
     size_t Hq = 0, Dh = 0;
     size_t num_experts = 0, moe_inter = 0, shared_inter = 0, dense_inter = 0;
     zedinferDeviceType_t device_type = ZEDINFER_DEVICE_CPU;
-    int    device_id = -1;
+    int device_id = -1;
     zedinferDataType_t dtype = ZEDINFER_DTYPE_F32;
 };
 
 static thread_local MTPScratch s_mtp_scratch;
 
-static MTPScratch& ensure_mtp_scratch(const Qwen3_5Config& cfg, const ExecutorConfig& exec,
-                                      bool is_moe, size_t dense_inter) {
+static MTPScratch& ensure_mtp_scratch(const Qwen3_5Config& cfg, const ExecutorConfig& exec, bool is_moe,
+                                      size_t dense_inter) {
     const size_t H = cfg.hidden_size;
-    const size_t Hq  = cfg.num_attention_heads;
+    const size_t Hq = cfg.num_attention_heads;
     const size_t Hkv = cfg.num_key_value_heads;
-    const size_t Dh  = cfg.head_dim > 0 ? cfg.head_dim : (H / Hq);
-    const size_t q_dim   = Hq  * Dh;
-    const size_t kv_dim  = Hkv * Dh;
-    const size_t V       = cfg.vocab_size;
+    const size_t Dh = cfg.head_dim > 0 ? cfg.head_dim : (H / Hq);
+    const size_t q_dim = Hq * Dh;
+    const size_t kv_dim = Hkv * Dh;
+    const size_t V = cfg.vocab_size;
     // MoE-only fields live on the derived Qwen3_5MoEConfig; read them only on
     // the MoE path (the MoE model passes a real Qwen3_5MoEConfig here).
     size_t num_e = 0, moe_int = 0, sh_int = 0;
     if (is_moe) {
         const auto& mcfg = static_cast<const Qwen3_5MoEConfig&>(cfg);
-        num_e   = static_cast<size_t>(mcfg.num_experts);
+        num_e = static_cast<size_t>(mcfg.num_experts);
         moe_int = static_cast<size_t>(mcfg.moe_intermediate_size);
-        sh_int  = static_cast<size_t>(mcfg.shared_expert_intermediate_size);
+        sh_int = static_cast<size_t>(mcfg.shared_expert_intermediate_size);
     }
 
     auto& s = s_mtp_scratch;
-    if (s.ready && s.is_moe == is_moe && s.H == H && s.q_dim == q_dim && s.kv_dim == kv_dim && s.V == V
-        && s.Hq == Hq && s.Dh == Dh && s.num_experts == num_e && s.moe_inter == moe_int && s.shared_inter == sh_int
-        && s.dense_inter == dense_inter
-        && s.device_type == exec.device_type && s.device_id == exec.device_id && s.dtype == exec.data_type) {
+    if (s.ready && s.is_moe == is_moe && s.H == H && s.q_dim == q_dim && s.kv_dim == kv_dim && s.V == V && s.Hq == Hq
+        && s.Dh == Dh && s.num_experts == num_e && s.moe_inter == moe_int && s.shared_inter == sh_int
+        && s.dense_inter == dense_inter && s.device_type == exec.device_type && s.device_id == exec.device_id
+        && s.dtype == exec.data_type) {
         return s;
     }
     auto mkf = [&](std::vector<size_t> shape) {
         return Tensor::create(std::move(shape), exec.data_type, exec.device_type, exec.device_id);
     };
-    auto mk  = [&](std::vector<size_t> shape, zedinferDataType_t t) {
+    auto mk = [&](std::vector<size_t> shape, zedinferDataType_t t) {
         return Tensor::create(std::move(shape), t, exec.device_type, exec.device_id);
     };
 
-    s.id_tensor    = mk({1}, ZEDINFER_DTYPE_I32);
-    s.emb          = mkf({1, H});
-    s.norm_e       = mkf({1, H});
-    s.norm_h       = mkf({1, H});
-    s.concat       = mkf({1, 2 * H});
-    s.h_in_raw     = mkf({1, H});
-    s.h_in         = mkf({1, H});
-    s.h1           = mkf({1, H});
-    s.h_post       = mkf({1, H});
-    s.h_after_moe  = mkf({1, H});
+    s.id_tensor = mk({1}, ZEDINFER_DTYPE_I32);
+    s.emb = mkf({1, H});
+    s.norm_e = mkf({1, H});
+    s.norm_h = mkf({1, H});
+    s.concat = mkf({1, 2 * H});
+    s.h_in_raw = mkf({1, H});
+    s.h_in = mkf({1, H});
+    s.h1 = mkf({1, H});
+    s.h_post = mkf({1, H});
+    s.h_after_moe = mkf({1, H});
     s.final_normed = mkf({1, H});
-    s.logits       = mkf({1, V});
+    s.logits = mkf({1, V});
 
-    s.att_q_raw    = mkf({1, q_dim});
-    s.att_gate     = mkf({1, q_dim});
-    s.att_k_raw    = mkf({1, kv_dim});
-    s.att_v        = mkf({1, kv_dim});
+    s.att_q_raw = mkf({1, q_dim});
+    s.att_gate = mkf({1, q_dim});
+    s.att_k_raw = mkf({1, kv_dim});
+    s.att_v = mkf({1, kv_dim});
     s.att_q_normed = mkf({1, q_dim});
     s.att_k_normed = mkf({1, kv_dim});
-    s.att_pos_thw  = mk({3, 1}, ZEDINFER_DTYPE_I32);
-    s.att_attn     = mkf({1, Hq, Dh});
-    s.att_out      = mkf({1, H});
+    s.att_pos_thw = mk({3, 1}, ZEDINFER_DTYPE_I32);
+    s.att_attn = mkf({1, Hq, Dh});
+    s.att_out = mkf({1, H});
 
     if (is_moe) {
         s.moe_router_logits = mkf({1, num_e});
-        s.moe_out           = mkf({1, H});
-        s.moe_gate_buf      = mkf({1, moe_int});
-        s.moe_up_buf        = mkf({1, moe_int});
-        s.moe_act_buf       = mkf({1, moe_int});
-        s.moe_down_buf      = mkf({1, H});
+        s.moe_out = mkf({1, H});
+        s.moe_gate_buf = mkf({1, moe_int});
+        s.moe_up_buf = mkf({1, moe_int});
+        s.moe_act_buf = mkf({1, moe_int});
+        s.moe_down_buf = mkf({1, H});
         if (sh_int > 0) {
-            s.moe_sh_gate       = mkf({1, sh_int});
-            s.moe_sh_up         = mkf({1, sh_int});
-            s.moe_sh_act        = mkf({1, sh_int});
-            s.moe_sh_down       = mkf({1, H});
+            s.moe_sh_gate = mkf({1, sh_int});
+            s.moe_sh_up = mkf({1, sh_int});
+            s.moe_sh_act = mkf({1, sh_int});
+            s.moe_sh_down = mkf({1, H});
             s.moe_sh_gate_logit = mkf({1, 1});
         }
     } else {
         s.ffn_gate = mkf({1, dense_inter});
-        s.ffn_up   = mkf({1, dense_inter});
-        s.ffn_act  = mkf({1, dense_inter});
+        s.ffn_up = mkf({1, dense_inter});
+        s.ffn_act = mkf({1, dense_inter});
         s.ffn_down = mkf({1, H});
     }
     s.is_moe = is_moe;
-    s.H = H; s.q_dim = q_dim; s.kv_dim = kv_dim; s.V = V; s.Hq = Hq; s.Dh = Dh;
-    s.num_experts = num_e; s.moe_inter = moe_int; s.shared_inter = sh_int; s.dense_inter = dense_inter;
+    s.H = H;
+    s.q_dim = q_dim;
+    s.kv_dim = kv_dim;
+    s.V = V;
+    s.Hq = Hq;
+    s.Dh = Dh;
+    s.num_experts = num_e;
+    s.moe_inter = moe_int;
+    s.shared_inter = sh_int;
+    s.dense_inter = dense_inter;
     s.device_type = exec.device_type;
-    s.device_id   = exec.device_id;
-    s.dtype       = exec.data_type;
-    s.ready       = true;
-    LOGI.printf("[MTPScratch] allocated H=%zu V=%zu q_dim=%zu kv_dim=%zu is_moe=%d num_e=%zu moe_int=%zu sh_int=%zu dense_int=%zu",
+    s.device_id = exec.device_id;
+    s.dtype = exec.data_type;
+    s.ready = true;
+    LOGI.printf("[MTPScratch] allocated H=%zu V=%zu q_dim=%zu kv_dim=%zu is_moe=%d num_e=%zu moe_int=%zu sh_int=%zu "
+                "dense_int=%zu",
                 H, V, q_dim, kv_dim, (int)is_moe, num_e, moe_int, sh_int, dense_inter);
     return s;
 }
 
-} // anonymous namespace (MTPScratch only)
+} // namespace
 
 namespace {
 
@@ -203,7 +212,7 @@ namespace {
 // already separate and just get moved into the pool.
 void wire_mtp_experts(ModelWeights& weights, ExpertWeights& dst, size_t num_experts) {
     const std::string fused_gate_up_name = "mtp.layers.0.mlp.experts.gate_up_proj";
-    const std::string fused_down_name    = "mtp.layers.0.mlp.experts.down_proj";
+    const std::string fused_down_name = "mtp.layers.0.mlp.experts.down_proj";
 
     if (weights.has_tensor(fused_gate_up_name) && weights.has_tensor(fused_down_name)) {
         // Layout (A): fused 3-D. Slice + view per expert.
@@ -218,29 +227,27 @@ void wire_mtp_experts(ModelWeights& weights, ExpertWeights& dst, size_t num_expe
             throw std::runtime_error("[MTPModule] num_experts mismatch on fused tensor dim 0");
         }
         const size_t two_M = gu_shape[1];
-        const size_t H     = gu_shape[2];
+        const size_t H = gu_shape[2];
         if (two_M % 2 != 0) {
-            throw std::runtime_error("[MTPModule] gate_up_proj dim 1 (" + std::to_string(two_M)
-                                     + ") is not even");
+            throw std::runtime_error("[MTPModule] gate_up_proj dim 1 (" + std::to_string(two_M) + ") is not even");
         }
         const size_t M = two_M / 2;
         if (dp_shape[1] != H || dp_shape[2] != M) {
             throw std::runtime_error("[MTPModule] down_proj shape disagrees with gate_up_proj");
         }
         for (size_t i = 0; i < num_experts; ++i) {
-            auto& ffn      = dst.at(0, i);
-            auto  gu_row_3d = gu->slice(0, i, i + 1);
-            auto  gu_row_2d = gu_row_3d->view({two_M, H});
+            auto& ffn = dst.at(0, i);
+            auto gu_row_3d = gu->slice(0, i, i + 1);
+            auto gu_row_2d = gu_row_3d->view({two_M, H});
             ffn.gate_weight = gu_row_2d->slice(0, 0, M);
-            ffn.up_weight   = gu_row_2d->slice(0, M, two_M);
+            ffn.up_weight = gu_row_2d->slice(0, M, two_M);
 
             auto dp_row_3d = dp->slice(0, i, i + 1);
             ffn.down_weight = dp_row_3d->view({H, M});
         }
         weights.remove_tensor(fused_gate_up_name);
         weights.remove_tensor(fused_down_name);
-        LOGI.printf("[MTPModule] expert layout=fused; expanded %zu experts into per-expert views",
-                    num_experts);
+        LOGI.printf("[MTPModule] expert layout=fused; expanded %zu experts into per-expert views", num_experts);
         return;
     }
 
@@ -249,8 +256,7 @@ void wire_mtp_experts(ModelWeights& weights, ExpertWeights& dst, size_t num_expe
     const std::string probe_name = "mtp.layers.0.mlp.experts.0.down_proj.weight";
     if (!weights.has_tensor(probe_name)) {
         throw std::runtime_error("[MTPModule] missing both fused tensor ('" + fused_gate_up_name
-                                 + "') and per-expert tensor ('" + probe_name
-                                 + "'); model release lacks MTP experts");
+                                 + "') and per-expert tensor ('" + probe_name + "'); model release lacks MTP experts");
     }
     for (size_t i = 0; i < num_experts; ++i) {
         auto& ffn = dst.at(0, i);
@@ -259,11 +265,11 @@ void wire_mtp_experts(ModelWeights& weights, ExpertWeights& dst, size_t num_expe
         const std::string un = per_expert_prefix + ".up_proj.weight";
         const std::string dn = per_expert_prefix + ".down_proj.weight";
         if (!weights.has_tensor(gn) || !weights.has_tensor(un) || !weights.has_tensor(dn)) {
-            throw std::runtime_error("[MTPModule] missing per-expert weight for expert "
-                                     + std::to_string(i) + " (looked for " + gn + ")");
+            throw std::runtime_error("[MTPModule] missing per-expert weight for expert " + std::to_string(i)
+                                     + " (looked for " + gn + ")");
         }
         ffn.gate_weight = weights.get_tensor(gn);
-        ffn.up_weight   = weights.get_tensor(un);
+        ffn.up_weight = weights.get_tensor(un);
         ffn.down_weight = weights.get_tensor(dn);
         weights.remove_tensor(gn);
         weights.remove_tensor(un);
@@ -295,19 +301,19 @@ MTPModule::MTPModule(const Qwen3_5Config& main_cfg, ModelWeights& weights, const
 
     // ----- Fusion projection + pre-fc norms -----
     pre_fc_norm_embedding_ = fetch(weights, "mtp.pre_fc_norm_embedding.weight");
-    pre_fc_norm_hidden_    = fetch(weights, "mtp.pre_fc_norm_hidden.weight");
-    fc_weight_             = fetch(weights, "mtp.fc.weight");
+    pre_fc_norm_hidden_ = fetch(weights, "mtp.pre_fc_norm_hidden.weight");
+    fc_weight_ = fetch(weights, "mtp.fc.weight");
 
     // ----- Layer 0 standalone tensors -----
     const std::string p = "mtp.layers.0.";
-    in_layernorm_   = fetch(weights, p + "input_layernorm.weight");
+    in_layernorm_ = fetch(weights, p + "input_layernorm.weight");
     post_layernorm_ = fetch(weights, p + "post_attention_layernorm.weight");
-    q_proj_         = fetch(weights, p + "self_attn.q_proj.weight");
-    k_proj_         = fetch(weights, p + "self_attn.k_proj.weight");
-    v_proj_         = fetch(weights, p + "self_attn.v_proj.weight");
-    o_proj_         = fetch(weights, p + "self_attn.o_proj.weight");
-    q_norm_         = fetch(weights, p + "self_attn.q_norm.weight");
-    k_norm_         = fetch(weights, p + "self_attn.k_norm.weight");
+    q_proj_ = fetch(weights, p + "self_attn.q_proj.weight");
+    k_proj_ = fetch(weights, p + "self_attn.k_proj.weight");
+    v_proj_ = fetch(weights, p + "self_attn.v_proj.weight");
+    o_proj_ = fetch(weights, p + "self_attn.o_proj.weight");
+    q_norm_ = fetch(weights, p + "self_attn.q_norm.weight");
+    k_norm_ = fetch(weights, p + "self_attn.k_norm.weight");
 
     // ----- FFN: MoE (35B-A3B) or dense (27B), detected from the weights -----
     // MoE ships "mtp.layers.0.mlp.gate.weight" (the router); the dense 27B
@@ -317,11 +323,11 @@ MTPModule::MTPModule(const Qwen3_5Config& main_cfg, ModelWeights& weights, const
         // MoE router + shared expert. main_cfg_ is really a Qwen3_5MoEConfig
         // here (the MoE model passed it); read the MoE fields via static_cast.
         const auto& moe_cfg = static_cast<const Qwen3_5MoEConfig&>(main_cfg_);
-        mlp_gate_router_           = fetch(weights, p + "mlp.gate.weight");
-        shared_expert_gate_        = fetch(weights, p + "mlp.shared_expert_gate.weight");
-        shared_expert_gate_proj_   = fetch(weights, p + "mlp.shared_expert.gate_proj.weight");
-        shared_expert_up_proj_     = fetch(weights, p + "mlp.shared_expert.up_proj.weight");
-        shared_expert_down_proj_   = fetch(weights, p + "mlp.shared_expert.down_proj.weight");
+        mlp_gate_router_ = fetch(weights, p + "mlp.gate.weight");
+        shared_expert_gate_ = fetch(weights, p + "mlp.shared_expert_gate.weight");
+        shared_expert_gate_proj_ = fetch(weights, p + "mlp.shared_expert.gate_proj.weight");
+        shared_expert_up_proj_ = fetch(weights, p + "mlp.shared_expert.up_proj.weight");
+        shared_expert_down_proj_ = fetch(weights, p + "mlp.shared_expert.down_proj.weight");
 
         const size_t num_experts = static_cast<size_t>(moe_cfg.num_experts);
         if (num_experts == 0) {
@@ -332,9 +338,9 @@ MTPModule::MTPModule(const Qwen3_5Config& main_cfg, ModelWeights& weights, const
     } else {
         // Dense FFN MTP layer (Qwen3.5/3.6-27B): a single gate/up/down_proj.
         mlp_gate_proj_ = fetch(weights, p + "mlp.gate_proj.weight");
-        mlp_up_proj_   = fetch(weights, p + "mlp.up_proj.weight");
+        mlp_up_proj_ = fetch(weights, p + "mlp.up_proj.weight");
         mlp_down_proj_ = fetch(weights, p + "mlp.down_proj.weight");
-        dense_inter_   = mlp_gate_proj_->shape()[0]; // gate_proj is [inter, H]
+        dense_inter_ = mlp_gate_proj_->shape()[0]; // gate_proj is [inter, H]
     }
 
     // ----- Final norm -----
@@ -347,11 +353,8 @@ MTPModule::MTPModule(const Qwen3_5Config& main_cfg, ModelWeights& weights, const
 
 MTPModule::~MTPModule() = default;
 
-tensor_t MTPModule::prefill(InferenceRequest& req,
-                            tensor_t hidden_main_seq,
-                            const std::vector<int>& next_tokens,
-                            tensor_t embed_tokens_w, tensor_t lm_head_w,
-                            const ExecutorConfig& exec) const {
+tensor_t MTPModule::prefill(InferenceRequest& req, tensor_t hidden_main_seq, const std::vector<int>& next_tokens,
+                            tensor_t embed_tokens_w, tensor_t lm_head_w, const ExecutorConfig& exec) const {
     if (!ready_) {
         throw std::runtime_error("[MTPModule] prefill called but module not ready");
     }
@@ -360,8 +363,7 @@ tensor_t MTPModule::prefill(InferenceRequest& req,
     }
     const size_t P = hidden_main_seq->shape()[0];
     if (next_tokens.size() != P) {
-        throw std::runtime_error("[MTPModule] prefill: next_tokens.size()="
-                                 + std::to_string(next_tokens.size())
+        throw std::runtime_error("[MTPModule] prefill: next_tokens.size()=" + std::to_string(next_tokens.size())
                                  + " does not match P=" + std::to_string(P));
     }
     // Loop forward() per position. Each call advances req.mtp_past_seq_len
@@ -391,41 +393,38 @@ namespace {
 // page_table_dev: device int [1] = {0}
 // past:     number of positions ALREADY in the cache before this call
 // Returns o_proj output [1, hidden_size].
-tensor_t mtp_attention_decode(tensor_t h_in,
-                              tensor_t q_proj, tensor_t k_proj, tensor_t v_proj,
-                              tensor_t o_proj, tensor_t q_norm, tensor_t k_norm,
-                              tensor_t k_cache, tensor_t v_cache,
-                              tensor_t page_table_dev, int past, int max_kv_len,
-                              const Qwen3_5MoEConfig& cfg, const ExecutorConfig& exec,
-                              MTPScratch& s) {
-    const size_t Hq  = cfg.num_attention_heads;
+tensor_t mtp_attention_decode(tensor_t h_in, tensor_t q_proj, tensor_t k_proj, tensor_t v_proj, tensor_t o_proj,
+                              tensor_t q_norm, tensor_t k_norm, tensor_t k_cache, tensor_t v_cache,
+                              tensor_t page_table_dev, int past, int max_kv_len, const Qwen3_5MoEConfig& cfg,
+                              const ExecutorConfig& exec, MTPScratch& s) {
+    const size_t Hq = cfg.num_attention_heads;
     const size_t Hkv = cfg.num_key_value_heads;
-    const size_t Dh  = cfg.head_dim > 0 ? cfg.head_dim : (cfg.hidden_size / Hq);
-    const size_t q_dim  = Hq  * Dh;
+    const size_t Dh = cfg.head_dim > 0 ? cfg.head_dim : (cfg.hidden_size / Hq);
+    const size_t q_dim = Hq * Dh;
     const size_t kv_dim = Hkv * Dh;
 
     auto* api = device::getRuntimeAPI(exec.device_type);
     const size_t elt = utils::dsize(exec.data_type);
 
     // q_proj is reordered like main full-attn (rows [0,q_dim)=q, [q_dim,2q_dim)=gate).
-    auto w_q    = q_proj->slice(0, 0, q_dim);
+    auto w_q = q_proj->slice(0, 0, q_dim);
     auto w_gate = q_proj->slice(0, q_dim, 2 * q_dim);
 
     auto& q_raw = s.att_q_raw;
-    auto& gate  = s.att_gate;
+    auto& gate = s.att_gate;
     auto& k_raw = s.att_k_raw;
-    auto& v     = s.att_v;
+    auto& v = s.att_v;
     ops::linear(q_raw, h_in, w_q);
-    ops::linear(gate,  h_in, w_gate);
+    ops::linear(gate, h_in, w_gate);
     ops::linear(k_raw, h_in, k_proj);
-    ops::linear(v,     h_in, v_proj);
+    ops::linear(v, h_in, v_proj);
 
     auto& q_normed = s.att_q_normed;
     auto& k_normed = s.att_k_normed;
-    ops::rms_norm(q_normed->view({Hq,  Dh}), q_raw->view({Hq,  Dh}),
-                  q_norm, cfg.rms_norm_eps, /*add_one_to_weight=*/true);
-    ops::rms_norm(k_normed->view({Hkv, Dh}), k_raw->view({Hkv, Dh}),
-                  k_norm, cfg.rms_norm_eps, /*add_one_to_weight=*/true);
+    ops::rms_norm(q_normed->view({Hq, Dh}), q_raw->view({Hq, Dh}), q_norm, cfg.rms_norm_eps,
+                  /*add_one_to_weight=*/true);
+    ops::rms_norm(k_normed->view({Hkv, Dh}), k_raw->view({Hkv, Dh}), k_norm, cfg.rms_norm_eps,
+                  /*add_one_to_weight=*/true);
 
     // mrope_3d at position `past`. Build [3, 1] int32 = {past, past, past}.
     // Reuse the cached pos_thw tensor — its three int32 slots get refilled
@@ -435,11 +434,11 @@ tensor_t mtp_attention_decode(tensor_t h_in,
         api->memcpy_sync(s.att_pos_thw->data(), host_pos, 3 * sizeof(int32_t), ZEDINFER_MEMCPY_H2D);
     }
     MRoPEConfig mrope_cfg;
-    mrope_cfg.interleaved    = cfg.mrope_interleaved;
-    mrope_cfg.section        = cfg.mrope_section;
+    mrope_cfg.interleaved = cfg.mrope_interleaved;
+    mrope_cfg.section = cfg.mrope_section;
     mrope_cfg.partial_factor = cfg.partial_rotary_factor;
-    mrope_cfg.theta          = cfg.rope_theta;
-    ops::mrope_3d(q_normed->view({1, Hq,  Dh}), s.att_pos_thw, mrope_cfg);
+    mrope_cfg.theta = cfg.rope_theta;
+    ops::mrope_3d(q_normed->view({1, Hq, Dh}), s.att_pos_thw, mrope_cfg);
     ops::mrope_3d(k_normed->view({1, Hkv, Dh}), s.att_pos_thw, mrope_cfg);
 
     // Write rotated k_normed and raw v into K/V cache at row `past`.
@@ -447,12 +446,10 @@ tensor_t mtp_attention_decode(tensor_t h_in,
     // the projections we just issued and the attention kernel that comes next.
     // The kernel and the copies share one stream, so FIFO ordering still holds.
     auto compute_stream = core::context().runtime().stream();
-    api->memcpy_async(static_cast<std::byte*>(k_cache->data())
-                          + static_cast<size_t>(past) * kv_dim * elt,
+    api->memcpy_async(static_cast<std::byte*>(k_cache->data()) + static_cast<size_t>(past) * kv_dim * elt,
                       k_normed->data(), kv_dim * elt, ZEDINFER_MEMCPY_D2D, compute_stream);
-    api->memcpy_async(static_cast<std::byte*>(v_cache->data())
-                          + static_cast<size_t>(past) * kv_dim * elt,
-                      v->data(), kv_dim * elt, ZEDINFER_MEMCPY_D2D, compute_stream);
+    api->memcpy_async(static_cast<std::byte*>(v_cache->data()) + static_cast<size_t>(past) * kv_dim * elt, v->data(),
+                      kv_dim * elt, ZEDINFER_MEMCPY_D2D, compute_stream);
 
     // Configure single-page paged attention.
     ops::AttentionConfig acfg{
@@ -469,12 +466,12 @@ tensor_t mtp_attention_decode(tensor_t h_in,
     ops::AttentionParams params{acfg};
     params.use_flashinfer = false; // single-block + single-request → native paged decode is enough
     params.out = attn->view({Hq, Dh});
-    params.q   = q_normed->view({Hq, Dh});
+    params.q = q_normed->view({Hq, Dh});
     params.k_pool_base = k_cache->data();
     params.v_pool_base = v_cache->data();
-    params.page_table  = reinterpret_cast<const int*>(page_table_dev->data());
-    params.seq_len     = past + 1;
-    params.seqlen_q    = 1;
+    params.page_table = reinterpret_cast<const int*>(page_table_dev->data());
+    params.seq_len = past + 1;
+    params.seqlen_q = 1;
     ops::attention(params);
 
     // attn := sigmoid(gate) * attn   (in place)
@@ -490,13 +487,9 @@ tensor_t mtp_attention_decode(tensor_t h_in,
 // expert pattern as moe_layer_forward in moe_forward.cpp, but consumes the
 // MTPModule's own ExpertWeights (1 layer, no ExpertPool wrapper) and the
 // MTP shared-expert tensors directly. N is always 1 in Stage B.1.
-tensor_t mtp_moe_one_token(tensor_t h_post,
-                           tensor_t router_w, tensor_t shared_gate_w,
-                           tensor_t shared_gate_proj, tensor_t shared_up_proj,
-                           tensor_t shared_down_proj,
-                           const ExpertWeights& experts,
-                           const Qwen3_5MoEConfig& cfg, const ExecutorConfig& exec,
-                           MTPScratch& s) {
+tensor_t mtp_moe_one_token(tensor_t h_post, tensor_t router_w, tensor_t shared_gate_w, tensor_t shared_gate_proj,
+                           tensor_t shared_up_proj, tensor_t shared_down_proj, const ExpertWeights& experts,
+                           const Qwen3_5MoEConfig& cfg, const ExecutorConfig& exec, MTPScratch& s) {
     (void)exec;
     const size_t num_e = s.num_experts;
     const size_t top_k = static_cast<size_t>(cfg.num_experts_per_tok);
@@ -513,11 +506,14 @@ tensor_t mtp_moe_one_token(tensor_t h_post,
     //    so pass true here too. Thread_local pinned vector avoids per-call heap
     //    alloc — the D2H sync itself is unavoidable (CPU top-k consumer).
     static thread_local std::vector<uint16_t> rl_bf16_buf;
-    static thread_local std::vector<float>    rl_f32_buf;
-    if (rl_bf16_buf.size() < num_e) rl_bf16_buf.resize(num_e);
-    if (rl_f32_buf.size()  < num_e) rl_f32_buf.resize(num_e);
-    api->memcpy_sync(rl_bf16_buf.data(), router_logits->data(),
-                     num_e * sizeof(uint16_t), ZEDINFER_MEMCPY_D2H);
+    static thread_local std::vector<float> rl_f32_buf;
+    if (rl_bf16_buf.size() < num_e) {
+        rl_bf16_buf.resize(num_e);
+    }
+    if (rl_f32_buf.size() < num_e) {
+        rl_f32_buf.resize(num_e);
+    }
+    api->memcpy_sync(rl_bf16_buf.data(), router_logits->data(), num_e * sizeof(uint16_t), ZEDINFER_MEMCPY_D2H);
     for (size_t i = 0; i < num_e; ++i) {
         uint32_t u = static_cast<uint32_t>(rl_bf16_buf[i]) << 16;
         std::memcpy(&rl_f32_buf[i], &u, sizeof(float));
@@ -533,15 +529,15 @@ tensor_t mtp_moe_one_token(tensor_t h_post,
     //    delta = down(swiglu(gate(h), up(h))) and we accumulate
     //    out += topk_weights[k] * delta.
     for (size_t k = 0; k < top_k; ++k) {
-        const int    e_id = topk.expert_ids[k];
-        const float  w_k  = topk.expert_weights[k];
+        const int e_id = topk.expert_ids[k];
+        const float w_k = topk.expert_weights[k];
         const auto& ffn = experts.at(/*layer=*/0, static_cast<size_t>(e_id));
         if (!ffn.gate_weight || !ffn.up_weight || !ffn.down_weight) {
             throw std::runtime_error("[MTPModule] expert " + std::to_string(e_id)
                                      + " missing bf16 weights (quantized MTP not supported yet)");
         }
         ops::linear(s.moe_gate_buf, h_post, ffn.gate_weight);
-        ops::linear(s.moe_up_buf,   h_post, ffn.up_weight);
+        ops::linear(s.moe_up_buf, h_post, ffn.up_weight);
         ops::swiglu(s.moe_act_buf, s.moe_gate_buf, s.moe_up_buf);
         ops::linear(s.moe_down_buf, s.moe_act_buf, ffn.down_weight);
         ops::add_scaled(out_bf16, s.moe_down_buf, w_k);
@@ -549,11 +545,11 @@ tensor_t mtp_moe_one_token(tensor_t h_post,
 
     // 5. Shared expert.
     auto& sh_gate = s.moe_sh_gate;
-    auto& sh_up   = s.moe_sh_up;
-    auto& sh_act  = s.moe_sh_act;
+    auto& sh_up = s.moe_sh_up;
+    auto& sh_act = s.moe_sh_act;
     auto& sh_down = s.moe_sh_down;
     ops::linear(sh_gate, h_post, shared_gate_proj);
-    ops::linear(sh_up,   h_post, shared_up_proj);
+    ops::linear(sh_up, h_post, shared_up_proj);
     ops::swiglu(sh_act, sh_gate, sh_up);
     ops::linear(sh_down, sh_act, shared_down_proj);
 
@@ -571,12 +567,11 @@ tensor_t mtp_moe_one_token(tensor_t h_post,
 // Dense MTP FFN (Qwen3.5/3.6-27B): out = down_proj(swiglu(gate_proj(h), up_proj(h))).
 // The 27B's MTP layer has a plain MLP (no router / experts / shared expert), so
 // this is just the single-expert path the MoE loop runs per expert.
-tensor_t mtp_dense_ffn_one_token(tensor_t h_post,
-                                 tensor_t gate_proj, tensor_t up_proj, tensor_t down_proj,
+tensor_t mtp_dense_ffn_one_token(tensor_t h_post, tensor_t gate_proj, tensor_t up_proj, tensor_t down_proj,
                                  MTPScratch& s) {
     ops::linear(s.ffn_gate, h_post, gate_proj);
-    ops::linear(s.ffn_up,   h_post, up_proj);
-    ops::swiglu(s.ffn_act,  s.ffn_gate, s.ffn_up);
+    ops::linear(s.ffn_up, h_post, up_proj);
+    ops::swiglu(s.ffn_act, s.ffn_gate, s.ffn_up);
     ops::linear(s.ffn_down, s.ffn_act, down_proj);
     return s.ffn_down;
 }
@@ -584,37 +579,28 @@ tensor_t mtp_dense_ffn_one_token(tensor_t h_post,
 } // namespace
 
 // Public helper — lazily allocates request's MTP buffers, resets past.
-void mtp_reset_request_state(InferenceRequest& req,
-                             size_t max_kv_len,
-                             size_t num_kv_heads, size_t head_dim,
+void mtp_reset_request_state(InferenceRequest& req, size_t max_kv_len, size_t num_kv_heads, size_t head_dim,
                              const ExecutorConfig& exec) {
     const size_t kv_dim = num_kv_heads * head_dim;
     if (!req.mtp_k_cache) {
-        req.mtp_k_cache = Tensor::create({max_kv_len, kv_dim}, exec.data_type,
-                                         exec.device_type, exec.device_id);
-        req.mtp_v_cache = Tensor::create({max_kv_len, kv_dim}, exec.data_type,
-                                         exec.device_type, exec.device_id);
-        req.mtp_page_table_dev = Tensor::create({1}, ZEDINFER_DTYPE_I32,
-                                                exec.device_type, exec.device_id);
+        req.mtp_k_cache = Tensor::create({max_kv_len, kv_dim}, exec.data_type, exec.device_type, exec.device_id);
+        req.mtp_v_cache = Tensor::create({max_kv_len, kv_dim}, exec.data_type, exec.device_type, exec.device_id);
+        req.mtp_page_table_dev = Tensor::create({1}, ZEDINFER_DTYPE_I32, exec.device_type, exec.device_id);
         const int32_t zero = 0;
         auto* api = device::getRuntimeAPI(exec.device_type);
-        api->memcpy_sync(req.mtp_page_table_dev->data(), &zero, sizeof(int32_t),
-                         ZEDINFER_MEMCPY_H2D);
+        api->memcpy_sync(req.mtp_page_table_dev->data(), &zero, sizeof(int32_t), ZEDINFER_MEMCPY_H2D);
     }
-    req.mtp_past_seq_len    = 0;
-    req.mtp_pending_draft   = -1;
+    req.mtp_past_seq_len = 0;
+    req.mtp_pending_draft = -1;
 }
 
-tensor_t MTPModule::forward(InferenceRequest& req,
-                            tensor_t hidden_at_t, int next_token_id,
-                            tensor_t embed_tokens_w, tensor_t lm_head_w,
-                            const ExecutorConfig& exec) const {
+tensor_t MTPModule::forward(InferenceRequest& req, tensor_t hidden_at_t, int next_token_id, tensor_t embed_tokens_w,
+                            tensor_t lm_head_w, const ExecutorConfig& exec) const {
     if (!ready_) {
         throw std::runtime_error("[MTPModule] forward called but module is not ready "
                                  "(model did not ship MTP weights)");
     }
-    if (!hidden_at_t || hidden_at_t->ndim() != 2
-        || hidden_at_t->shape()[0] != 1
+    if (!hidden_at_t || hidden_at_t->ndim() != 2 || hidden_at_t->shape()[0] != 1
         || hidden_at_t->shape()[1] != main_cfg_.hidden_size) {
         throw std::runtime_error("[MTPModule] hidden_at_t must be shape [1, hidden_size]");
     }
@@ -637,9 +623,9 @@ tensor_t MTPModule::forward(InferenceRequest& req,
     ops::embedding(s.emb, s.id_tensor, embed_tokens_w);
 
     // 2. Pre-fc norms: (1+w) RMSNorm on emb and on hidden_at_t.
-    ops::rms_norm(s.norm_e, s.emb,        pre_fc_norm_embedding_, main_cfg_.rms_norm_eps,
+    ops::rms_norm(s.norm_e, s.emb, pre_fc_norm_embedding_, main_cfg_.rms_norm_eps,
                   /*add_one_to_weight=*/true);
-    ops::rms_norm(s.norm_h, hidden_at_t,  pre_fc_norm_hidden_,    main_cfg_.rms_norm_eps,
+    ops::rms_norm(s.norm_h, hidden_at_t, pre_fc_norm_hidden_, main_cfg_.rms_norm_eps,
                   /*add_one_to_weight=*/true);
 
     // 3. Concatenate norm_e and norm_h along the last dim → [1, 2*H].
@@ -647,11 +633,9 @@ tensor_t MTPModule::forward(InferenceRequest& req,
     //    on the compute stream — both halves are independent and the fc linear
     //    that consumes `concat` is enqueued after on the same stream.
     auto compute_stream = core::context().runtime().stream();
-    api->memcpy_async(static_cast<std::byte*>(s.concat->data()),
-                      static_cast<std::byte*>(s.norm_e->data()),
-                      H * elt, ZEDINFER_MEMCPY_D2D, compute_stream);
-    api->memcpy_async(static_cast<std::byte*>(s.concat->data()) + H * elt,
-                      static_cast<std::byte*>(s.norm_h->data()),
+    api->memcpy_async(static_cast<std::byte*>(s.concat->data()), static_cast<std::byte*>(s.norm_e->data()), H * elt,
+                      ZEDINFER_MEMCPY_D2D, compute_stream);
+    api->memcpy_async(static_cast<std::byte*>(s.concat->data()) + H * elt, static_cast<std::byte*>(s.norm_h->data()),
                       H * elt, ZEDINFER_MEMCPY_D2D, compute_stream);
 
     // 4. fc projection: 2*H -> H.
@@ -667,24 +651,18 @@ tensor_t MTPModule::forward(InferenceRequest& req,
     //    and zeros req.mtp_past_seq_len.
     if (!req.mtp_k_cache) {
         const size_t Hkv = main_cfg_.num_key_value_heads;
-        const size_t Dh  = main_cfg_.head_dim > 0 ? main_cfg_.head_dim
-                                                  : (main_cfg_.hidden_size / main_cfg_.num_attention_heads);
+        const size_t Dh
+            = main_cfg_.head_dim > 0 ? main_cfg_.head_dim : (main_cfg_.hidden_size / main_cfg_.num_attention_heads);
         mtp_reset_request_state(req, max_kv_len_, Hkv, Dh, exec);
-        LOGI.printf("[MTPModule] lazy-init request MTP K/V cache: %zu x %zu bf16",
-                    max_kv_len_, Hkv * Dh);
+        LOGI.printf("[MTPModule] lazy-init request MTP K/V cache: %zu x %zu bf16", max_kv_len_, Hkv * Dh);
     }
     if (static_cast<size_t>(req.mtp_past_seq_len) >= max_kv_len_) {
-        throw std::runtime_error("[MTPModule] req.mtp_past_seq_len="
-                                 + std::to_string(req.mtp_past_seq_len)
+        throw std::runtime_error("[MTPModule] req.mtp_past_seq_len=" + std::to_string(req.mtp_past_seq_len)
                                  + " >= max=" + std::to_string(max_kv_len_));
     }
-    auto attn_out = mtp_attention_decode(s.h_in, q_proj_, k_proj_, v_proj_,
-                                         o_proj_, q_norm_, k_norm_,
-                                         req.mtp_k_cache, req.mtp_v_cache,
-                                         req.mtp_page_table_dev,
-                                         req.mtp_past_seq_len,
-                                         static_cast<int>(max_kv_len_),
-                                         main_cfg_, exec, s);
+    auto attn_out = mtp_attention_decode(s.h_in, q_proj_, k_proj_, v_proj_, o_proj_, q_norm_, k_norm_, req.mtp_k_cache,
+                                         req.mtp_v_cache, req.mtp_page_table_dev, req.mtp_past_seq_len,
+                                         static_cast<int>(max_kv_len_), main_cfg_, exec, s);
     req.mtp_past_seq_len += 1;
 
     // 7. Residual after attention.
@@ -697,9 +675,8 @@ tensor_t MTPModule::forward(InferenceRequest& req,
     // 9. FFN block: MoE (35B-A3B) or dense (27B).
     tensor_t mlp_out;
     if (is_moe_) {
-        mlp_out = mtp_moe_one_token(s.h_post, mlp_gate_router_, shared_expert_gate_,
-                                    shared_expert_gate_proj_, shared_expert_up_proj_,
-                                    shared_expert_down_proj_, *experts_,
+        mlp_out = mtp_moe_one_token(s.h_post, mlp_gate_router_, shared_expert_gate_, shared_expert_gate_proj_,
+                                    shared_expert_up_proj_, shared_expert_down_proj_, *experts_,
                                     static_cast<const Qwen3_5MoEConfig&>(main_cfg_), exec, s);
     } else {
         mlp_out = mtp_dense_ffn_one_token(s.h_post, mlp_gate_proj_, mlp_up_proj_, mlp_down_proj_, s);

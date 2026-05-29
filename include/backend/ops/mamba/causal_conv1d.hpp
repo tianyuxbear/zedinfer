@@ -24,7 +24,7 @@ namespace zedinfer::ops::mamba {
 //                                       conv_base + slot*conv_stride_slot
 //                                       + layer*conv_stride_layer.
 // Only K = 4 is currently implemented (Qwen3.5).
-void causal_conv1d(tensor_t out, tensor_t x, tensor_t weight,
-                   model::SSMStateView state_view, int slot_idx, int layer_idx);
+void causal_conv1d(tensor_t out, tensor_t x, tensor_t weight, model::SSMStateView state_view, int slot_idx,
+                   int layer_idx);
 
 } // namespace zedinfer::ops::mamba

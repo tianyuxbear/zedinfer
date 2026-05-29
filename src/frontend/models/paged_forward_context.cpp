@@ -358,17 +358,15 @@ static const ops::FlashInferDecodePlan* ensure_flashinfer_single_decode_plan_cac
         = read_env_non_negative_int("ZEDINFER_FLASHINFER_FASTPATH_PROBE_PAGES", kDefaultFastpathProbePages);
     const bool disable_fastpath = std::getenv("ZEDINFER_FLASHINFER_DISABLE_FASTPATH") != nullptr;
 
-    const bool cache_hit = table.fi.single_decode_plan_ready
-                        && table.fi.single_decode_plan_total_pages == total_pages
-                        && table.fi.single_decode_plan_nhead == cfg.nhead
-                        && table.fi.single_decode_plan_nkvhead == cfg.nkvhead
-                        && table.fi.single_decode_plan_head_dim == cfg.head_dim
-                        && table.fi.single_decode_plan_block_size == cfg.block_size
-                        && table.fi.single_decode_plan_dtype == cfg.dtype
-                        && table.fi.single_decode_plan_device_type == cfg.device_type
-                        && table.fi.single_decode_plan_device_id == cfg.device_id
-                        && table.fi.single_decode_plan_fastpath_probe_pages == fastpath_probe_pages
-                        && table.fi.single_decode_plan_disable_fastpath == disable_fastpath;
+    const bool cache_hit
+        = table.fi.single_decode_plan_ready && table.fi.single_decode_plan_total_pages == total_pages
+       && table.fi.single_decode_plan_nhead == cfg.nhead && table.fi.single_decode_plan_nkvhead == cfg.nkvhead
+       && table.fi.single_decode_plan_head_dim == cfg.head_dim
+       && table.fi.single_decode_plan_block_size == cfg.block_size && table.fi.single_decode_plan_dtype == cfg.dtype
+       && table.fi.single_decode_plan_device_type == cfg.device_type
+       && table.fi.single_decode_plan_device_id == cfg.device_id
+       && table.fi.single_decode_plan_fastpath_probe_pages == fastpath_probe_pages
+       && table.fi.single_decode_plan_disable_fastpath == disable_fastpath;
     if (!cache_hit) {
         table.fi.single_decode_plan.reset();
         table.fi.single_decode_plan_ready = false;
@@ -478,8 +476,7 @@ void PagedForwardContext::build_flashinfer_decode_cache(const ops::AttentionConf
 
         ensure_flashinfer_page_table_cache(*table, cfg.device_type, cfg.device_id);
         ensure_flashinfer_single_decode_metadata_cache(
-            *table, kv_len, cfg.block_size, flashinfer_decode_uses_prefill_kernel_,
-            cfg.device_type, cfg.device_id);
+            *table, kv_len, cfg.block_size, flashinfer_decode_uses_prefill_kernel_, cfg.device_type, cfg.device_id);
         flashinfer_decode_layer_cache_.resize(num_layers);
         for (int layer = 0; layer < num_layers; ++layer) {
             flashinfer_decode_layer_cache_[layer] = {table->fi.page_tables_gpu[layer]};
@@ -698,8 +695,7 @@ void PagedForwardContext::build_flashinfer_kv_write_cache() {
     if (flashinfer_kv_write_batch_size_ == 1) {
         ensure_flashinfer_page_table_cache(*active_slots.front()->block_table, pool_.device_type(), pool_.device_id());
         for (int layer = 0; layer < num_layers; ++layer) {
-            flashinfer_kv_write_layer_cache_[layer]
-                = {active_slots.front()->block_table->fi.page_tables_gpu[layer]};
+            flashinfer_kv_write_layer_cache_[layer] = {active_slots.front()->block_table->fi.page_tables_gpu[layer]};
         }
         return;
     }
@@ -725,11 +721,16 @@ void PagedForwardContext::attend_decode_single(int layer, tensor_t q_rope, tenso
     // Locate the (sole) decode slot and pick up its num_tokens.
     const Slot* decode_slot = nullptr;
     for (const auto& slot : slots_) {
-        if (slot.is_decode) { decode_slot = &slot; break; }
+        if (slot.is_decode) {
+            decode_slot = &slot;
+            break;
+        }
     }
-    if (!decode_slot) return;
+    if (!decode_slot) {
+        return;
+    }
     auto* dt = decode_slot->block_table;
-    const int n_q = decode_slot->num_tokens;  // 1 normally, 2 for spec-decode verify
+    const int n_q = decode_slot->num_tokens; // 1 normally, 2 for spec-decode verify
 
     auto decode_q = q_rope->slice(0, cached_decode_start_, cached_decode_start_ + n_q);
     auto decode_out = attn->slice(0, cached_decode_start_, cached_decode_start_ + n_q);
@@ -743,11 +744,10 @@ void PagedForwardContext::attend_decode_single(int layer, tensor_t q_rope, tenso
         auto page_bt_gpu = upload_to_gpu(dt->pages[layer], cfg.device_type, cfg.device_id);
         ops::AttentionParams params{cfg};
         params.out = decode_out;
-        params.q   = decode_q;
+        params.q = decode_q;
         params.k_pool_base = pool_.k_pool_base();
         params.v_pool_base = pool_.v_pool_base();
-        params.page_table  = page_bt_gpu ? reinterpret_cast<const int*>(page_bt_gpu->data())
-                                          : dt->pages[layer].data();
+        params.page_table = page_bt_gpu ? reinterpret_cast<const int*>(page_bt_gpu->data()) : dt->pages[layer].data();
         params.seqlen_q = n_q;
         params.past_len = decode_slot->past_len;
         ops::attention(params);

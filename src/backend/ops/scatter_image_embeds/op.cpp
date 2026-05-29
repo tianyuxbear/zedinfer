@@ -23,8 +23,8 @@ void scatter_image_embeds(tensor_t hidden, tensor_t input_ids, tensor_t image_em
     switch (hidden->deviceType()) {
 #ifdef ENABLE_NVIDIA_API
         case ZEDINFER_DEVICE_NVIDIA:
-            return nvidia::scatter_image_embeds(hidden->data(), input_ids->data(), image_embeds->data(), hidden->dtype(),
-                                                N, H, image_token_id);
+            return nvidia::scatter_image_embeds(hidden->data(), input_ids->data(), image_embeds->data(),
+                                                hidden->dtype(), N, H, image_token_id);
 #endif
         default:
             EXCEPTION_UNSUPPORTED_DEVICE;

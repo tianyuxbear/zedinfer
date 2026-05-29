@@ -17,10 +17,10 @@ enum class LayerKind : uint8_t { Full = 0, Linear = 1 };
 // rotary head dim across (T, H, W) axes; `partial_factor` selects the fraction
 // of the head dim that gets rotated.
 struct MRoPEConfig {
-    bool                interleaved    = true;
-    std::array<int, 3>  section{ 11, 11, 10 };
-    float               partial_factor = 0.25f;
-    float               theta          = 1e7f;
+    bool interleaved = true;
+    std::array<int, 3> section{11, 11, 10};
+    float partial_factor = 0.25f;
+    float theta = 1e7f;
 };
 
 // Forward-pass config for the Qwen3.5 hybrid stack. Extends ModelForwardConfig
@@ -34,16 +34,16 @@ struct HybridForwardConfig : public ModelForwardConfig {
 
     // Sub-config copies. Owned by the forward config so dispatch sites do not
     // chase pointers back through ModelConfig on every call.
-    LinearAttnConfig       linear_attn;
-    MRoPEConfig            mrope;
+    LinearAttnConfig linear_attn;
+    MRoPEConfig mrope;
 
     // Whether the softmax-attention path applies an output gate (sigmoid * out).
     // Qwen3.5: true. Qwen2 / Qwen3: false.
-    bool                   attn_output_gate = true;
+    bool attn_output_gate = true;
 
     // Engine-owned SSM slot pool. nullptr for non-hybrid models or when the
     // pool has not yet been wired (early init).
-    SSMStatePool*          ssm_pool = nullptr;
+    SSMStatePool* ssm_pool = nullptr;
 
     // Precomputed lookup tables: full_layer_index_table[L] = index of layer L
     // among full-attention layers (and similarly for linear). Populated by

@@ -133,11 +133,11 @@ public:
     //                            <|image_pad|> positions. Returns
     //                            [input_ids.size(), hidden_size].
     //   image_pad_token_id     : tokenizer id of <|image_pad|>, or -1.
-    bool     has_vision() const;
+    bool has_vision() const;
     tensor_t encode_image_data_uri(std::string_view data_uri);
-    tensor_t build_multimodal_input_embeds(const std::vector<int>&      input_ids,
-                                            const std::vector<tensor_t>& image_embeds_chunks);
-    int      image_pad_token_id() const;
+    tensor_t build_multimodal_input_embeds(const std::vector<int>& input_ids,
+                                           const std::vector<tensor_t>& image_embeds_chunks);
+    int image_pad_token_id() const;
     model::DecodeScratch* decode_scratch() { return decode_scratch_.get(); }
     // Hybrid SSM state pool, if the loaded model owns one (Qwen3.5 / Qwen3.5-MoE).
     // Returns nullptr for non-hybrid models so Scheduler keeps single-pool semantics.

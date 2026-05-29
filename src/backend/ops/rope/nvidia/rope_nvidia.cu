@@ -43,11 +43,10 @@ void rope_qk_via_flashinfer(std::byte* q_output, std::byte* k_output, const std:
     auto* k_out = reinterpret_cast<DType*>(k_output);
     auto* pos = reinterpret_cast<int64_t*>(const_cast<std::byte*>(pos_ids));
     auto status = flashinfer::BatchQKApplyRotaryPosIds<DType, int64_t>(
-        q_in, k_in, q_out, k_out, pos, static_cast<uint32_t>(seq_len),
-        static_cast<uint32_t>(num_q_heads), static_cast<uint32_t>(num_kv_heads),
-        static_cast<uint32_t>(head_dim), static_cast<uint32_t>(head_dim),
-        num_q_heads * head_dim, head_dim, num_kv_heads * head_dim, head_dim,
-        num_q_heads * head_dim, head_dim, num_kv_heads * head_dim, head_dim,
+        q_in, k_in, q_out, k_out, pos, static_cast<uint32_t>(seq_len), static_cast<uint32_t>(num_q_heads),
+        static_cast<uint32_t>(num_kv_heads), static_cast<uint32_t>(head_dim), static_cast<uint32_t>(head_dim),
+        num_q_heads * head_dim, head_dim, num_kv_heads * head_dim, head_dim, num_q_heads * head_dim, head_dim,
+        num_kv_heads * head_dim, head_dim,
         /*interleave=*/false, /*rope_scale=*/1.0f, /*rope_theta=*/theta, stream);
     if (status != cudaSuccess) {
         throw std::runtime_error(std::string("FlashInfer BatchQKApplyRotaryPosIds failed: ")
@@ -64,8 +63,7 @@ void rope_qk_via_flashinfer(std::byte* q_output, std::byte* k_output, const std:
 // rather than silently producing the wrong shape via the qk path.
 void rope(std::byte* /*output*/, const std::byte* /*input*/, const std::byte* /*pos_ids*/, float /*theta*/,
           zedinferDataType_t /*type*/, size_t /*seq_len*/, size_t /*num_heads*/, size_t /*head_dim*/) {
-    throw std::runtime_error(
-        "ops::nvidia::rope (single-tensor) not implemented on NVIDIA. Use ops::rope_qk instead.");
+    throw std::runtime_error("ops::nvidia::rope (single-tensor) not implemented on NVIDIA. Use ops::rope_qk instead.");
 }
 
 void rope_qk(std::byte* q_output, std::byte* k_output, const std::byte* q_input, const std::byte* k_input,
@@ -73,16 +71,16 @@ void rope_qk(std::byte* q_output, std::byte* k_output, const std::byte* q_input,
              size_t num_kv_heads, size_t head_dim) {
     if (!supports_flashinfer_rope(type, head_dim)) {
         throw std::runtime_error("ops::nvidia::rope_qk: FlashInfer RoPE requires bf16/f16 dtype and "
-                                 "head_dim ∈ {64, 128, 256, 512} (got head_dim=" + std::to_string(head_dim)
-                                 + ")");
+                                 "head_dim ∈ {64, 128, 256, 512} (got head_dim="
+                                 + std::to_string(head_dim) + ")");
     }
     switch (type) {
         case ZEDINFER_DTYPE_F16:
             return rope_qk_via_flashinfer<half>(q_output, k_output, q_input, k_input, pos_ids, theta, seq_len,
                                                 num_q_heads, num_kv_heads, head_dim);
         case ZEDINFER_DTYPE_BF16:
-            return rope_qk_via_flashinfer<__nv_bfloat16>(q_output, k_output, q_input, k_input, pos_ids, theta,
-                                                         seq_len, num_q_heads, num_kv_heads, head_dim);
+            return rope_qk_via_flashinfer<__nv_bfloat16>(q_output, k_output, q_input, k_input, pos_ids, theta, seq_len,
+                                                         num_q_heads, num_kv_heads, head_dim);
         default:
             EXCEPTION_UNSUPPORTED_DATATYPE(type);
     }

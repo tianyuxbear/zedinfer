@@ -61,12 +61,9 @@ std::string InferenceSession::chat(const std::string& user_input) {
     // Pick the open/closed-think variant of the assistant turn prompt. Falls
     // back to the open-think prompt for templates without a closed-think
     // variant (e.g., DeepSeek-R1, dense Qwen).
-    const bool use_no_think
-        = !config_.enable_thinking && !template_.generation_prompt_no_think.empty();
-    const std::string& gen_prompt
-        = use_no_think ? template_.generation_prompt_no_think : template_.generation_prompt;
-    const std::string& out_prefix
-        = use_no_think ? template_.output_prefix_no_think : template_.output_prefix;
+    const bool use_no_think = !config_.enable_thinking && !template_.generation_prompt_no_think.empty();
+    const std::string& gen_prompt = use_no_think ? template_.generation_prompt_no_think : template_.generation_prompt;
+    const std::string& out_prefix = use_no_think ? template_.output_prefix_no_think : template_.output_prefix;
 
     std::string input;
 
@@ -97,10 +94,8 @@ std::string InferenceSession::chat(const std::string& user_input) {
 }
 
 std::string InferenceSession::prepare_prompt(const std::string& user_input) {
-    const bool use_no_think
-        = !config_.enable_thinking && !template_.generation_prompt_no_think.empty();
-    const std::string& gen_prompt
-        = use_no_think ? template_.generation_prompt_no_think : template_.generation_prompt;
+    const bool use_no_think = !config_.enable_thinking && !template_.generation_prompt_no_think.empty();
+    const std::string& gen_prompt = use_no_think ? template_.generation_prompt_no_think : template_.generation_prompt;
 
     std::string input;
     if (is_first_turn_) {

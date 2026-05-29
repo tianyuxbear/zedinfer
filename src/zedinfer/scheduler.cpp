@@ -70,9 +70,8 @@ int Scheduler::active_count() const {
 
 void Scheduler::wait_for_work(const std::atomic<bool>& running) {
     std::unique_lock<std::mutex> lock(submit_mutex_);
-    work_cv_.wait(lock, [this, &running] {
-        return !waiting_queue_.empty() || !active_requests_.empty() || !running.load();
-    });
+    work_cv_.wait(lock,
+                  [this, &running] { return !waiting_queue_.empty() || !active_requests_.empty() || !running.load(); });
 }
 
 void Scheduler::wake_waiters() {
@@ -188,9 +187,8 @@ void Scheduler::allocate_blocks_for_request(InferenceRequest* req) {
         // full prompt (so partial-prefix KV reuse is impossible), and (c) the
         // snapshot restores cleanly into the freshly-acquired SSM slot.
         if (prefix_cache_ && !req->input_ids.empty()) {
-            const bool hybrid                = (ssm_state_pool_ != nullptr);
-            const bool ssm_snapshot_present  = hybrid && ssm_snapshot_cache_
-                                              && ssm_snapshot_cache_->has(req->input_ids);
+            const bool hybrid = (ssm_state_pool_ != nullptr);
+            const bool ssm_snapshot_present = hybrid && ssm_snapshot_cache_ && ssm_snapshot_cache_->has(req->input_ids);
             const bool skip_prefix_for_hybrid = hybrid && !ssm_snapshot_present;
 
             if (!skip_prefix_for_hybrid) {
@@ -340,11 +338,11 @@ void Scheduler::process_results(ScheduledBatch& batch, tensor_t logits, sampler:
             return argmax_sampler;
         }
         sampler::SamplerParams p;
-        p.temperature        = gc.temperature;
-        p.top_k              = gc.top_k;
-        p.top_p              = (gc.top_p <= 0.0f) ? 1.0f : gc.top_p;
+        p.temperature = gc.temperature;
+        p.top_k = gc.top_k;
+        p.top_p = (gc.top_p <= 0.0f) ? 1.0f : gc.top_p;
         p.repetition_penalty = (gc.repetition_penalty <= 0.0f) ? 1.0f : gc.repetition_penalty;
-        p.seed               = gc.seed;
+        p.seed = gc.seed;
         if (p.validate()) {
             general_sampler.setParams(p);
             if (gc.seed != 0 && !req.sampler_seeded) {
@@ -391,8 +389,8 @@ void Scheduler::process_results(ScheduledBatch& batch, tensor_t logits, sampler:
         const int budget = req->config.max_think_tokens;
         if (budget > 0 && req->think_token_count >= budget && token != think_close_token_id_
             && think_close_token_id_ >= 0) {
-            LOGI << "[Scheduler] Request " << req->request_id << " force-emit </think> after "
-                 << req->think_token_count << " think tokens (budget=" << budget << ")";
+            LOGI << "[Scheduler] Request " << req->request_id << " force-emit </think> after " << req->think_token_count
+                 << " think tokens (budget=" << budget << ")";
             token = think_close_token_id_;
             // Queue the trailing "\n\n" force-emit so the model exits the
             // truncated-thinking attractor. Skip if we don't have a newline id.
@@ -424,7 +422,7 @@ void Scheduler::process_results(ScheduledBatch& batch, tensor_t logits, sampler:
         // offset+0 (main's guess given last_token) and offset+1 (main's
         // guess given draft, only valid if draft is accepted).
         const bool is_spec = (req->mtp_pending_draft >= 0);
-        const int  draft   = req->mtp_pending_draft;
+        const int draft = req->mtp_pending_draft;
         // Always clear the pending slot for the next iteration; serving_loop
         // will refill it with a new draft after MTP runs.
         req->mtp_pending_draft = -1;
@@ -439,16 +437,16 @@ void Scheduler::process_results(ScheduledBatch& batch, tensor_t logits, sampler:
             // token from the residual normalize(max(0, p-q)). The committed token
             // is distributed exactly as the target p. Greedy/argmax mode: accept
             // iff main's argmax equals the draft (exact top-1 match).
-            auto row0 = logits->slice(0, offset,     offset + 1);
+            auto row0 = logits->slice(0, offset, offset + 1);
             sampler::Sampler& spec_sampler = pick_sampler(*req);
-            int  t0       = -1;
+            int t0 = -1;
             bool accepted = false;
             if (auto* gs = dynamic_cast<sampler::GeneralSampler*>(&spec_sampler);
                 gs != nullptr && !req->mtp_draft_q.empty()) {
                 auto p_dist = gs->truncatedDist(row0, &req->output_ids);
-                t0          = gs->specRejectionSample(p_dist, req->mtp_draft_q, draft, accepted);
+                t0 = gs->specRejectionSample(p_dist, req->mtp_draft_q, draft, accepted);
             } else {
-                t0       = spec_sampler.sample(row0, &req->output_ids);
+                t0 = spec_sampler.sample(row0, &req->output_ids);
                 accepted = (t0 == draft);
             }
             req->mtp_draft_q.clear();
@@ -457,23 +455,21 @@ void Scheduler::process_results(ScheduledBatch& batch, tensor_t logits, sampler:
             if (accepted) {
                 // ACCEPT: commit draft + sample next from logits[1].
                 auto row1 = logits->slice(0, offset + 1, offset + 2);
-                int  t1   = spec_sampler.sample(row1, &req->output_ids);
+                int t1 = spec_sampler.sample(row1, &req->output_ids);
                 // think-budget on the second emitted token too.
                 t1 = apply_think_budget(req, t1);
 
                 if (dump_token_ids) {
-                    fprintf(stderr, "[zedinfer-tok] step=%d id=%d (spec-accept)\n",
-                            req->generated_count, t0);
-                    fprintf(stderr, "[zedinfer-tok] step=%d id=%d (spec-accept+1)\n",
-                            req->generated_count + 1, t1);
+                    fprintf(stderr, "[zedinfer-tok] step=%d id=%d (spec-accept)\n", req->generated_count, t0);
+                    fprintf(stderr, "[zedinfer-tok] step=%d id=%d (spec-accept+1)\n", req->generated_count + 1, t1);
                 }
 
                 req->output_ids.push_back(t0);
                 req->output_ids.push_back(t1);
                 req->last_token = t1;
-                req->generated_count   += 2;
+                req->generated_count += 2;
                 req->block_table().seq_len += 2;
-                req->mtp_accept_count  += 1;
+                req->mtp_accept_count += 1;
                 req->mtp_last_n_committed = 2;
                 // Draft accepted: forward_linear_attn_layer left the request's
                 // real SSM slot at the post-last_token state and put the post-
@@ -501,8 +497,8 @@ void Scheduler::process_results(ScheduledBatch& batch, tensor_t logits, sampler:
                 // 1-token forward at N+1 that overwrites it before any attention
                 // read reaches it.
                 if (dump_token_ids) {
-                    fprintf(stderr, "[zedinfer-tok] step=%d id=%d (spec-reject draft=%d)\n",
-                            req->generated_count, t0, draft);
+                    fprintf(stderr, "[zedinfer-tok] step=%d id=%d (spec-reject draft=%d)\n", req->generated_count, t0,
+                            draft);
                 }
 
                 req->output_ids.push_back(t0);
@@ -526,7 +522,7 @@ void Scheduler::process_results(ScheduledBatch& batch, tensor_t logits, sampler:
         } else {
             // Normal 1-token decode (no draft pending OR spec disabled).
             auto req_logits = logits->slice(0, offset, offset + 1);
-            int  token = pick_sampler(*req).sample(req_logits, &req->output_ids);
+            int token = pick_sampler(*req).sample(req_logits, &req->output_ids);
             token = apply_think_budget(req, token);
 
             if (dump_token_ids) {
@@ -595,8 +591,7 @@ void Scheduler::process_results(ScheduledBatch& batch, tensor_t logits, sampler:
             // input_ids.size() through scheduler chunks); on a full prefix-
             // cache hit the SSM state is already a restored snapshot and
             // re-recording would just rewrite identical bytes.
-            if (ssm_snapshot_cache_ != nullptr && ssm_state_pool_ != nullptr
-                && req->ssm_slot_idx() >= 0) {
+            if (ssm_snapshot_cache_ != nullptr && ssm_state_pool_ != nullptr && req->ssm_slot_idx() >= 0) {
                 ssm_snapshot_cache_->record(req->input_ids, req->ssm_slot_idx());
             }
 

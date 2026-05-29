@@ -8,10 +8,8 @@ namespace zedinfer::ops {
 
 namespace {
 
-__global__ void silu_mul_kernel(      __nv_bfloat16* __restrict__ out,
-                                const __nv_bfloat16* __restrict__ z,
-                                const __nv_bfloat16* __restrict__ x,
-                                int total) {
+__global__ void silu_mul_kernel(__nv_bfloat16* __restrict__ out, const __nv_bfloat16* __restrict__ z,
+                                const __nv_bfloat16* __restrict__ x, int total) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= total) {
         return;
@@ -30,11 +28,9 @@ void silu_mul(tensor_t out, tensor_t z, tensor_t x) {
     auto stream = reinterpret_cast<cudaStream_t>(core::context().runtime().stream());
     const dim3 block(256);
     const dim3 grid(static_cast<unsigned int>((total + 255) / 256));
-    silu_mul_kernel<<<grid, block, 0, stream>>>(
-        reinterpret_cast<      __nv_bfloat16*>(out->data()),
-        reinterpret_cast<const __nv_bfloat16*>(z->data()),
-        reinterpret_cast<const __nv_bfloat16*>(x->data()),
-        total);
+    silu_mul_kernel<<<grid, block, 0, stream>>>(reinterpret_cast<__nv_bfloat16*>(out->data()),
+                                                reinterpret_cast<const __nv_bfloat16*>(z->data()),
+                                                reinterpret_cast<const __nv_bfloat16*>(x->data()), total);
 }
 
 } // namespace zedinfer::ops

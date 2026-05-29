@@ -63,16 +63,16 @@ public:
 private:
     struct Entry {
         model::SSMStateSnapshot snapshot;
-        std::uint64_t           last_access = 0;
+        std::uint64_t last_access = 0;
     };
 
     model::SSMStatePool& pool_;
-    size_t               max_entries_;
+    size_t max_entries_;
 
     std::unordered_map<std::uint64_t, Entry> entries_;
-    std::uint64_t                            access_counter_ = 0;
+    std::uint64_t access_counter_ = 0;
 
-    mutable size_t hits_   = 0;
+    mutable size_t hits_ = 0;
     mutable size_t misses_ = 0;
 
     // Evict the entry with the smallest `last_access`. Called from record()

@@ -19,8 +19,8 @@ uint64_t SSMSnapshotCache::compute_hash(const std::vector<int>& token_ids) {
     // across runs / endianness assumptions consistent with PrefixCache's chain
     // hash style.
     constexpr uint64_t FNV_OFFSET = 1469598103934665603ULL;
-    constexpr uint64_t FNV_PRIME  = 1099511628211ULL;
-    uint64_t           h          = FNV_OFFSET;
+    constexpr uint64_t FNV_PRIME = 1099511628211ULL;
+    uint64_t h = FNV_OFFSET;
     for (int tok : token_ids) {
         uint32_t u = static_cast<uint32_t>(tok);
         for (int b = 0; b < 4; ++b) {
@@ -63,12 +63,12 @@ void SSMSnapshotCache::record(const std::vector<int>& token_ids, int slot_idx) {
     if (token_ids.empty()) {
         return;
     }
-    const uint64_t key  = compute_hash(token_ids);
-    auto           snap = pool_.snapshot_slot(slot_idx);
+    const uint64_t key = compute_hash(token_ids);
+    auto snap = pool_.snapshot_slot(slot_idx);
 
     auto it = entries_.find(key);
     if (it != entries_.end()) {
-        it->second.snapshot    = std::move(snap);
+        it->second.snapshot = std::move(snap);
         it->second.last_access = ++access_counter_;
         return;
     }
@@ -77,7 +77,7 @@ void SSMSnapshotCache::record(const std::vector<int>& token_ids, int slot_idx) {
         evict_lru();
     }
     Entry entry;
-    entry.snapshot    = std::move(snap);
+    entry.snapshot = std::move(snap);
     entry.last_access = ++access_counter_;
     entries_.emplace(key, std::move(entry));
 }
@@ -93,11 +93,11 @@ void SSMSnapshotCache::evict_lru() {
     if (entries_.empty()) {
         return;
     }
-    auto          victim_it = entries_.begin();
-    std::uint64_t oldest    = victim_it->second.last_access;
+    auto victim_it = entries_.begin();
+    std::uint64_t oldest = victim_it->second.last_access;
     for (auto it = entries_.begin(); it != entries_.end(); ++it) {
         if (it->second.last_access < oldest) {
-            oldest    = it->second.last_access;
+            oldest = it->second.last_access;
             victim_it = it;
         }
     }

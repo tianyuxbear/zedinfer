@@ -23,18 +23,10 @@ namespace {
 // without runtime initialization races. Mapped via a consteval-style lambda.
 constexpr std::array<int8_t, 256> make_base64_table() {
     std::array<int8_t, 256> t{};
-    for (int i = 0; i < 256; ++i) {
-        t[i] = -1;
-    }
-    for (int i = 'A'; i <= 'Z'; ++i) {
-        t[i] = i - 'A';
-    }
-    for (int i = 'a'; i <= 'z'; ++i) {
-        t[i] = 26 + (i - 'a');
-    }
-    for (int i = '0'; i <= '9'; ++i) {
-        t[i] = 52 + (i - '0');
-    }
+    for (int i = 0; i < 256; ++i) { t[i] = -1; }
+    for (int i = 'A'; i <= 'Z'; ++i) { t[i] = i - 'A'; }
+    for (int i = 'a'; i <= 'z'; ++i) { t[i] = 26 + (i - 'a'); }
+    for (int i = '0'; i <= '9'; ++i) { t[i] = 52 + (i - '0'); }
     t[static_cast<unsigned char>('+')] = 62;
     t[static_cast<unsigned char>('/')] = 63;
     return t;
@@ -46,7 +38,7 @@ constexpr std::array<int8_t, 256> kBase64Table = make_base64_table();
 std::vector<uint8_t> base64_decode(std::string_view s) {
     std::vector<uint8_t> out;
     out.reserve((s.size() * 3) / 4);
-    int val  = 0;
+    int val = 0;
     int bits = -8;
     for (char c : s) {
         if (c == '=') {
@@ -70,21 +62,21 @@ std::vector<uint8_t> base64_decode(std::string_view s) {
 
 ImagePayload MultiModalProcessor::decode_data_uri(std::string_view data_uri) {
     // Strip optional "data:image/...;base64," prefix.
-    auto             comma = data_uri.find(',');
-    std::string_view b64   = (comma != std::string_view::npos) ? data_uri.substr(comma + 1) : data_uri;
+    auto comma = data_uri.find(',');
+    std::string_view b64 = (comma != std::string_view::npos) ? data_uri.substr(comma + 1) : data_uri;
 
     auto bytes = base64_decode(b64);
     if (bytes.empty()) {
         throw std::runtime_error("MultiModalProcessor: empty image bytes after base64 decode");
     }
 
-    int   w = 0, h = 0, ch = 0;
+    int w = 0, h = 0, ch = 0;
     auto* pixels = stbi_load_from_memory(bytes.data(), static_cast<int>(bytes.size()), &w, &h, &ch, /*desired=*/3);
     if (!pixels) {
         throw std::runtime_error(std::string("MultiModalProcessor: stb_image: ") + stbi_failure_reason());
     }
     ImagePayload pl;
-    pl.width  = w;
+    pl.width = w;
     pl.height = h;
     pl.rgb_pixels.assign(pixels, pixels + static_cast<size_t>(w) * h * 3);
     stbi_image_free(pixels);
@@ -94,13 +86,13 @@ ImagePayload MultiModalProcessor::decode_data_uri(std::string_view data_uri) {
 MultiModalProcessor::MultiModalProcessor(const model::VisionConfig& cfg) : cfg_(cfg) {}
 
 int MultiModalProcessor::num_image_tokens_for(int h, int w) const {
-    const int align     = cfg_.patch_size * cfg_.spatial_merge_size;
-    const int ah        = ((h + align - 1) / align) * align;
-    const int aw        = ((w + align - 1) / align) * align;
+    const int align = cfg_.patch_size * cfg_.spatial_merge_size;
+    const int ah = ((h + align - 1) / align) * align;
+    const int aw = ((w + align - 1) / align) * align;
     const int patches_h = ah / cfg_.patch_size;
     const int patches_w = aw / cfg_.patch_size;
-    const int merged_h  = patches_h / cfg_.spatial_merge_size;
-    const int merged_w  = patches_w / cfg_.spatial_merge_size;
+    const int merged_h = patches_h / cfg_.spatial_merge_size;
+    const int merged_w = patches_w / cfg_.spatial_merge_size;
     return merged_h * merged_w; // T = 1 for static images
 }
 
@@ -111,15 +103,14 @@ ProcessedImage MultiModalProcessor::process(const ImagePayload& img, const Execu
 
     // 1. Resize. Two-step: first downscale to satisfy cfg_.max_pixels (keeps
     // aspect ratio), then align both dims to patch_size * spatial_merge_size.
-    const int align     = cfg_.patch_size * cfg_.spatial_merge_size;
-    int       target_h  = img.height;
-    int       target_w  = img.width;
+    const int align = cfg_.patch_size * cfg_.spatial_merge_size;
+    int target_h = img.height;
+    int target_w = img.width;
     const int max_pixels = cfg_.max_pixels;
     if (max_pixels > 0 && static_cast<long long>(target_h) * target_w > max_pixels) {
-        const double scale = std::sqrt(static_cast<double>(max_pixels)
-                                        / (static_cast<double>(target_h) * target_w));
-        target_h           = std::max(align, static_cast<int>(std::floor(target_h * scale)));
-        target_w           = std::max(align, static_cast<int>(std::floor(target_w * scale)));
+        const double scale = std::sqrt(static_cast<double>(max_pixels) / (static_cast<double>(target_h) * target_w));
+        target_h = std::max(align, static_cast<int>(std::floor(target_h * scale)));
+        target_w = std::max(align, static_cast<int>(std::floor(target_w * scale)));
     }
     const int new_h = std::max(align, ((target_h + align - 1) / align) * align);
     const int new_w = std::max(align, ((target_w + align - 1) / align) * align);
@@ -140,16 +131,14 @@ ProcessedImage MultiModalProcessor::process(const ImagePayload& img, const Execu
     }
 
     // 2. Normalize: (x/255 - mean) / std with mean=std=0.5 (Qwen3.5-VL).
-    const float          inv_127_5 = 1.0f / 127.5f;
-    std::vector<float>   normed(resized.size());
-    for (size_t i = 0; i < resized.size(); ++i) {
-        normed[i] = static_cast<float>(resized[i]) * inv_127_5 - 1.0f;
-    }
+    const float inv_127_5 = 1.0f / 127.5f;
+    std::vector<float> normed(resized.size());
+    for (size_t i = 0; i < resized.size(); ++i) { normed[i] = static_cast<float>(resized[i]) * inv_127_5 - 1.0f; }
 
     // 3. Patchify into [N_patches, 3*tps*ps*ps]. For static images we replicate
     //    across the temporal axis (tps slots).
-    const int ps        = cfg_.patch_size;
-    const int tps       = cfg_.temporal_patch_size;
+    const int ps = cfg_.patch_size;
+    const int tps = cfg_.temporal_patch_size;
     const int patches_h = new_h / ps;
     const int patches_w = new_w / ps;
     const int n_patches = patches_h * patches_w;
@@ -175,9 +164,7 @@ ProcessedImage MultiModalProcessor::process(const ImagePayload& img, const Execu
 
     // 4. FP32 → BF16 host-side, then H2D.
     std::vector<zedinfer::bf16_t> bf16_buf(patches.size());
-    for (size_t i = 0; i < patches.size(); ++i) {
-        bf16_buf[i] = zedinfer::utils::cast<zedinfer::bf16_t>(patches[i]);
-    }
+    for (size_t i = 0; i < patches.size(); ++i) { bf16_buf[i] = zedinfer::utils::cast<zedinfer::bf16_t>(patches[i]); }
     auto pt = Tensor::create({static_cast<size_t>(n_patches), static_cast<size_t>(patch_dim)}, ZEDINFER_DTYPE_BF16,
                              exec.device_type, exec.device_id);
     {
@@ -187,15 +174,15 @@ ProcessedImage MultiModalProcessor::process(const ImagePayload& img, const Execu
     }
 
     // 5. pos_ids_thw: (t=0, h=ph, w=pw) for each patch, row-major over (ph, pw).
-    auto pos = Tensor::create({static_cast<size_t>(n_patches), 3}, ZEDINFER_DTYPE_I32, exec.device_type,
-                              exec.device_id);
+    auto pos
+        = Tensor::create({static_cast<size_t>(n_patches), 3}, ZEDINFER_DTYPE_I32, exec.device_type, exec.device_id);
     std::vector<int32_t> pos_host(static_cast<size_t>(n_patches) * 3);
     for (int ph = 0; ph < patches_h; ++ph) {
         for (int pw = 0; pw < patches_w; ++pw) {
-            const int i             = ph * patches_w + pw;
-            pos_host[i * 3 + 0]     = 0;
-            pos_host[i * 3 + 1]     = ph;
-            pos_host[i * 3 + 2]     = pw;
+            const int i = ph * patches_w + pw;
+            pos_host[i * 3 + 0] = 0;
+            pos_host[i * 3 + 1] = ph;
+            pos_host[i * 3 + 2] = pw;
         }
     }
     {
@@ -205,12 +192,12 @@ ProcessedImage MultiModalProcessor::process(const ImagePayload& img, const Execu
     }
 
     ProcessedImage out;
-    out.patches          = pt;
-    out.pos_ids_thw      = pos;
-    out.grid_t           = 1;
-    out.grid_h           = patches_h;
-    out.grid_w           = patches_w;
-    const int sms        = cfg_.spatial_merge_size;
+    out.patches = pt;
+    out.pos_ids_thw = pos;
+    out.grid_t = 1;
+    out.grid_h = patches_h;
+    out.grid_w = patches_w;
+    const int sms = cfg_.spatial_merge_size;
     out.num_image_tokens = (patches_h / sms) * (patches_w / sms);
     LOGI.printf("[MultiModalProcessor] %dx%d -> %dx%d, grid %dx%d, %d patches, %d image tokens", img.width, img.height,
                 new_w, new_h, patches_h, patches_w, n_patches, out.num_image_tokens);

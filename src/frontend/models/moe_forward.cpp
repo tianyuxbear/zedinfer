@@ -1,9 +1,9 @@
 #include "frontend/models/moe_forward.hpp"
 #include "backend/core/context/context.hpp"
+#include "backend/device/runtime_api.hpp"
 #include "backend/ops/moe/topk_softmax.hpp"
 #include "backend/ops/ops.hpp"
 #include "backend/ops/shared_expert_gate/shared_expert_gate.hpp"
-#include "backend/device/runtime_api.hpp"
 #include "frontend/models/decode_scratch.hpp"
 #include "utils/types.hpp"
 
@@ -77,17 +77,16 @@ struct MoeN2Scratch {
     tensor_t sh_down;       // [2, H]
     tensor_t sh_gate_logit; // [2, 1]
 
-    size_t                H = 0;
-    size_t                num_experts = 0;
-    size_t                shared_inter = 0;
-    zedinferDeviceType_t  device_type = ZEDINFER_DEVICE_CPU;
-    int                   device_id = -1;
-    zedinferDataType_t    dtype = ZEDINFER_DTYPE_F32;
+    size_t H = 0;
+    size_t num_experts = 0;
+    size_t shared_inter = 0;
+    zedinferDeviceType_t device_type = ZEDINFER_DEVICE_CPU;
+    int device_id = -1;
+    zedinferDataType_t dtype = ZEDINFER_DTYPE_F32;
 };
 static thread_local MoeN2Scratch s_moe_n2;
 
-static MoeN2Scratch& ensure_moe_n2(size_t H, size_t num_experts, size_t shared_inter,
-                                   const ExecutorConfig& exec) {
+static MoeN2Scratch& ensure_moe_n2(size_t H, size_t num_experts, size_t shared_inter, const ExecutorConfig& exec) {
     if (s_moe_n2.router_logits && s_moe_n2.H == H && s_moe_n2.num_experts == num_experts
         && s_moe_n2.shared_inter == shared_inter && s_moe_n2.device_type == exec.device_type
         && s_moe_n2.device_id == exec.device_id && s_moe_n2.dtype == exec.data_type) {
@@ -97,20 +96,20 @@ static MoeN2Scratch& ensure_moe_n2(size_t H, size_t num_experts, size_t shared_i
         return Tensor::create(shape, exec.data_type, exec.device_type, exec.device_id);
     };
     s_moe_n2.router_logits = mkf({2, num_experts});
-    s_moe_n2.moe_output    = mkf({2, H});
+    s_moe_n2.moe_output = mkf({2, H});
     if (shared_inter > 0) {
-        s_moe_n2.sh_gate       = mkf({2, shared_inter});
-        s_moe_n2.sh_up         = mkf({2, shared_inter});
-        s_moe_n2.sh_act        = mkf({2, shared_inter});
-        s_moe_n2.sh_down       = mkf({2, H});
+        s_moe_n2.sh_gate = mkf({2, shared_inter});
+        s_moe_n2.sh_up = mkf({2, shared_inter});
+        s_moe_n2.sh_act = mkf({2, shared_inter});
+        s_moe_n2.sh_down = mkf({2, H});
         s_moe_n2.sh_gate_logit = mkf({2, 1});
     }
-    s_moe_n2.H            = H;
-    s_moe_n2.num_experts  = num_experts;
+    s_moe_n2.H = H;
+    s_moe_n2.num_experts = num_experts;
     s_moe_n2.shared_inter = shared_inter;
-    s_moe_n2.device_type  = exec.device_type;
-    s_moe_n2.device_id    = exec.device_id;
-    s_moe_n2.dtype        = exec.data_type;
+    s_moe_n2.device_type = exec.device_type;
+    s_moe_n2.device_id = exec.device_id;
+    s_moe_n2.dtype = exec.data_type;
     return s_moe_n2;
 }
 
@@ -139,10 +138,10 @@ static void ensure_prefill_scratch(size_t needed, zedinferDeviceType_t device_ty
 // buffer and a plain f32 working buffer once per thread, sized to the largest N
 // seen, and reuse them.
 struct RouterHostScratch {
-    std::vector<std::byte> raw;     // pinned host bytes for the D2H copy (bf16/f16/f32 input)
-    std::vector<float> as_f32;      // F32-converted view consumed by topk_softmax
-    size_t raw_capacity = 0;        // in bytes
-    size_t f32_capacity = 0;        // in floats
+    std::vector<std::byte> raw; // pinned host bytes for the D2H copy (bf16/f16/f32 input)
+    std::vector<float> as_f32;  // F32-converted view consumed by topk_softmax
+    size_t raw_capacity = 0;    // in bytes
+    size_t f32_capacity = 0;    // in floats
     void* pinned_ptr = nullptr;
 };
 
@@ -256,7 +255,7 @@ static ops::moe::TopKResult compute_router_topk(const ModelForwardConfig& model,
 static void moe_decode(const ModelForwardConfig& model, tensor_t moe_output, tensor_t input, int layer_idx,
                        const ops::moe::TopKResult& topk, DecodeScratch& scratch) {
     const size_t top_k = model.num_experts_per_tok;
-    const size_t N     = input->shape()[0];
+    const size_t N = input->shape()[0];
 
     // M3 async prefetch: kick off H2D for every selected expert on the transfer stream
     // before the compute loop starts. Under ALL_GPU this is a no-op; under PINNED_LRU
@@ -275,15 +274,15 @@ static void moe_decode(const ModelForwardConfig& model, tensor_t moe_output, ten
     for (size_t n = 0; n < N; ++n) {
         // Per-row views of [1, H] / [1, H]. For N=1 the view is the whole tensor
         // (no slice allocation); for N=2 slice produces a zero-copy view at row n.
-        tensor_t input_n  = (N == 1) ? input      : input->slice(0, n, n + 1);
+        tensor_t input_n = (N == 1) ? input : input->slice(0, n, n + 1);
         tensor_t output_n = (N == 1) ? moe_output : moe_output->slice(0, n, n + 1);
 
         for (size_t k = 0; k < top_k; ++k) {
-            int   expert_id = topk.expert_ids[n * top_k + k];
-            float weight    = topk.expert_weights[n * top_k + k];
+            int expert_id = topk.expert_ids[n * top_k + k];
+            float weight = topk.expert_weights[n * top_k + k];
 
             model.dispatch_expert_linear(scratch.expert_gate, input_n, layer_idx, expert_id, ExpertProj::Gate);
-            model.dispatch_expert_linear(scratch.expert_up,   input_n, layer_idx, expert_id, ExpertProj::Up);
+            model.dispatch_expert_linear(scratch.expert_up, input_n, layer_idx, expert_id, ExpertProj::Up);
             ops::swiglu(scratch.expert_act, scratch.expert_gate, scratch.expert_up);
             model.dispatch_expert_linear(scratch.expert_down, scratch.expert_act, layer_idx, expert_id,
                                          ExpertProj::Down);
@@ -439,8 +438,7 @@ static void moe_prefill(const ModelForwardConfig& model, tensor_t moe_output, te
 // Caller's invariant when has_shared_expert == false: `moe_output` and `output` alias
 // the same buffer, so this function is a no-op in that case (no copy needed).
 static void apply_shared_expert(const ModelForwardConfig& model, tensor_t output, tensor_t moe_output, tensor_t input,
-                                int layer_idx, DecodeScratch* scratch, const MakeTensor& make,
-                                const MoeN2Scratch* n2) {
+                                int layer_idx, DecodeScratch* scratch, const MakeTensor& make, const MoeN2Scratch* n2) {
     if (!model.has_shared_expert) {
         return;
     }
@@ -456,14 +454,10 @@ static void apply_shared_expert(const ModelForwardConfig& model, tensor_t output
     //   four BestFitPool fresh allocs per layer (one of which is at the FFN
     //   intermediate size) cost ~3.5 ms / layer under ALL_GPU.
     // Else (prefill N > 2): pay the per-call alloc as before.
-    auto sh_gate = use_n1_scratch ? scratch->shared_gate
-                                  : (n2 ? n2->sh_gate : make({N, shared_inter}));
-    auto sh_up   = use_n1_scratch ? scratch->shared_up
-                                  : (n2 ? n2->sh_up   : make({N, shared_inter}));
-    auto sh_act  = use_n1_scratch ? scratch->shared_act
-                                  : (n2 ? n2->sh_act  : make({N, shared_inter}));
-    auto sh_down = use_n1_scratch ? scratch->shared_down
-                                  : (n2 ? n2->sh_down : make({N, hidden_size}));
+    auto sh_gate = use_n1_scratch ? scratch->shared_gate : (n2 ? n2->sh_gate : make({N, shared_inter}));
+    auto sh_up = use_n1_scratch ? scratch->shared_up : (n2 ? n2->sh_up : make({N, shared_inter}));
+    auto sh_act = use_n1_scratch ? scratch->shared_act : (n2 ? n2->sh_act : make({N, shared_inter}));
+    auto sh_down = use_n1_scratch ? scratch->shared_down : (n2 ? n2->sh_down : make({N, hidden_size}));
 
     model.dispatch_linear(sh_gate, input, sp + "gate_proj", nullptr);
     model.dispatch_linear(sh_up, input, sp + "up_proj", nullptr);
@@ -480,7 +474,7 @@ static void apply_shared_expert(const ModelForwardConfig& model, tensor_t output
     const std::string gate_w_name = "layers." + std::to_string(layer_idx) + ".mlp.shared_expert_gate.weight";
     if (model.weights.has_tensor(gate_w_name)) {
         auto gate_logits = (use_n1_scratch && scratch->shared_gate_logits) ? scratch->shared_gate_logits
-                          : (n2 ? n2->sh_gate_logit : make({N, 1}));
+                                                                           : (n2 ? n2->sh_gate_logit : make({N, 1}));
         ops::linear(gate_logits, input, model.weights.get_tensor(gate_w_name), nullptr);
         ops::shared_expert_gate(sh_down, gate_logits);
     }
@@ -511,7 +505,7 @@ void moe_layer_forward(const ModelForwardConfig& model, tensor_t output, tensor_
     //                     through moe_prefill (gather/scatter, [2, ...] fresh
     //                     allocs per layer) is what made spec mode 20× slower.
     static constexpr size_t kMaxSmallDecodeN = 2;
-    const bool use_n1_scratch  = (scratch != nullptr && N == 1);
+    const bool use_n1_scratch = (scratch != nullptr && N == 1);
     const bool use_decode_path = (scratch != nullptr && N <= kMaxSmallDecodeN);
 
     // Thread_local N=2 cache (router/moe_output/shared buffers), lazy-init.
@@ -527,8 +521,7 @@ void moe_layer_forward(const ModelForwardConfig& model, tensor_t output, tensor_
     //   N=1 + scratch  : scratch->router_logits     [1, num_experts]
     //   N=2 + scratch  : n2->router_logits          [2, num_experts]  (thread_local)
     //   N>2  prefill   : per-call make({N, num_experts})
-    auto router_logits = use_n1_scratch ? scratch->router_logits
-                                        : (n2 ? n2->router_logits : make({N, num_experts}));
+    auto router_logits = use_n1_scratch ? scratch->router_logits : (n2 ? n2->router_logits : make({N, num_experts}));
     auto topk = compute_router_topk(model, input, layer_idx, router_logits, top_k);
 
     // Accumulator for weighted sum of routed-expert outputs. When the layer has no

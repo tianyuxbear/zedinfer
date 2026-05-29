@@ -140,8 +140,7 @@ void SafeTensorFile::load_metadata() {
 
         auto data_offsets = value["data_offsets"].get<std::vector<size_t>>();
         if (data_offsets.size() != 2 || data_offsets[1] < data_offsets[0]) {
-            throw std::runtime_error("Malformed safetensors header: tensor '" + key
-                                     + "' has invalid data_offsets");
+            throw std::runtime_error("Malformed safetensors header: tensor '" + key + "' has invalid data_offsets");
         }
         info.data_offset = data_offsets[0];
         info.num_bytes = data_offsets[1] - data_offsets[0];

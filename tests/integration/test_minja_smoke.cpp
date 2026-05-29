@@ -27,8 +27,7 @@ TEST(MinjaSmoke, ParsesQwen3_5ChatTemplate) {
     const std::string path = std::string(model_path) + "/chat_template.jinja";
     std::ifstream f(path);
     ASSERT_TRUE(f.is_open()) << "failed to open " << path;
-    std::string tpl((std::istreambuf_iterator<char>(f)),
-                    std::istreambuf_iterator<char>());
+    std::string tpl((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
     ASSERT_FALSE(tpl.empty()) << "chat_template.jinja is empty";
 
     EXPECT_NO_THROW({

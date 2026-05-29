@@ -24,59 +24,47 @@ namespace {
 // Float accumulation matches the CPU reference impl so the GPU path stays
 // numerically aligned with the BF16-truncate-to-store CPU baseline.
 template <int K>
-__global__ void causal_conv1d_kernel(const __nv_bfloat16* __restrict__ x,
-                                     const __nv_bfloat16* __restrict__ w,
-                                     __nv_bfloat16* __restrict__ out,
-                                     __nv_bfloat16* __restrict__ state,
-                                     int N, int D) {
+__global__ void causal_conv1d_kernel(const __nv_bfloat16* __restrict__ x, const __nv_bfloat16* __restrict__ w,
+                                     __nv_bfloat16* __restrict__ out, __nv_bfloat16* __restrict__ state, int N, int D) {
     const int d = blockIdx.x * blockDim.x + threadIdx.x;
-    if (d >= D) return;
+    if (d >= D) {
+        return;
+    }
 
     // Register window holds (K-1) state taps plus the current input slot.
     float window[K];
 #pragma unroll
-    for (int i = 0; i < K - 1; ++i) {
-        window[i] = __bfloat162float(state[i * D + d]);
-    }
+    for (int i = 0; i < K - 1; ++i) { window[i] = __bfloat162float(state[i * D + d]); }
 
     // Per-channel depthwise weight tap row.
     float wv[K];
 #pragma unroll
-    for (int i = 0; i < K; ++i) {
-        wv[i] = __bfloat162float(w[d * K + i]);
-    }
+    for (int i = 0; i < K; ++i) { wv[i] = __bfloat162float(w[d * K + i]); }
 
     for (int n = 0; n < N; ++n) {
         window[K - 1] = __bfloat162float(x[n * D + d]);
-        float acc     = 0.0f;
+        float acc = 0.0f;
 #pragma unroll
-        for (int i = 0; i < K; ++i) {
-            acc += window[i] * wv[i];
-        }
+        for (int i = 0; i < K; ++i) { acc += window[i] * wv[i]; }
         // SiLU: acc * sigmoid(acc). __expf is the fast-math intrinsic; the
         // small dynamic range error is dominated by BF16 store quantization.
-        const float s     = 1.0f / (1.0f + __expf(-acc));
-        out[n * D + d]    = __float2bfloat16(acc * s);
+        const float s = 1.0f / (1.0f + __expf(-acc));
+        out[n * D + d] = __float2bfloat16(acc * s);
 
         // Slide window left so window[K-1] is free for the next input.
 #pragma unroll
-        for (int i = 0; i < K - 1; ++i) {
-            window[i] = window[i + 1];
-        }
+        for (int i = 0; i < K - 1; ++i) { window[i] = window[i + 1]; }
     }
 
     // After the loop window[0..K-2] are the most recent K-1 inputs in time
     // order — exactly the new persistent state.
 #pragma unroll
-    for (int i = 0; i < K - 1; ++i) {
-        state[i * D + d] = __float2bfloat16(window[i]);
-    }
+    for (int i = 0; i < K - 1; ++i) { state[i * D + d] = __float2bfloat16(window[i]); }
 }
 
 } // namespace
 
-void causal_conv1d(tensor_t out, tensor_t x, tensor_t weight,
-                   model::SSMStateView v, int slot_idx, int layer_idx) {
+void causal_conv1d(tensor_t out, tensor_t x, tensor_t weight, model::SSMStateView v, int slot_idx, int layer_idx) {
     if (!out || !x || !weight) {
         throw std::runtime_error("ops::mamba::causal_conv1d: null tensor input");
     }
@@ -96,16 +84,15 @@ void causal_conv1d(tensor_t out, tensor_t x, tensor_t weight,
         return; // No tokens this step; state stays untouched.
     }
 
-    auto* x_ptr   = reinterpret_cast<const __nv_bfloat16*>(x->data());
-    auto* w_ptr   = reinterpret_cast<const __nv_bfloat16*>(weight->data());
+    auto* x_ptr = reinterpret_cast<const __nv_bfloat16*>(x->data());
+    auto* w_ptr = reinterpret_cast<const __nv_bfloat16*>(weight->data());
     auto* out_ptr = reinterpret_cast<__nv_bfloat16*>(out->data());
 
     // Conv state is stored row-major [slots, layers, K-1, qkv_dim] by
     // SSMStatePool; stride fields are bytes (see SSMStateView contract).
-    auto* state_layer = reinterpret_cast<char*>(v.conv_base)
-                       + static_cast<int64_t>(slot_idx)  * v.conv_stride_slot
-                       + static_cast<int64_t>(layer_idx) * v.conv_stride_layer;
-    auto* state_ptr   = reinterpret_cast<__nv_bfloat16*>(state_layer);
+    auto* state_layer = reinterpret_cast<char*>(v.conv_base) + static_cast<int64_t>(slot_idx) * v.conv_stride_slot
+                      + static_cast<int64_t>(layer_idx) * v.conv_stride_layer;
+    auto* state_ptr = reinterpret_cast<__nv_bfloat16*>(state_layer);
 
     auto stream = reinterpret_cast<cudaStream_t>(core::context().runtime().stream());
     constexpr int kBlock = 128;

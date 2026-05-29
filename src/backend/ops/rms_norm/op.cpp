@@ -16,20 +16,20 @@ void rms_norm(tensor_t out, tensor_t in, tensor_t weight, float eps, bool add_on
 
     // always support cpu calculation
     if (out->deviceType() == ZEDINFER_DEVICE_CPU) {
-        return cpu::rms_norm(out->data(), in->data(), weight->data(), eps, out->dtype(),
-                             out->dim(0), out->dim(1), add_one_to_weight);
+        return cpu::rms_norm(out->data(), in->data(), weight->data(), eps, out->dtype(), out->dim(0), out->dim(1),
+                             add_one_to_weight);
     }
 
     zedinfer::core::context().setDevice(out->deviceType(), out->deviceId());
 
     switch (out->deviceType()) {
         case ZEDINFER_DEVICE_CPU:
-            return cpu::rms_norm(out->data(), in->data(), weight->data(), eps, out->dtype(),
-                                 out->dim(0), out->dim(1), add_one_to_weight);
+            return cpu::rms_norm(out->data(), in->data(), weight->data(), eps, out->dtype(), out->dim(0), out->dim(1),
+                                 add_one_to_weight);
 #ifdef ENABLE_NVIDIA_API
         case ZEDINFER_DEVICE_NVIDIA:
-            return nvidia::rms_norm(out->data(), in->data(), weight->data(), eps, out->dtype(),
-                                    out->dim(0), out->dim(1), add_one_to_weight);
+            return nvidia::rms_norm(out->data(), in->data(), weight->data(), eps, out->dtype(), out->dim(0),
+                                    out->dim(1), add_one_to_weight);
 #endif
         default:
             EXCEPTION_UNSUPPORTED_DEVICE;
@@ -57,14 +57,14 @@ void fused_add_rms_norm(tensor_t input, tensor_t residual, tensor_t weight, floa
             case ZEDINFER_DTYPE_F32: {
                 auto* r = reinterpret_cast<float*>(residual->data());
                 auto* i = reinterpret_cast<float*>(input->data());
-                for (size_t k = 0; k < numel; ++k) r[k] += i[k];
+                for (size_t k = 0; k < numel; ++k) { r[k] += i[k]; }
                 break;
             }
             default:
                 throw std::runtime_error("fused_add_rms_norm CPU fallback supports F32 only");
         }
-        return cpu::rms_norm(input->data(), residual->data(), weight->data(), eps, input->dtype(),
-                             input->dim(0), input->dim(1), add_one_to_weight);
+        return cpu::rms_norm(input->data(), residual->data(), weight->data(), eps, input->dtype(), input->dim(0),
+                             input->dim(1), add_one_to_weight);
     }
 
     zedinfer::core::context().setDevice(input->deviceType(), input->deviceId());
@@ -72,9 +72,8 @@ void fused_add_rms_norm(tensor_t input, tensor_t residual, tensor_t weight, floa
     switch (input->deviceType()) {
 #ifdef ENABLE_NVIDIA_API
         case ZEDINFER_DEVICE_NVIDIA:
-            return nvidia::fused_add_rms_norm(input->data(), residual->data(), weight->data(), eps,
-                                              input->dtype(), input->dim(0), input->dim(1),
-                                              add_one_to_weight);
+            return nvidia::fused_add_rms_norm(input->data(), residual->data(), weight->data(), eps, input->dtype(),
+                                              input->dim(0), input->dim(1), add_one_to_weight);
 #endif
         default:
             EXCEPTION_UNSUPPORTED_DEVICE;

@@ -93,8 +93,7 @@ public:
     // surviving (probability, token_id) pairs sorted by probability descending
     // (probabilities sum to 1 over the kept support). Exposed so Qwen3.5 MTP
     // speculative decoding can run true rejection sampling against it.
-    std::vector<std::pair<float, int>> truncatedDist(tensor_t logits,
-                                                     const std::vector<int>* recent_tokens = nullptr);
+    std::vector<std::pair<float, int>> truncatedDist(tensor_t logits, const std::vector<int>* recent_tokens = nullptr);
 
     // Draw one token id from a precomputed truncatedDist() output (inverse-CDF
     // over the sampler's RNG stream).

@@ -6,16 +6,12 @@
 
 namespace zedinfer::ops::mamba {
 
-void copy_strided_rows(tensor_t dst, tensor_t src,
-                        size_t src_offset_elems, size_t slice_width,
-                        size_t src_width, size_t rows, size_t elem_bytes) {
+void copy_strided_rows(tensor_t dst, tensor_t src, size_t src_offset_elems, size_t slice_width, size_t src_width,
+                       size_t rows, size_t elem_bytes) {
     auto stream = reinterpret_cast<cudaStream_t>(core::context().runtime().stream());
     cudaMemcpy2DAsync(dst->data(), slice_width * elem_bytes,
-                      reinterpret_cast<const char*>(src->data())
-                          + src_offset_elems * elem_bytes,
-                      src_width * elem_bytes,
-                      slice_width * elem_bytes, rows,
-                      cudaMemcpyDeviceToDevice, stream);
+                      reinterpret_cast<const char*>(src->data()) + src_offset_elems * elem_bytes,
+                      src_width * elem_bytes, slice_width * elem_bytes, rows, cudaMemcpyDeviceToDevice, stream);
 }
 
 } // namespace zedinfer::ops::mamba
@@ -76,8 +72,7 @@ int32_t* prepare_cu_seqlens(int N, cudaStream_t stream) {
     host[0] = 0;
     host[1] = N;
 
-    auto status = cudaMemcpyAsync(g_cu_seqlens.device->memory(), host, kBytes,
-                                  cudaMemcpyHostToDevice, stream);
+    auto status = cudaMemcpyAsync(g_cu_seqlens.device->memory(), host, kBytes, cudaMemcpyHostToDevice, stream);
     if (status != cudaSuccess) {
         throw std::runtime_error(std::string("[ops::mamba::ssu] cu_seqlens H2D copy failed: ")
                                  + cudaGetErrorString(status));
@@ -109,17 +104,17 @@ void ssu(const SSUParams& p) {
     // [N, hidden] activations passed in. The kernel reads B-stride for the
     // between-sequence offset and reuses it for the between-token offset in
     // varlen mode (see kernel_selective_state_update_mtp_simple.cuh).
-    const int64_t hidden = static_cast<int64_t>(p.state_view.num_v_heads)
-                         * static_cast<int64_t>(p.state_view.value_head_dim);
+    const int64_t hidden
+        = static_cast<int64_t>(p.state_view.num_v_heads) * static_cast<int64_t>(p.state_view.value_head_dim);
     const int64_t ngroups = (p.num_groups > 0) ? p.num_groups : 1;
     const int64_t bc_row = ngroups * static_cast<int64_t>(p.state_view.d_state);
     const int64_t dt_row = static_cast<int64_t>(p.state_view.num_v_heads);
 
     // State pointer is offset to (slot_idx, layer_idx). Per-batch state stride
     // is 0 because we always run with batch=1 / a single slot per call.
-    void* state_ptr = byte_offset(p.state_view.ssm_base,
-                                  static_cast<int64_t>(p.slot_idx) * p.state_view.ssm_stride_slot
-                                + static_cast<int64_t>(p.layer_idx) * p.state_view.ssm_stride_layer);
+    void* state_ptr
+        = byte_offset(p.state_view.ssm_base, static_cast<int64_t>(p.slot_idx) * p.state_view.ssm_stride_slot
+                                                 + static_cast<int64_t>(p.layer_idx) * p.state_view.ssm_stride_layer);
 
     flashinfer::mamba::mtp::SelectiveStateMTPParams params{};
     params.batch = 1;
@@ -131,40 +126,40 @@ void ssu(const SSUParams& p) {
     params.ntokens_mtp = static_cast<uint32_t>(p.num_tokens);
     params.dt_softplus = true;
 
-    params.x        = p.v ? p.v->data() : nullptr;
-    params.dt       = p.a ? p.a->data() : nullptr;
-    params.A        = p.A_log ? p.A_log->data() : nullptr;
+    params.x = p.v ? p.v->data() : nullptr;
+    params.dt = p.a ? p.a->data() : nullptr;
+    params.A = p.A_log ? p.A_log->data() : nullptr;
     // FlashInfer's grouped-state SSU expects B/C shaped as [N, ngroups, dstate].
     // Qwen3.5's post-conv `k` and `q` are [N, num_k_heads * Dk] which matches
     // [N, num_k_heads, dstate=Dk]. The per-V-head `b` from in_proj_b does not
     // fit this layout; mapping it as B would silently misread group-dim slices.
     // See forward_linear_attn_layer in hybrid_transformer_forward.cpp for the
     // full mapping rationale.
-    params.B        = p.k ? p.k->data() : nullptr;
-    params.C        = p.q ? p.q->data() : nullptr;
-    params.D        = nullptr; // Qwen3.5 linear-attn block has no D skip-connect.
-    params.z        = p.z ? p.z->data() : nullptr;
-    params.dt_bias  = p.dt_bias ? p.dt_bias->data() : nullptr;
-    params.output   = p.out ? p.out->data() : nullptr;
+    params.B = p.k ? p.k->data() : nullptr;
+    params.C = p.q ? p.q->data() : nullptr;
+    params.D = nullptr; // Qwen3.5 linear-attn block has no D skip-connect.
+    params.z = p.z ? p.z->data() : nullptr;
+    params.dt_bias = p.dt_bias ? p.dt_bias->data() : nullptr;
+    params.output = p.out ? p.out->data() : nullptr;
 
     // Strides are in element units (input_t/state_t), matching the kernel's
     // reinterpret_cast + pointer-arithmetic access pattern.
-    params.x_stride_batch   = hidden;
-    params.dt_stride_batch  = dt_row;
-    params.B_stride_batch   = bc_row;
-    params.C_stride_batch   = bc_row;
+    params.x_stride_batch = hidden;
+    params.dt_stride_batch = dt_row;
+    params.B_stride_batch = bc_row;
+    params.C_stride_batch = bc_row;
     params.out_stride_batch = hidden;
-    params.z_stride_batch   = hidden;
+    params.z_stride_batch = hidden;
     params.state_stride_batch = 0;
 
     // MTP strides — unused when TOKENS_MTP==1, but set for safety in case the
     // dispatch reaches a kernel that reads them on a non-varlen path.
-    params.x_stride_mtp   = hidden;
-    params.dt_stride_mtp  = dt_row;
-    params.B_stride_mtp   = bc_row;
-    params.C_stride_mtp   = bc_row;
+    params.x_stride_mtp = hidden;
+    params.dt_stride_mtp = dt_row;
+    params.B_stride_mtp = bc_row;
+    params.C_stride_mtp = bc_row;
     params.out_stride_mtp = hidden;
-    params.z_stride_mtp   = hidden;
+    params.z_stride_mtp = hidden;
 
     params.state = state_ptr;
     params.state_batch_indices = nullptr;
@@ -178,18 +173,15 @@ void ssu(const SSUParams& p) {
 
     // Varlen prefill carries cu_seqlens=[0, N]; decode (N==1) passes nullptr
     // and the kernel takes the fixed-token MTP path.
-    params.cu_seqlens = (p.num_tokens > 1)
-                          ? static_cast<void*>(prepare_cu_seqlens(p.num_tokens, stream))
-                          : nullptr;
+    params.cu_seqlens = (p.num_tokens > 1) ? static_cast<void*>(prepare_cu_seqlens(p.num_tokens, stream)) : nullptr;
 
-    flashinfer::mamba::mtp::invokeSelectiveStateUpdateMTP<
-        __nv_bfloat16,  // input_t
-        __nv_bfloat16,  // weight_t (dt_bias, D)
-        float,          // matrixA_t (A_log)
-        __nv_bfloat16,  // state_t
-        int32_t,        // stateIndex_t
-        void            // state_scale_t (no quantized state)
-    >(params, flashinfer::mamba::SSUAlgorithm::kAuto, stream);
+    flashinfer::mamba::mtp::invokeSelectiveStateUpdateMTP<__nv_bfloat16, // input_t
+                                                          __nv_bfloat16, // weight_t (dt_bias, D)
+                                                          float,         // matrixA_t (A_log)
+                                                          __nv_bfloat16, // state_t
+                                                          int32_t,       // stateIndex_t
+                                                          void           // state_scale_t (no quantized state)
+                                                          >(params, flashinfer::mamba::SSUAlgorithm::kAuto, stream);
 }
 
 } // namespace zedinfer::ops::mamba

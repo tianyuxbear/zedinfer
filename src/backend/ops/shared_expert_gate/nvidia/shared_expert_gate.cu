@@ -10,10 +10,9 @@ namespace zedinfer::ops {
 namespace {
 
 // One CTA per token. Each thread strides over the hidden dim.
-__global__ void shared_expert_gate_kernel(__nv_bfloat16* __restrict__ x,
-                                          const __nv_bfloat16* __restrict__ gate,
+__global__ void shared_expert_gate_kernel(__nv_bfloat16* __restrict__ x, const __nv_bfloat16* __restrict__ gate,
                                           int H) {
-    const int n   = blockIdx.x;
+    const int n = blockIdx.x;
     const int tid = threadIdx.x;
 
     // All threads in the CTA share the same per-token sigmoid scalar.
@@ -51,10 +50,8 @@ void shared_expert_gate(tensor_t x, tensor_t gate) {
 
     dim3 grid(static_cast<unsigned>(N));
     dim3 block(256);
-    shared_expert_gate_kernel<<<grid, block, 0, stream>>>(
-        reinterpret_cast<__nv_bfloat16*>(x->data()),
-        reinterpret_cast<const __nv_bfloat16*>(gate->data()),
-        H);
+    shared_expert_gate_kernel<<<grid, block, 0, stream>>>(reinterpret_cast<__nv_bfloat16*>(x->data()),
+                                                          reinterpret_cast<const __nv_bfloat16*>(gate->data()), H);
 
     cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) {

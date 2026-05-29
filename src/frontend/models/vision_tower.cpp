@@ -2,8 +2,8 @@
 
 #include "backend/core/context/context.hpp"
 #include "backend/device/runtime_api.hpp"
-#include "backend/ops/ops.hpp"
 #include "backend/ops/mamba/ssu.hpp"
+#include "backend/ops/ops.hpp"
 #include "backend/ops/scatter_image_embeds/scatter_image_embeds.hpp"
 #include "backend/ops/vision_attention/vision_attention.hpp"
 #include "utils/types.hpp"
@@ -40,31 +40,27 @@ VisionTower::VisionTower(const VisionConfig& cfg, const ModelWeights& w, const E
     //                          without paying the PCIe round-trip every time.
     //   rope_inv_freq_       : 1 / theta^(2k / axis_half), invariant across
     //                          requests; reused for cos/sin construction.
-    if (auto pos_embed_w = w.has_tensor("visual.pos_embed.weight") ? w.get_tensor("visual.pos_embed.weight")
-                                                                    : nullptr) {
+    if (auto pos_embed_w
+        = w.has_tensor("visual.pos_embed.weight") ? w.get_tensor("visual.pos_embed.weight") : nullptr) {
         const size_t numel = static_cast<size_t>(pos_embed_w->numel());
         std::vector<zedinfer::bf16_t> bf16_buf(numel);
         auto* api = core::context().runtime().api();
-        const auto kind = pos_embed_w->deviceType() == ZEDINFER_DEVICE_CPU ? ZEDINFER_MEMCPY_H2H
-                                                                              : ZEDINFER_MEMCPY_D2H;
+        const auto kind = pos_embed_w->deviceType() == ZEDINFER_DEVICE_CPU ? ZEDINFER_MEMCPY_H2H : ZEDINFER_MEMCPY_D2H;
         api->memcpy_sync(bf16_buf.data(), pos_embed_w->data(), numel * sizeof(zedinfer::bf16_t), kind);
         pos_embed_table_f32_.resize(numel);
-        for (size_t i = 0; i < numel; ++i) {
-            pos_embed_table_f32_[i] = utils::cast<float>(bf16_buf[i]);
-        }
+        for (size_t i = 0; i < numel; ++i) { pos_embed_table_f32_[i] = utils::cast<float>(bf16_buf[i]); }
         num_grid_per_side_ = static_cast<int>(std::sqrt(static_cast<double>(pos_embed_w->dim(0))));
         LOGI.printf("[VisionTower] cached pos_embed table [%zu, %d] f32 (%.1f MB) on host",
                     static_cast<size_t>(pos_embed_w->dim(0)), static_cast<int>(pos_embed_w->dim(1)),
                     static_cast<double>(numel * 4) / (1024.0 * 1024.0));
     }
     {
-        const int   axis_half  = (cfg.hidden_size / cfg.num_heads) / 2; // head_dim / 2
-        const int   freq_count = axis_half / 2;                          // head_dim / 4
-        const float theta      = 10000.0f;
+        const int axis_half = (cfg.hidden_size / cfg.num_heads) / 2; // head_dim / 2
+        const int freq_count = axis_half / 2;                        // head_dim / 4
+        const float theta = 10000.0f;
         rope_inv_freq_.resize(static_cast<size_t>(freq_count));
         for (int k = 0; k < freq_count; ++k) {
-            rope_inv_freq_[k]
-                = 1.0f / std::pow(theta, static_cast<float>(2 * k) / static_cast<float>(axis_half));
+            rope_inv_freq_[k] = 1.0f / std::pow(theta, static_cast<float>(2 * k) / static_cast<float>(axis_half));
         }
     }
 
@@ -87,16 +83,16 @@ tensor_t VisionTower::forward(tensor_t patches, tensor_t /*pos_ids_thw*/, int gr
     if (!weights_) {
         throw std::runtime_error("[VisionTower] forward called without weights bound");
     }
-    const ModelWeights& w        = *weights_;
-    const int           N        = static_cast<int>(patches->shape()[0]);
-    const int           H        = cfg_.hidden_size;
-    const int           Dh       = H / cfg_.num_heads;
-    const int           Inter    = cfg_.intermediate_size;
-    const int           OutH     = cfg_.out_hidden_size;
-    const int           sms      = cfg_.spatial_merge_size;
-    const int           merged_n = N / (sms * sms);
-    const int           grid_hm  = grid_h / sms;
-    const int           grid_wm  = grid_w / sms;
+    const ModelWeights& w = *weights_;
+    const int N = static_cast<int>(patches->shape()[0]);
+    const int H = cfg_.hidden_size;
+    const int Dh = H / cfg_.num_heads;
+    const int Inter = cfg_.intermediate_size;
+    const int OutH = cfg_.out_hidden_size;
+    const int sms = cfg_.spatial_merge_size;
+    const int merged_n = N / (sms * sms);
+    const int grid_hm = grid_h / sms;
+    const int grid_wm = grid_w / sms;
 
     if (merged_n <= 0 || merged_n * sms * sms != N) {
         throw std::runtime_error("[VisionTower] N=" + std::to_string(N) + " not divisible by spatial_merge^2 ("
@@ -127,9 +123,9 @@ tensor_t VisionTower::forward(tensor_t patches, tensor_t /*pos_ids_thw*/, int gr
     //    so ops::linear (a standard GEMM + bias) reproduces Conv3d's effect
     //    (kernel = stride = patch size means each output position consumes
     //    exactly one input patch — pure linear projection).
-    auto hidden       = make({static_cast<size_t>(N), static_cast<size_t>(H)});
-    auto pe_w_raw     = w.get_tensor("visual.patch_embed.proj.weight");
-    tensor_t pe_w     = pe_w_raw;
+    auto hidden = make({static_cast<size_t>(N), static_cast<size_t>(H)});
+    auto pe_w_raw = w.get_tensor("visual.patch_embed.proj.weight");
+    tensor_t pe_w = pe_w_raw;
     if (pe_w_raw->shape().size() > 2) {
         pe_w = pe_w_raw->view({pe_w_raw->dim(0), pe_w_raw->numel() / pe_w_raw->dim(0)});
     }
@@ -140,7 +136,7 @@ tensor_t VisionTower::forward(tensor_t patches, tensor_t /*pos_ids_thw*/, int gr
     //    interpolation runs on the cached host fp32 copy then a single H2D
     //    upload provides the additive bf16 contribution.
     if (!pos_embed_table_f32_.empty()) {
-        const int NGS  = num_grid_per_side_;
+        const int NGS = num_grid_per_side_;
         const int PE_H = H; // pos_embed second dim == hidden_size by construction
 
         const float h_scale = (grid_h > 1) ? (static_cast<float>(NGS - 1) / static_cast<float>(grid_h - 1)) : 0.0f;
@@ -149,26 +145,24 @@ tensor_t VisionTower::forward(tensor_t patches, tensor_t /*pos_ids_thw*/, int gr
         std::vector<float> pos_out_f32(static_cast<size_t>(N) * PE_H, 0.0f);
         for (int ph = 0; ph < grid_h; ++ph) {
             const float h_pos = static_cast<float>(ph) * h_scale;
-            int         h_lo  = std::min(static_cast<int>(std::floor(h_pos)), NGS - 1);
-            int         h_hi  = std::min(h_lo + 1, NGS - 1);
-            float       dh    = h_pos - static_cast<float>(h_lo);
+            int h_lo = std::min(static_cast<int>(std::floor(h_pos)), NGS - 1);
+            int h_hi = std::min(h_lo + 1, NGS - 1);
+            float dh = h_pos - static_cast<float>(h_lo);
             for (int pw = 0; pw < grid_w; ++pw) {
                 const float w_pos = static_cast<float>(pw) * w_scale;
-                int         w_lo  = std::min(static_cast<int>(std::floor(w_pos)), NGS - 1);
-                int         w_hi  = std::min(w_lo + 1, NGS - 1);
-                float       dw    = w_pos - static_cast<float>(w_lo);
-                const float w_tl  = (1.0f - dh) * (1.0f - dw);
-                const float w_tr  = (1.0f - dh) * dw;
-                const float w_bl  = dh * (1.0f - dw);
-                const float w_br  = dh * dw;
-                const float* tl   = pos_embed_table_f32_.data() + (h_lo * NGS + w_lo) * PE_H;
-                const float* tr   = pos_embed_table_f32_.data() + (h_lo * NGS + w_hi) * PE_H;
-                const float* bl   = pos_embed_table_f32_.data() + (h_hi * NGS + w_lo) * PE_H;
-                const float* br   = pos_embed_table_f32_.data() + (h_hi * NGS + w_hi) * PE_H;
-                float*       out  = pos_out_f32.data() + (ph * grid_w + pw) * PE_H;
-                for (int d = 0; d < PE_H; ++d) {
-                    out[d] = w_tl * tl[d] + w_tr * tr[d] + w_bl * bl[d] + w_br * br[d];
-                }
+                int w_lo = std::min(static_cast<int>(std::floor(w_pos)), NGS - 1);
+                int w_hi = std::min(w_lo + 1, NGS - 1);
+                float dw = w_pos - static_cast<float>(w_lo);
+                const float w_tl = (1.0f - dh) * (1.0f - dw);
+                const float w_tr = (1.0f - dh) * dw;
+                const float w_bl = dh * (1.0f - dw);
+                const float w_br = dh * dw;
+                const float* tl = pos_embed_table_f32_.data() + (h_lo * NGS + w_lo) * PE_H;
+                const float* tr = pos_embed_table_f32_.data() + (h_lo * NGS + w_hi) * PE_H;
+                const float* bl = pos_embed_table_f32_.data() + (h_hi * NGS + w_lo) * PE_H;
+                const float* br = pos_embed_table_f32_.data() + (h_hi * NGS + w_hi) * PE_H;
+                float* out = pos_out_f32.data() + (ph * grid_w + pw) * PE_H;
+                for (int d = 0; d < PE_H; ++d) { out[d] = w_tl * tl[d] + w_tr * tr[d] + w_bl * bl[d] + w_br * br[d]; }
             }
         }
 
@@ -177,7 +171,7 @@ tensor_t VisionTower::forward(tensor_t patches, tensor_t /*pos_ids_thw*/, int gr
             pos_out_bf16[i] = utils::cast<zedinfer::bf16_t>(pos_out_f32[i]);
         }
         auto pos_t = make({static_cast<size_t>(N), static_cast<size_t>(PE_H)}, ZEDINFER_DTYPE_BF16);
-        auto* api  = core::context().runtime().api();
+        auto* api = core::context().runtime().api();
         api->memcpy_sync(pos_t->data(), pos_out_bf16.data(), pos_out_bf16.size() * sizeof(zedinfer::bf16_t),
                          exec.device_type == ZEDINFER_DEVICE_CPU ? ZEDINFER_MEMCPY_H2H : ZEDINFER_MEMCPY_H2D);
         ops::add(hidden, hidden, pos_t);
@@ -185,18 +179,18 @@ tensor_t VisionTower::forward(tensor_t patches, tensor_t /*pos_ids_thw*/, int gr
 
     // 3. 27 ViT blocks: pre-norm → qkv → vision_attention → proj + residual →
     //                   pre-norm → fc1 → gelu_tanh → fc2 + residual
-    auto h_norm   = make({static_cast<size_t>(N), static_cast<size_t>(H)});
-    auto qkv      = make({static_cast<size_t>(N), static_cast<size_t>(3 * H)});
+    auto h_norm = make({static_cast<size_t>(N), static_cast<size_t>(H)});
+    auto qkv = make({static_cast<size_t>(N), static_cast<size_t>(3 * H)});
     auto attn_out = make({static_cast<size_t>(N), static_cast<size_t>(cfg_.num_heads), static_cast<size_t>(Dh)});
     auto proj_out = make({static_cast<size_t>(N), static_cast<size_t>(H)});
-    auto fc1      = make({static_cast<size_t>(N), static_cast<size_t>(Inter)});
-    auto fc2      = make({static_cast<size_t>(N), static_cast<size_t>(H)});
-    auto q_buf    = make({static_cast<size_t>(N), static_cast<size_t>(cfg_.num_heads), static_cast<size_t>(Dh)});
-    auto k_buf    = make({static_cast<size_t>(N), static_cast<size_t>(cfg_.num_heads), static_cast<size_t>(Dh)});
-    auto v_buf    = make({static_cast<size_t>(N), static_cast<size_t>(cfg_.num_heads), static_cast<size_t>(Dh)});
+    auto fc1 = make({static_cast<size_t>(N), static_cast<size_t>(Inter)});
+    auto fc2 = make({static_cast<size_t>(N), static_cast<size_t>(H)});
+    auto q_buf = make({static_cast<size_t>(N), static_cast<size_t>(cfg_.num_heads), static_cast<size_t>(Dh)});
+    auto k_buf = make({static_cast<size_t>(N), static_cast<size_t>(cfg_.num_heads), static_cast<size_t>(Dh)});
+    auto v_buf = make({static_cast<size_t>(N), static_cast<size_t>(cfg_.num_heads), static_cast<size_t>(Dh)});
 
-    const float  scale = 1.0f / std::sqrt(static_cast<float>(Dh));
-    const size_t elt   = utils::dsize(exec.data_type);
+    const float scale = 1.0f / std::sqrt(static_cast<float>(Dh));
+    const size_t elt = utils::dsize(exec.data_type);
 
     // 2-D RoPE cos/sin tables. HF Qwen3.5-VL applies a 2-D rotary embedding:
     //   - head_dim = Dh; split in half (first Dh/2 dims = row index, second
@@ -213,11 +207,11 @@ tensor_t VisionTower::forward(tensor_t patches, tensor_t /*pos_ids_thw*/, int gr
     //   - cos/sin are element-wise cosf/sinf of that.
     tensor_t cos_t, sin_t;
     {
-        const int axis_half  = Dh / 2;
+        const int axis_half = Dh / 2;
         const int freq_count = axis_half / 2; // == Dh/4
         // freq_table[p, k] = p * inv_freq[k]; p ranges over max(grid_h, grid_w).
         // Reuses ctor-cached rope_inv_freq_.
-        const int          max_side = std::max(grid_h, grid_w);
+        const int max_side = std::max(grid_h, grid_w);
         std::vector<float> freq_table(static_cast<size_t>(max_side) * freq_count);
         for (int p = 0; p < max_side; ++p) {
             for (int k = 0; k < freq_count; ++k) {
@@ -234,21 +228,21 @@ tensor_t VisionTower::forward(tensor_t patches, tensor_t /*pos_ids_thw*/, int gr
         // sees the same axis (h pairs with h, w pairs with w).
         for (int ph = 0; ph < grid_h; ++ph) {
             for (int pw = 0; pw < grid_w; ++pw) {
-                const int n  = ph * grid_w + pw;
-                float*    cr = cos_host.data() + static_cast<size_t>(n) * Dh;
-                float*    sr = sin_host.data() + static_cast<size_t>(n) * Dh;
+                const int n = ph * grid_w + pw;
+                float* cr = cos_host.data() + static_cast<size_t>(n) * Dh;
+                float* sr = sin_host.data() + static_cast<size_t>(n) * Dh;
                 for (int k = 0; k < freq_count; ++k) {
                     const float v_h = freq_table[ph * freq_count + k];
                     const float v_w = freq_table[pw * freq_count + k];
                     // First half [0, axis_half): h then w.
-                    cr[k]                          = std::cos(v_h);
-                    cr[k + freq_count]             = std::cos(v_w);
-                    sr[k]                          = std::sin(v_h);
-                    sr[k + freq_count]             = std::sin(v_w);
+                    cr[k] = std::cos(v_h);
+                    cr[k + freq_count] = std::cos(v_w);
+                    sr[k] = std::sin(v_h);
+                    sr[k + freq_count] = std::sin(v_w);
                     // Second half [axis_half, 2*axis_half=Dh): repeat of first half.
-                    cr[axis_half + k]              = std::cos(v_h);
+                    cr[axis_half + k] = std::cos(v_h);
                     cr[axis_half + k + freq_count] = std::cos(v_w);
-                    sr[axis_half + k]              = std::sin(v_h);
+                    sr[axis_half + k] = std::sin(v_h);
                     sr[axis_half + k + freq_count] = std::sin(v_w);
                 }
             }
@@ -262,8 +256,7 @@ tensor_t VisionTower::forward(tensor_t patches, tensor_t /*pos_ids_thw*/, int gr
         cos_t = make({static_cast<size_t>(N), static_cast<size_t>(Dh)}, ZEDINFER_DTYPE_BF16);
         sin_t = make({static_cast<size_t>(N), static_cast<size_t>(Dh)}, ZEDINFER_DTYPE_BF16);
         auto* api = core::context().runtime().api();
-        const auto kind
-            = exec.device_type == ZEDINFER_DEVICE_CPU ? ZEDINFER_MEMCPY_H2H : ZEDINFER_MEMCPY_H2D;
+        const auto kind = exec.device_type == ZEDINFER_DEVICE_CPU ? ZEDINFER_MEMCPY_H2H : ZEDINFER_MEMCPY_H2D;
         api->memcpy_sync(cos_t->data(), cos_bf16.data(), cos_bf16.size() * sizeof(zedinfer::bf16_t), kind);
         api->memcpy_sync(sin_t->data(), sin_bf16.data(), sin_bf16.size() * sizeof(zedinfer::bf16_t), kind);
     }
@@ -279,14 +272,14 @@ tensor_t VisionTower::forward(tensor_t patches, tensor_t /*pos_ids_thw*/, int gr
         // via strided memcpy2D — vision_attention's naive kernel reads each
         // tensor as a contiguous [N, H, D] block.
         ops::mamba::copy_strided_rows(q_buf->view({static_cast<size_t>(N), static_cast<size_t>(H)}), qkv,
-                                       /*src_offset=*/0, /*slice_width=*/static_cast<size_t>(H),
-                                       /*src_width=*/static_cast<size_t>(3 * H), static_cast<size_t>(N), elt);
+                                      /*src_offset=*/0, /*slice_width=*/static_cast<size_t>(H),
+                                      /*src_width=*/static_cast<size_t>(3 * H), static_cast<size_t>(N), elt);
         ops::mamba::copy_strided_rows(k_buf->view({static_cast<size_t>(N), static_cast<size_t>(H)}), qkv,
-                                       static_cast<size_t>(H), static_cast<size_t>(H), static_cast<size_t>(3 * H),
-                                       static_cast<size_t>(N), elt);
+                                      static_cast<size_t>(H), static_cast<size_t>(H), static_cast<size_t>(3 * H),
+                                      static_cast<size_t>(N), elt);
         ops::mamba::copy_strided_rows(v_buf->view({static_cast<size_t>(N), static_cast<size_t>(H)}), qkv,
-                                       static_cast<size_t>(2 * H), static_cast<size_t>(H), static_cast<size_t>(3 * H),
-                                       static_cast<size_t>(N), elt);
+                                      static_cast<size_t>(2 * H), static_cast<size_t>(H), static_cast<size_t>(3 * H),
+                                      static_cast<size_t>(N), elt);
 
         // Apply Qwen3.5-VL's 2-D RoPE to q and k before attention. Same
         // cos/sin reused across all 27 blocks.
@@ -294,10 +287,10 @@ tensor_t VisionTower::forward(tensor_t patches, tensor_t /*pos_ids_thw*/, int gr
         ops::apply_rotary_emb_inplace(k_buf, cos_t, sin_t);
 
         ops::VisionAttentionParams ap;
-        ap.q     = q_buf;
-        ap.k     = k_buf;
-        ap.v     = v_buf;
-        ap.out   = attn_out;
+        ap.q = q_buf;
+        ap.k = k_buf;
+        ap.v = v_buf;
+        ap.out = attn_out;
         ap.scale = scale;
         ops::vision_attention(ap);
 
@@ -331,7 +324,7 @@ tensor_t VisionTower::forward(tensor_t patches, tensor_t /*pos_ids_thw*/, int gr
     for (int my = 0; my < grid_hm; ++my) {
         for (int mx = 0; mx < grid_wm; ++mx) {
             const int merged_idx = my * grid_wm + mx;
-            int       slot       = 0;
+            int slot = 0;
             for (int sy = 0; sy < sms; ++sy) {
                 for (int sx = 0; sx < sms; ++sx) {
                     const int orig_row = (my * sms + sy) * grid_w + (mx * sms + sx);
@@ -341,8 +334,8 @@ tensor_t VisionTower::forward(tensor_t patches, tensor_t /*pos_ids_thw*/, int gr
             }
         }
     }
-    auto idx_t    = make({gather_idx.size()}, ZEDINFER_DTYPE_I32);
-    auto* api     = core::context().runtime().api();
+    auto idx_t = make({gather_idx.size()}, ZEDINFER_DTYPE_I32);
+    auto* api = core::context().runtime().api();
     api->memcpy_sync(idx_t->data(), gather_idx.data(), gather_idx.size() * sizeof(int32_t),
                      exec.device_type == ZEDINFER_DEVICE_CPU ? ZEDINFER_MEMCPY_H2H : ZEDINFER_MEMCPY_H2D);
     auto gathered = make({gather_idx.size(), static_cast<size_t>(H)});
@@ -350,16 +343,16 @@ tensor_t VisionTower::forward(tensor_t patches, tensor_t /*pos_ids_thw*/, int gr
     auto merged_in = gathered->view({static_cast<size_t>(merged_n), static_cast<size_t>(sms * sms * H)});
 
     // Merger MLP fc1 + GELU + fc2.
-    auto fc1_w           = w.get_tensor("visual.merger.linear_fc1.weight");
-    auto fc1_b           = maybe_get(w, "visual.merger.linear_fc1.bias");
+    auto fc1_w = w.get_tensor("visual.merger.linear_fc1.weight");
+    auto fc1_b = maybe_get(w, "visual.merger.linear_fc1.bias");
     const size_t fc1_out = fc1_w->dim(0);
-    auto         m_fc1   = make({static_cast<size_t>(merged_n), fc1_out});
+    auto m_fc1 = make({static_cast<size_t>(merged_n), fc1_out});
     ops::linear(m_fc1, merged_in, fc1_w, fc1_b);
     ops::gelu_tanh(m_fc1, m_fc1);
 
     auto fc2_w = w.get_tensor("visual.merger.linear_fc2.weight");
     auto fc2_b = maybe_get(w, "visual.merger.linear_fc2.bias");
-    auto out   = make({static_cast<size_t>(merged_n), static_cast<size_t>(OutH)});
+    auto out = make({static_cast<size_t>(merged_n), static_cast<size_t>(OutH)});
     ops::linear(out, m_fc1, fc2_w, fc2_b);
     return out;
 }

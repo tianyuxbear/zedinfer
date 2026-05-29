@@ -40,20 +40,19 @@ namespace {
 //
 // freq = exp(-theta_log * (2*pi) / (2*half)) — equivalent to theta^(-(2*pi)/(2*half))
 // but cheaper because half is small and theta_log is precomputed on the host.
-__global__ void mrope_3d_kernel(__nv_bfloat16* __restrict__ x,
-                                const int32_t* __restrict__ pos_t,
-                                const int32_t* __restrict__ pos_h,
-                                const int32_t* __restrict__ pos_w,
-                                int N, int H, int Dh, int half, int s0, int s1, int s2,
-                                int interleaved, float theta_log) {
-    const int idx   = blockIdx.x * blockDim.x + threadIdx.x;
+__global__ void mrope_3d_kernel(__nv_bfloat16* __restrict__ x, const int32_t* __restrict__ pos_t,
+                                const int32_t* __restrict__ pos_h, const int32_t* __restrict__ pos_w, int N, int H,
+                                int Dh, int half, int s0, int s1, int s2, int interleaved, float theta_log) {
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
     const int total = N * H * half;
-    if (idx >= total) return;
+    if (idx >= total) {
+        return;
+    }
 
-    const int pi  = idx % half;
+    const int pi = idx % half;
     const int tmp = idx / half;
-    const int hd  = tmp % H;
-    const int n   = tmp / H;
+    const int hd = tmp % H;
+    const int n = tmp / H;
 
     int axis;
     if (interleaved) {
@@ -70,14 +69,11 @@ __global__ void mrope_3d_kernel(__nv_bfloat16* __restrict__ x,
     } else {
         axis = (pi < s0) ? 0 : (pi < s0 + s1) ? 1 : 2;
     }
-    const int pos_val = (axis == 0) ? pos_t[n]
-                                    : (axis == 1) ? pos_h[n]
-                                                  : pos_w[n];
+    const int pos_val = (axis == 0) ? pos_t[n] : (axis == 1) ? pos_h[n] : pos_w[n];
 
     // freq = exp(-theta_log * (2*pi) / (2*half))
-    const float exponent = -theta_log * static_cast<float>(2 * pi) /
-                           static_cast<float>(2 * half);
-    const float freq  = __expf(exponent);
+    const float exponent = -theta_log * static_cast<float>(2 * pi) / static_cast<float>(2 * half);
+    const float freq = __expf(exponent);
     const float angle = static_cast<float>(pos_val) * freq;
     float c, s;
     __sincosf(angle, &s, &c);
@@ -85,8 +81,8 @@ __global__ void mrope_3d_kernel(__nv_bfloat16* __restrict__ x,
     // HF rotate_half pair: slot pi (low half) and slot pi+half (high half),
     // both rotated by the same angle. Matches q_embed = q*cos + rotate_half(q)*sin.
     const int row_base = (n * H + hd) * Dh;
-    const int idx_lo   = row_base + pi;
-    const int idx_hi   = row_base + pi + half;
+    const int idx_lo = row_base + pi;
+    const int idx_hi = row_base + pi + half;
     const float a = __bfloat162float(x[idx_lo]);
     const float b = __bfloat162float(x[idx_hi]);
     x[idx_lo] = __float2bfloat16(a * c - b * s);
@@ -112,18 +108,20 @@ void mrope_3d(tensor_t x, tensor_t pos_ids_thw, const model::MRoPEConfig& cfg) {
         throw std::runtime_error("ops::mrope_3d: pos_ids_thw must be int32");
     }
 
-    const int N  = static_cast<int>(x->shape()[0]);
-    const int H  = static_cast<int>(x->shape()[1]);
+    const int N = static_cast<int>(x->shape()[0]);
+    const int H = static_cast<int>(x->shape()[1]);
     const int Dh = static_cast<int>(x->shape()[2]);
-    int Dh_rot   = static_cast<int>(static_cast<float>(Dh) * cfg.partial_factor);
-    if (Dh_rot % 2 != 0) --Dh_rot;
+    int Dh_rot = static_cast<int>(static_cast<float>(Dh) * cfg.partial_factor);
+    if (Dh_rot % 2 != 0) {
+        --Dh_rot;
+    }
     if (Dh_rot <= 0 || N <= 0 || H <= 0) {
         return; // Nothing to rotate; pass-through dims stay untouched.
     }
     const int half = Dh_rot / 2;
 
     auto* x_ptr = reinterpret_cast<__nv_bfloat16*>(x->data());
-    auto* pos   = reinterpret_cast<const int32_t*>(pos_ids_thw->data());
+    auto* pos = reinterpret_cast<const int32_t*>(pos_ids_thw->data());
     const int32_t* pos_t = pos + 0 * N;
     const int32_t* pos_h = pos + 1 * N;
     const int32_t* pos_w = pos + 2 * N;
@@ -138,14 +136,12 @@ void mrope_3d(tensor_t x, tensor_t pos_ids_thw, const model::MRoPEConfig& cfg) {
     // logf(theta) is float-only; host std::log gives the same result for
     // theta <= 1e7, but using logf keeps the float pipeline consistent.
     const float theta_log = std::log(cfg.theta);
-    mrope_3d_kernel<<<grid, block, 0, stream>>>(x_ptr, pos_t, pos_h, pos_w, N, H, Dh, half,
-                                                cfg.section[0], cfg.section[1], cfg.section[2],
-                                                cfg.interleaved ? 1 : 0, theta_log);
+    mrope_3d_kernel<<<grid, block, 0, stream>>>(x_ptr, pos_t, pos_h, pos_w, N, H, Dh, half, cfg.section[0],
+                                                cfg.section[1], cfg.section[2], cfg.interleaved ? 1 : 0, theta_log);
 
     const auto err = cudaGetLastError();
     if (err != cudaSuccess) {
-        throw std::runtime_error(std::string("ops::mrope_3d: kernel launch failed: ") +
-                                 cudaGetErrorString(err));
+        throw std::runtime_error(std::string("ops::mrope_3d: kernel launch failed: ") + cudaGetErrorString(err));
     }
 }
 

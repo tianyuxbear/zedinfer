@@ -37,8 +37,8 @@ struct GDNParams {
     tensor_t q;
     tensor_t k;
     tensor_t v;
-    tensor_t b;       // beta input (sigmoid applied in-kernel)
-    tensor_t a;       // gate input (softplus + decay applied in-kernel)
+    tensor_t b; // beta input (sigmoid applied in-kernel)
+    tensor_t a; // gate input (softplus + decay applied in-kernel)
 
     // Persistent weights
     tensor_t A_log;

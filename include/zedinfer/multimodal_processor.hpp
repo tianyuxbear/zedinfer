@@ -13,8 +13,8 @@ namespace zedinfer {
 
 // Raw decoded image: H × W × 3 RGB bytes in row-major order.
 struct ImagePayload {
-    int                  height = 0;
-    int                  width  = 0;
+    int height = 0;
+    int width = 0;
     std::vector<uint8_t> rgb_pixels;
 };
 
@@ -23,12 +23,12 @@ struct ImagePayload {
 // MRoPE inside the ViT. `num_image_tokens` is the number of LLM-side
 // <|image_pad|> tokens that VisionTower will produce (after spatial merge).
 struct ProcessedImage {
-    tensor_t patches;             // [N_patches, in_channels * T_patch * H_patch * W_patch]
-    tensor_t pos_ids_thw;         // [N_patches, 3] int32
-    int      num_image_tokens = 0;
-    int      grid_t           = 0;
-    int      grid_h           = 0;
-    int      grid_w           = 0;
+    tensor_t patches;     // [N_patches, in_channels * T_patch * H_patch * W_patch]
+    tensor_t pos_ids_thw; // [N_patches, 3] int32
+    int num_image_tokens = 0;
+    int grid_t = 0;
+    int grid_h = 0;
+    int grid_w = 0;
 };
 
 // Decodes OpenAI-style image_url data URIs into raw RGB and runs the

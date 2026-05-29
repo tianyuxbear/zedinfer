@@ -93,8 +93,7 @@ ChatTemplateJinja ChatTemplateJinja::load(const std::string& template_file) {
     // tokenizer_config.json.
     impl->tpl = std::make_unique<minja::chat_template>(source, /*bos_token=*/"", /*eos_token=*/"");
 
-    LOGI << "[ChatTemplateJinja] Compiled chat template from " << template_file
-         << " (" << source.size() << " bytes)";
+    LOGI << "[ChatTemplateJinja] Compiled chat template from " << template_file << " (" << source.size() << " bytes)";
 
     ChatTemplateJinja out;
     out.impl_ = std::move(impl);
@@ -121,9 +120,7 @@ std::string ChatTemplateJinja::render(const std::vector<ChatMessageMM>& messages
 
     nlohmann::ordered_json msgs_json = nlohmann::ordered_json::array();
     msgs_json.get_ptr<nlohmann::ordered_json::array_t*>()->reserve(messages.size());
-    for (const auto& m : messages) {
-        msgs_json.push_back(to_json_message(m));
-    }
+    for (const auto& m : messages) { msgs_json.push_back(to_json_message(m)); }
 
     minja::chat_template_inputs inputs;
     inputs.messages = std::move(msgs_json);

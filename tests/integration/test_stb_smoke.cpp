@@ -11,8 +11,7 @@
 
 TEST(StbSmoke, DecodesTinyFixturePng) {
     int w = 0, h = 0, ch = 0;
-    unsigned char* pixels =
-        stbi_load("tests/fixtures/tiny_4x4.png", &w, &h, &ch, /*desired_channels=*/3);
+    unsigned char* pixels = stbi_load("tests/fixtures/tiny_4x4.png", &w, &h, &ch, /*desired_channels=*/3);
     ASSERT_NE(pixels, nullptr) << "stbi_load: " << stbi_failure_reason();
     EXPECT_EQ(w, 4);
     EXPECT_EQ(h, 4);

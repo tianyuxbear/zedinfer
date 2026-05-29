@@ -35,18 +35,17 @@ template <> __device__ __forceinline__ half from_f32_dev<half>(float v) {
 // registers, then writes BOTH halves with the rotated values. No syncthreads
 // needed because each lower-half element pairs with a unique upper-half
 // element handled by the same thread.
-template <typename T>
-__global__ void apply_rotary_emb_kernel(T* q, const T* cos, const T* sin, int N, int H, int D) {
+template <typename T> __global__ void apply_rotary_emb_kernel(T* q, const T* cos, const T* sin, int N, int H, int D) {
     const int half = D / 2;
-    const int n    = blockIdx.x;
-    const int h    = blockIdx.y;
-    const int d    = blockIdx.z * blockDim.x + threadIdx.x;
+    const int n = blockIdx.x;
+    const int h = blockIdx.y;
+    const int d = blockIdx.z * blockDim.x + threadIdx.x;
     if (d >= half) {
         return;
     }
-    const size_t base    = (static_cast<size_t>(n) * H + h) * D;
-    const size_t cos_lo  = static_cast<size_t>(n) * D + d;
-    const size_t cos_hi  = cos_lo + half;
+    const size_t base = (static_cast<size_t>(n) * H + h) * D;
+    const size_t cos_lo = static_cast<size_t>(n) * D + d;
+    const size_t cos_hi = cos_lo + half;
 
     const float q_lo = to_f32_dev<T>(q[base + d]);
     const float q_hi = to_f32_dev<T>(q[base + d + half]);
@@ -55,17 +54,16 @@ __global__ void apply_rotary_emb_kernel(T* q, const T* cos, const T* sin, int N,
     const float s_lo = to_f32_dev<T>(sin[cos_lo]);
     const float s_hi = to_f32_dev<T>(sin[cos_hi]);
 
-    q[base + d]        = from_f32_dev<T>(q_lo * c_lo - q_hi * s_lo);
+    q[base + d] = from_f32_dev<T>(q_lo * c_lo - q_hi * s_lo);
     q[base + d + half] = from_f32_dev<T>(q_hi * c_hi + q_lo * s_hi);
 }
 
-template <typename T>
-void launch(T* q, const T* cos, const T* sin, int N, int H, int D, cudaStream_t stream) {
+template <typename T> void launch(T* q, const T* cos, const T* sin, int N, int H, int D, cudaStream_t stream) {
     constexpr int BLOCK = 64;
-    const int     half  = D / 2;
-    dim3          grid(static_cast<unsigned int>(N), static_cast<unsigned int>(H),
-                       static_cast<unsigned int>((half + BLOCK - 1) / BLOCK));
-    dim3          block(BLOCK);
+    const int half = D / 2;
+    dim3 grid(static_cast<unsigned int>(N), static_cast<unsigned int>(H),
+              static_cast<unsigned int>((half + BLOCK - 1) / BLOCK));
+    dim3 block(BLOCK);
     apply_rotary_emb_kernel<T><<<grid, block, 0, stream>>>(q, cos, sin, N, H, D);
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {

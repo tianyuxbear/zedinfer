@@ -46,7 +46,7 @@ public:
     SSMStatePool& ssm_state_pool() { return *ssm_pool_; }
     const SSMStatePool& ssm_state_pool() const { return *ssm_pool_; }
     const VisionTower* vision_tower() const { return vision_.get(); }
-    VisionTower*       vision_tower() { return vision_.get(); }
+    VisionTower* vision_tower() { return vision_.get(); }
 
     // Nullable accessor: returns nullptr when chat_template.jinja was missing
     // from the model directory (e.g. unit-test fixtures without the file).
@@ -57,7 +57,7 @@ public:
     // the MoE subclass builds it for MoE MTP layers (35B-A3B). The scheduler
     // probes mtp_module()->ready() to gate spec decode for both.
     const MTPModule* mtp_module() const { return mtp_.get(); }
-    MTPModule*       mtp_module() { return mtp_.get(); }
+    MTPModule* mtp_module() { return mtp_.get(); }
 
 protected:
     Qwen3_5Config config_;

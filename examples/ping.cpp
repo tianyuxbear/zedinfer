@@ -115,7 +115,8 @@ int main(int argc, char* argv[]) {
             return 0;
         }
         std::cerr << "[ping] engine init failed: " << msg << "\n";
-        std::cerr << "       Hint: pinned-host memory or VRAM may be insufficient; try --gpu-memory-utilization 0.5 or a smaller model.\n";
+        std::cerr << "       Hint: pinned-host memory or VRAM may be insufficient; try --gpu-memory-utilization 0.5 or "
+                     "a smaller model.\n";
         return 3;
     }
     auto t1 = std::chrono::high_resolution_clock::now();
@@ -132,12 +133,10 @@ int main(int argc, char* argv[]) {
     gen_config.print_stats = true;
     if (program.get<bool>("--stream")) {
         gen_config.stream = true;
-        gen_config.stream_callback = [](const std::string& tok) {
-            std::cout << tok << std::flush;
-        };
+        gen_config.stream_callback = [](const std::string& tok) { std::cout << tok << std::flush; };
     }
 
-    auto prompt     = program.get<std::string>("--prompt");
+    auto prompt = program.get<std::string>("--prompt");
     auto image_path = program.get<std::string>("--image");
 
     // Multimodal path: bypass InferenceSession (it does not understand
@@ -199,13 +198,12 @@ int main(int argc, char* argv[]) {
         parts.push_back(ImagePart{data_uri});
         parts.push_back(TextPart{prompt});
         mm_messages[0].content = std::move(parts);
-        std::string rendered = jinja->render(mm_messages, /*add_generation_prompt=*/true,
-                                              gen_config.enable_thinking);
+        std::string rendered = jinja->render(mm_messages, /*add_generation_prompt=*/true, gen_config.enable_thinking);
 
         // 4. Expand the single <|image_pad|> placeholder to N copies so the
         //    tokenized input_ids matches the vision tower output row count.
         const std::string pad = "<|image_pad|>";
-        std::string       expanded;
+        std::string expanded;
         expanded.reserve(rendered.size() + n_image_tokens * pad.size());
         size_t pos = rendered.find(pad);
         if (pos == std::string::npos) {
@@ -213,20 +211,18 @@ int main(int argc, char* argv[]) {
             return 4;
         }
         expanded.append(rendered, 0, pos);
-        for (int k = 0; k < n_image_tokens; ++k) {
-            expanded.append(pad);
-        }
+        for (int k = 0; k < n_image_tokens; ++k) { expanded.append(pad); }
         expanded.append(rendered, pos + pad.size(), rendered.size() - pos - pad.size());
 
         std::vector<int> input_ids = engine->tokenizer().encode(expanded);
-        tensor_t         input_embeds = engine->build_multimodal_input_embeds(input_ids, {image_embed});
+        tensor_t input_embeds = engine->build_multimodal_input_embeds(input_ids, {image_embed});
 
         // 5. Submit the request directly to the serving loop.
         auto cancel_flag = std::make_shared<std::atomic<bool>>(false);
-        auto req         = std::make_unique<InferenceRequest>();
-        req->input_ids   = std::move(input_ids);
-        req->config      = gen_config;
-        req->cancelled   = cancel_flag;
+        auto req = std::make_unique<InferenceRequest>();
+        req->input_ids = std::move(input_ids);
+        req->config = gen_config;
+        req->cancelled = cancel_flag;
         if (gen_config.stream) {
             req->stream_callback = gen_config.stream_callback;
         }
@@ -246,9 +242,7 @@ int main(int argc, char* argv[]) {
             } else {
                 std::cout << std::endl;
             }
-        } catch (const std::exception& e) {
-            std::cerr << "[ping] generation failed: " << e.what() << "\n";
-        }
+        } catch (const std::exception& e) { std::cerr << "[ping] generation failed: " << e.what() << "\n"; }
         engine->serving_loop().stop();
         serving_thread.join();
         return 0;

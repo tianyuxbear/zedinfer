@@ -29,8 +29,7 @@ namespace {
 // Float reference path (correctness baseline). All loads/stores are routed
 // through utils::cast<> so the same code services bf16 and f32 inputs.
 template <typename T>
-void causal_conv1d_typed(T* out_ptr, const T* x_ptr, const T* w_ptr, T* state_ptr,
-                         int N, int D, int K) {
+void causal_conv1d_typed(T* out_ptr, const T* x_ptr, const T* w_ptr, T* state_ptr, int N, int D, int K) {
     // Per-token: window[0..K-1] = (state | x)[n-K+1 .. n];
     //            y[n,d] = silu(sum_i w[d,0,i] * window[i,d]).
     for (int n = 0; n < N; ++n) {
@@ -50,7 +49,7 @@ void causal_conv1d_typed(T* out_ptr, const T* x_ptr, const T* w_ptr, T* state_pt
                 acc += v * utils::cast<float>(w_ptr[d * K + i]);
             }
             // SiLU: x * sigmoid(x).
-            const float s      = 1.0f / (1.0f + std::exp(-acc));
+            const float s = 1.0f / (1.0f + std::exp(-acc));
             out_ptr[n * D + d] = utils::cast<T>(acc * s);
         }
     }
@@ -58,9 +57,7 @@ void causal_conv1d_typed(T* out_ptr, const T* x_ptr, const T* w_ptr, T* state_pt
     // Update state to the last (K-1) tokens of (state | x).
     if (N >= K - 1) {
         for (int i = 0; i < K - 1; ++i) {
-            for (int d = 0; d < D; ++d) {
-                state_ptr[i * D + d] = x_ptr[(N - (K - 1) + i) * D + d];
-            }
+            for (int d = 0; d < D; ++d) { state_ptr[i * D + d] = x_ptr[(N - (K - 1) + i) * D + d]; }
         }
     } else {
         // Save x tail first so the in-place state shift cannot clobber inputs
@@ -68,19 +65,16 @@ void causal_conv1d_typed(T* out_ptr, const T* x_ptr, const T* w_ptr, T* state_pt
         std::vector<T> tail_x(static_cast<size_t>(N) * static_cast<size_t>(D));
         for (int i = 0; i < N; ++i) {
             for (int d = 0; d < D; ++d) {
-                tail_x[static_cast<size_t>(i) * static_cast<size_t>(D) + static_cast<size_t>(d)] =
-                    x_ptr[i * D + d];
+                tail_x[static_cast<size_t>(i) * static_cast<size_t>(D) + static_cast<size_t>(d)] = x_ptr[i * D + d];
             }
         }
         for (int i = 0; i < K - 1 - N; ++i) {
-            for (int d = 0; d < D; ++d) {
-                state_ptr[i * D + d] = state_ptr[(i + N) * D + d];
-            }
+            for (int d = 0; d < D; ++d) { state_ptr[i * D + d] = state_ptr[(i + N) * D + d]; }
         }
         for (int i = 0; i < N; ++i) {
             for (int d = 0; d < D; ++d) {
-                state_ptr[(K - 1 - N + i) * D + d] =
-                    tail_x[static_cast<size_t>(i) * static_cast<size_t>(D) + static_cast<size_t>(d)];
+                state_ptr[(K - 1 - N + i) * D + d]
+                    = tail_x[static_cast<size_t>(i) * static_cast<size_t>(D) + static_cast<size_t>(d)];
             }
         }
     }
@@ -88,8 +82,7 @@ void causal_conv1d_typed(T* out_ptr, const T* x_ptr, const T* w_ptr, T* state_pt
 
 } // namespace
 
-void causal_conv1d(tensor_t out, tensor_t x, tensor_t weight,
-                   model::SSMStateView v, int slot_idx, int layer_idx) {
+void causal_conv1d(tensor_t out, tensor_t x, tensor_t weight, model::SSMStateView v, int slot_idx, int layer_idx) {
     if (!out || !x || !weight) {
         throw std::runtime_error("ops::mamba::causal_conv1d(cpu): null tensor input");
     }
@@ -109,8 +102,8 @@ void causal_conv1d(tensor_t out, tensor_t x, tensor_t weight,
     // state_ptr is offset to the (slot_idx, layer_idx) sub-buffer;
     // v.conv_stride_* are already in bytes per SSMStatePool's view contract.
     auto* state_byte_layer = reinterpret_cast<std::byte*>(v.conv_base)
-                            + static_cast<int64_t>(slot_idx)  * v.conv_stride_slot
-                            + static_cast<int64_t>(layer_idx) * v.conv_stride_layer;
+                           + static_cast<int64_t>(slot_idx) * v.conv_stride_slot
+                           + static_cast<int64_t>(layer_idx) * v.conv_stride_layer;
 
     switch (x->dtype()) {
         case ZEDINFER_DTYPE_BF16: {

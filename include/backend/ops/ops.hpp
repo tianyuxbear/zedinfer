@@ -21,8 +21,7 @@ void rearrange(tensor_t out, tensor_t in);
 // than around 0.0 (where typical Qwen3.5 weights live). The precision loss
 // compounds across 40 layers and causes the model to drift from HF after
 // ~16 generated tokens under greedy decoding.
-void rms_norm(tensor_t out, tensor_t in, tensor_t weight, float eps,
-              bool add_one_to_weight = false);
+void rms_norm(tensor_t out, tensor_t in, tensor_t weight, float eps, bool add_one_to_weight = false);
 
 // Fused residual+RMSNorm (in-place, GPU only — CPU path sequences add + rms_norm).
 //   residual := residual + input
@@ -30,8 +29,7 @@ void rms_norm(tensor_t out, tensor_t in, tensor_t weight, float eps,
 // Both `input` and `residual` are mutated. Maps to FlashInfer's FusedAddRMSNorm /
 // GemmaFusedAddRMSNorm under the hood; used to fuse the transformer residual-add
 // with the next sublayer's pre-norm (or the model's final norm at the last layer).
-void fused_add_rms_norm(tensor_t input, tensor_t residual, tensor_t weight, float eps,
-                        bool add_one_to_weight = false);
+void fused_add_rms_norm(tensor_t input, tensor_t residual, tensor_t weight, float eps, bool add_one_to_weight = false);
 
 // LayerNorm with affine + bias (the ViT path uses this; the LLM path uses
 // rms_norm). y = (x - mean(x)) / sqrt(var(x) + eps) * weight + bias, over the

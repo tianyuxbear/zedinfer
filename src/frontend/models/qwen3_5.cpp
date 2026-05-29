@@ -40,14 +40,16 @@ namespace {
 // and [q_dim, 2*q_dim) for gate. Reordering the stored weight once at load
 // time keeps that simple slice correct and avoids a per-call permute.
 void reorder_q_proj_weight(tensor_t w, int Hq, int Dh, int hidden) {
-    if (!w) return;
+    if (!w) {
+        return;
+    }
     if (w->dtype() != ZEDINFER_DTYPE_BF16) {
         throw std::runtime_error("[Qwen3_5Model] reorder_q_proj_weight: only bf16 supported");
     }
     const size_t total_rows = static_cast<size_t>(Hq) * 2 * static_cast<size_t>(Dh);
-    const size_t row_w      = static_cast<size_t>(hidden);
-    const size_t N          = total_rows * row_w;
-    auto*        api        = device::getRuntimeAPI(w->deviceType());
+    const size_t row_w = static_cast<size_t>(hidden);
+    const size_t N = total_rows * row_w;
+    auto* api = device::getRuntimeAPI(w->deviceType());
 
     std::vector<uint16_t> host(N);
     api->memcpy_sync(host.data(), w->data(), N * sizeof(uint16_t), ZEDINFER_MEMCPY_D2H);
@@ -56,10 +58,8 @@ void reorder_q_proj_weight(tensor_t w, int Hq, int Dh, int hidden) {
     const size_t q_block_rows = static_cast<size_t>(Hq) * static_cast<size_t>(Dh);
     for (size_t h = 0; h < static_cast<size_t>(Hq); ++h) {
         for (size_t k = 0; k < 2; ++k) {
-            const uint16_t* src = host.data()
-                                  + (h * 2 * static_cast<size_t>(Dh) + k * static_cast<size_t>(Dh)) * row_w;
-            uint16_t*       dst = reord.data()
-                                  + (k * q_block_rows + h * static_cast<size_t>(Dh)) * row_w;
+            const uint16_t* src = host.data() + (h * 2 * static_cast<size_t>(Dh) + k * static_cast<size_t>(Dh)) * row_w;
+            uint16_t* dst = reord.data() + (k * q_block_rows + h * static_cast<size_t>(Dh)) * row_w;
             std::memcpy(dst, src, static_cast<size_t>(Dh) * row_w * sizeof(uint16_t));
         }
     }
@@ -75,14 +75,18 @@ void reorder_q_proj_weight(tensor_t w, int Hq, int Dh, int hidden) {
 // requires same-dtype activations) once at load time so the forward path
 // doesn't do D2H+H2D every linear-attention layer every decode step.
 void cast_fp32_weight_to_bf16(ModelWeights& weights, const std::string& name) {
-    if (!weights.has_tensor(name)) return;
+    if (!weights.has_tensor(name)) {
+        return;
+    }
     tensor_t orig = weights.get_tensor(name);
-    if (!orig || orig->dtype() != ZEDINFER_DTYPE_F32) return;
+    if (!orig || orig->dtype() != ZEDINFER_DTYPE_F32) {
+        return;
+    }
 
     const size_t W = orig->numel();
-    auto*        api = device::getRuntimeAPI(orig->deviceType());
+    auto* api = device::getRuntimeAPI(orig->deviceType());
 
-    std::vector<float>    host_f32(W);
+    std::vector<float> host_f32(W);
     std::vector<uint16_t> host_bf16(W);
     api->memcpy_sync(host_f32.data(), orig->data(), W * sizeof(float), ZEDINFER_MEMCPY_D2H);
     for (size_t i = 0; i < W; ++i) {
@@ -104,7 +108,9 @@ void cast_fp32_weight_to_bf16(ModelWeights& weights, const std::string& name) {
 void fixup_qwen3_5_linear_attn_norm_weights(ModelWeights& weights, const Qwen3_5Config& cfg) {
     int count = 0;
     for (size_t L = 0; L < cfg.layer_types.size(); ++L) {
-        if (cfg.layer_types[L] != "linear_attention") continue;
+        if (cfg.layer_types[L] != "linear_attention") {
+            continue;
+        }
         const std::string name = "layers." + std::to_string(L) + ".linear_attn.norm.weight";
         if (weights.has_tensor(name) && weights.get_tensor(name)->dtype() == ZEDINFER_DTYPE_F32) {
             cast_fp32_weight_to_bf16(weights, name);
@@ -116,15 +122,15 @@ void fixup_qwen3_5_linear_attn_norm_weights(ModelWeights& weights, const Qwen3_5
 
 // Walk full-attention layers and reorder their q_proj weights.
 void fixup_qwen3_5_q_proj_weights(ModelWeights& weights, const Qwen3_5Config& cfg) {
-    const int Hq     = static_cast<int>(cfg.num_attention_heads);
-    const int Dh     = cfg.head_dim > 0
-                           ? cfg.head_dim
-                           : static_cast<int>(cfg.hidden_size / cfg.num_attention_heads);
+    const int Hq = static_cast<int>(cfg.num_attention_heads);
+    const int Dh = cfg.head_dim > 0 ? cfg.head_dim : static_cast<int>(cfg.hidden_size / cfg.num_attention_heads);
     const int hidden = static_cast<int>(cfg.hidden_size);
 
     int count = 0;
     for (size_t L = 0; L < cfg.layer_types.size(); ++L) {
-        if (cfg.layer_types[L] != "full_attention") continue;
+        if (cfg.layer_types[L] != "full_attention") {
+            continue;
+        }
         const std::string name = "layers." + std::to_string(L) + ".self_attn.q_proj.weight";
         if (weights.has_tensor(name)) {
             reorder_q_proj_weight(weights.get_tensor(name), Hq, Dh, hidden);
@@ -169,12 +175,12 @@ Qwen3_5Model::Qwen3_5Model(Qwen3_5Config config, std::unique_ptr<ModelWeights> w
 
     SSMStatePoolConfig pool_cfg;
     pool_cfg.num_linear_layers = num_linear;
-    pool_cfg.num_v_heads       = config_.linear_attn.num_v_heads;
-    pool_cfg.value_head_dim    = config_.linear_attn.value_head_dim;
-    pool_cfg.d_state           = config_.linear_attn.d_state;
-    pool_cfg.conv_kernel_dim   = config_.linear_attn.conv_kernel_dim;
-    pool_cfg.qkv_dim           = qkv_dim;
-    pool_cfg.max_concurrent    = std::max(1, max_concurrent);
+    pool_cfg.num_v_heads = config_.linear_attn.num_v_heads;
+    pool_cfg.value_head_dim = config_.linear_attn.value_head_dim;
+    pool_cfg.d_state = config_.linear_attn.d_state;
+    pool_cfg.conv_kernel_dim = config_.linear_attn.conv_kernel_dim;
+    pool_cfg.qkv_dim = qkv_dim;
+    pool_cfg.max_concurrent = std::max(1, max_concurrent);
     // Map the parsed state_dtype string (set in load_config) to the runtime
     // dtype enum the pool allocates with. Default to BF16 to match the model
     // dtype when the string is empty / unrecognised.
@@ -208,12 +214,11 @@ Qwen3_5Model::Qwen3_5Model(Qwen3_5Config config, std::unique_ptr<ModelWeights> w
         fs::path tpl_path = fs::path(model_path) / "chat_template.jinja";
         if (fs::exists(tpl_path)) {
             try {
-                chat_template_ = std::make_shared<ChatTemplateJinja>(
-                    ChatTemplateJinja::load(tpl_path.string()));
+                chat_template_ = std::make_shared<ChatTemplateJinja>(ChatTemplateJinja::load(tpl_path.string()));
                 LOGI << "[Qwen3_5Model] Loaded chat_template.jinja from " << tpl_path.string();
             } catch (const std::exception& e) {
-                LOGW << "[Qwen3_5Model] Failed to compile chat_template.jinja at " << tpl_path.string()
-                     << ": " << e.what();
+                LOGW << "[Qwen3_5Model] Failed to compile chat_template.jinja at " << tpl_path.string() << ": "
+                     << e.what();
             }
         } else {
             LOGI << "[Qwen3_5Model] No chat_template.jinja in " << model_path << "; skipping Jinja loader";
@@ -258,13 +263,13 @@ HybridForwardConfig Qwen3_5Model::hybrid_forward_config() const {
     for (const auto& t : config_.layer_types) {
         h.layer_kinds.push_back(t == "linear_attention" ? LayerKind::Linear : LayerKind::Full);
     }
-    h.linear_attn          = config_.linear_attn;
-    h.mrope.interleaved    = config_.mrope_interleaved;
-    h.mrope.section        = config_.mrope_section;
+    h.linear_attn = config_.linear_attn;
+    h.mrope.interleaved = config_.mrope_interleaved;
+    h.mrope.section = config_.mrope_section;
     h.mrope.partial_factor = config_.partial_rotary_factor;
-    h.mrope.theta          = config_.rope_theta;
-    h.attn_output_gate     = config_.attn_output_gate;
-    h.ssm_pool             = ssm_pool_.get();
+    h.mrope.theta = config_.rope_theta;
+    h.attn_output_gate = config_.attn_output_gate;
+    h.ssm_pool = ssm_pool_.get();
     // Precompute O(1) layer-index lookup tables for the M1 decode hot path so
     // dispatch sites do not rescan layer_kinds on every layer call.
     h.rebuild_layer_index_tables();

@@ -40,16 +40,14 @@ protected:
     void SetUp() override {
         try {
             context().setDevice(ZEDINFER_DEVICE_NVIDIA, 0);
-        } catch (const std::exception& e) {
-            GTEST_SKIP() << "NVIDIA runtime init failed: " << e.what();
-        }
+        } catch (const std::exception& e) { GTEST_SKIP() << "NVIDIA runtime init failed: " << e.what(); }
     }
 };
 
 // Bf16 host buffer of value `v` repeated `n` times.
 std::vector<uint16_t> bf16_ones(size_t n) {
     const float one = 1.0f;
-    uint32_t u      = 0;
+    uint32_t u = 0;
     std::memcpy(&u, &one, sizeof(u));
     const uint16_t bf = static_cast<uint16_t>(u >> 16); // truncate-to-bf16.
     return std::vector<uint16_t>(n, bf);
@@ -73,25 +71,25 @@ TEST_F(OpsCausalConv1d, AllOnesFiveTokensRollsState) {
 
     SSMStatePoolConfig cfg;
     cfg.num_linear_layers = 1;
-    cfg.num_v_heads       = 1;
-    cfg.value_head_dim    = 1;
-    cfg.d_state           = 1;
-    cfg.conv_kernel_dim   = K;
-    cfg.qkv_dim           = D;
-    cfg.max_concurrent    = 1;
-    cfg.state_dtype       = ZEDINFER_DTYPE_BF16;
+    cfg.num_v_heads = 1;
+    cfg.value_head_dim = 1;
+    cfg.d_state = 1;
+    cfg.conv_kernel_dim = K;
+    cfg.qkv_dim = D;
+    cfg.max_concurrent = 1;
+    cfg.state_dtype = ZEDINFER_DTYPE_BF16;
 
     zedinfer::ExecutorConfig exec(ZEDINFER_DEVICE_NVIDIA, 0, ZEDINFER_DTYPE_BF16);
     SSMStatePool pool(cfg, exec);
     const int slot = pool.acquire_slot();
     pool.reset_slot(slot);
 
-    auto x = Tensor::create({static_cast<size_t>(N), static_cast<size_t>(D)},
-                             ZEDINFER_DTYPE_BF16, ZEDINFER_DEVICE_NVIDIA, 0);
-    auto w = Tensor::create({static_cast<size_t>(D), 1, static_cast<size_t>(K)},
-                             ZEDINFER_DTYPE_BF16, ZEDINFER_DEVICE_NVIDIA, 0);
-    auto out = Tensor::create({static_cast<size_t>(N), static_cast<size_t>(D)},
-                               ZEDINFER_DTYPE_BF16, ZEDINFER_DEVICE_NVIDIA, 0);
+    auto x = Tensor::create({static_cast<size_t>(N), static_cast<size_t>(D)}, ZEDINFER_DTYPE_BF16,
+                            ZEDINFER_DEVICE_NVIDIA, 0);
+    auto w = Tensor::create({static_cast<size_t>(D), 1, static_cast<size_t>(K)}, ZEDINFER_DTYPE_BF16,
+                            ZEDINFER_DEVICE_NVIDIA, 0);
+    auto out = Tensor::create({static_cast<size_t>(N), static_cast<size_t>(D)}, ZEDINFER_DTYPE_BF16,
+                              ZEDINFER_DEVICE_NVIDIA, 0);
 
     auto x_ones = bf16_ones(static_cast<size_t>(N) * D);
     auto w_ones = bf16_ones(static_cast<size_t>(D) * K);
@@ -112,8 +110,7 @@ TEST_F(OpsCausalConv1d, AllOnesFiveTokensRollsState) {
     const float last = bf16_to_float(host[(N - 1) * D + 0]);
 
     EXPECT_NEAR(first, 0.7311f, 0.05f) << "first-token silu(1) deviates more than bf16 tolerance";
-    EXPECT_NEAR(last, 3.928f, 0.05f)
-        << "saturated-state silu(4) deviates more than bf16 tolerance";
+    EXPECT_NEAR(last, 3.928f, 0.05f) << "saturated-state silu(4) deviates more than bf16 tolerance";
 
     // Sanity: every channel should produce the same value at the same n since
     // x and w are constant across channels. Check token 0 across all D.
@@ -144,13 +141,13 @@ TEST_F(OpsCausalConv1d, DecodeStatePersistsAcrossCalls) {
 
     SSMStatePoolConfig cfg;
     cfg.num_linear_layers = 1;
-    cfg.num_v_heads       = 1;
-    cfg.value_head_dim    = 1;
-    cfg.d_state           = 1;
-    cfg.conv_kernel_dim   = K;
-    cfg.qkv_dim           = D;
-    cfg.max_concurrent    = 1;
-    cfg.state_dtype       = ZEDINFER_DTYPE_BF16;
+    cfg.num_v_heads = 1;
+    cfg.value_head_dim = 1;
+    cfg.d_state = 1;
+    cfg.conv_kernel_dim = K;
+    cfg.qkv_dim = D;
+    cfg.max_concurrent = 1;
+    cfg.state_dtype = ZEDINFER_DTYPE_BF16;
 
     zedinfer::ExecutorConfig exec(ZEDINFER_DEVICE_NVIDIA, 0, ZEDINFER_DTYPE_BF16);
     SSMStatePool pool(cfg, exec);
@@ -159,7 +156,7 @@ TEST_F(OpsCausalConv1d, DecodeStatePersistsAcrossCalls) {
 
     auto x = Tensor::create({1, static_cast<size_t>(D)}, ZEDINFER_DTYPE_BF16, ZEDINFER_DEVICE_NVIDIA, 0);
     auto w = Tensor::create({static_cast<size_t>(D), 1, static_cast<size_t>(K)}, ZEDINFER_DTYPE_BF16,
-                             ZEDINFER_DEVICE_NVIDIA, 0);
+                            ZEDINFER_DEVICE_NVIDIA, 0);
     auto out = Tensor::create({1, static_cast<size_t>(D)}, ZEDINFER_DTYPE_BF16, ZEDINFER_DEVICE_NVIDIA, 0);
 
     auto x_ones = bf16_ones(static_cast<size_t>(D));
@@ -172,8 +169,7 @@ TEST_F(OpsCausalConv1d, DecodeStatePersistsAcrossCalls) {
     // Expected per-step values: silu(1), silu(2), silu(3).
     const float expected[3] = {0.7311f, 1.7616f, 2.857f};
     for (int step = 0; step < 3; ++step) {
-        ASSERT_NO_THROW(causal_conv1d(out, x, w, pool.view(), slot, 0))
-            << "decode step " << step << " threw";
+        ASSERT_NO_THROW(causal_conv1d(out, x, w, pool.view(), slot, 0)) << "decode step " << step << " threw";
         context().runtime().synchronize();
 
         std::vector<uint16_t> host(static_cast<size_t>(D));

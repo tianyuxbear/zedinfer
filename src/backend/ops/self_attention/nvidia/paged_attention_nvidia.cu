@@ -501,11 +501,10 @@ void paged_attention_prefill(std::byte* attn_val, const std::byte* q, const std:
 
 template <typename T, int N_Q>
 __global__ void paged_attention_small_nq_kernel(T* __restrict__ attn_out, const T* __restrict__ Q,
-                                                 const T* __restrict__ k_pool_base,
-                                                 const T* __restrict__ v_pool_base,
-                                                 const int* __restrict__ page_table, const float scale,
-                                                 const int nhead, const int nkvhead, const int d,
-                                                 const int past_len, const int block_size) {
+                                                const T* __restrict__ k_pool_base, const T* __restrict__ v_pool_base,
+                                                const int* __restrict__ page_table, const float scale, const int nhead,
+                                                const int nkvhead, const int d, const int past_len,
+                                                const int block_size) {
     const int h = blockIdx.x;
     const int tid = threadIdx.x;
     const int warp_id = tid / WARP_SIZE;
@@ -538,9 +537,7 @@ __global__ void paged_attention_small_nq_kernel(T* __restrict__ attn_out, const 
 #pragma unroll
     for (int q = 0; q < N_Q; ++q) {
         const T* q_ptr = Q + q * nhead * d + h * d;
-        for (int i = tid; i < d; i += blockDim.x) {
-            s_q[q * d + i] = to_float(q_ptr[i]);
-        }
+        for (int i = tid; i < d; i += blockDim.x) { s_q[q * d + i] = to_float(q_ptr[i]); }
     }
     __syncthreads();
 
@@ -600,9 +597,7 @@ __global__ void paged_attention_small_nq_kernel(T* __restrict__ attn_out, const 
         for (int q = 0; q < N_Q; ++q) {
             // Block-reduce max for query q.
             float my_max = -FLT_MAX;
-            for (int j = tid; j < tile_len; j += blockDim.x) {
-                my_max = fmaxf(my_max, s_scores[q * PA_TILE_KV + j]);
-            }
+            for (int j = tid; j < tile_len; j += blockDim.x) { my_max = fmaxf(my_max, s_scores[q * PA_TILE_KV + j]); }
             float warp_max = pa_warp_reduce_max(my_max);
             float tile_max = pa_block_reduce_max(warp_max, s_reduce, tid, lane_id, warp_id);
 
@@ -637,9 +632,7 @@ __global__ void paged_attention_small_nq_kernel(T* __restrict__ attn_out, const 
         for (int j = dv_rank; j < tile_len; j += dv_group) {
             float v_val = to_float(v_pool_base[s_phys[j] * nkvhead * d + kvh * d + dv_idx]);
 #pragma unroll
-            for (int q = 0; q < N_Q; ++q) {
-                acc_out[q] += beta[q] * s_scores[q * PA_TILE_KV + j] * v_val;
-            }
+            for (int q = 0; q < N_Q; ++q) { acc_out[q] += beta[q] * s_scores[q * PA_TILE_KV + j] * v_val; }
         }
         __syncthreads();
     }
@@ -653,9 +646,7 @@ __global__ void paged_attention_small_nq_kernel(T* __restrict__ attn_out, const 
             __syncthreads();
             if (dv_rank == 0) {
                 float sum = s_scores[tid];
-                for (int g = 1; g < dv_group; ++g) {
-                    sum += s_scores[g * dv + dv_idx];
-                }
+                for (int g = 1; g < dv_group; ++g) { sum += s_scores[g * dv + dv_idx]; }
                 attn_out[q * nhead * d + h * d + dv_idx] = from_float<T>(sum / prev_sum[q]);
             }
             __syncthreads();
@@ -673,8 +664,8 @@ __global__ void paged_attention_small_nq_kernel(T* __restrict__ attn_out, const 
 // Dispatch helper templated on n_q. Returns the smem byte size needed.
 template <typename T>
 static bool launch_small_nq_kernel(int n_q, std::byte* attn_val, const std::byte* q, const std::byte* k_pool_base,
-                                    const std::byte* v_pool_base, const int* page_table, int past_len, float scale,
-                                    int nhead, int nkvhead, int head_dim, int block_size) {
+                                   const std::byte* v_pool_base, const int* page_table, int past_len, float scale,
+                                   int nhead, int nkvhead, int head_dim, int block_size) {
     // Match the pa_block_reduce helpers' assumption (NUM_WARPS=8 = BLOCK_SIZE/32).
     // BLOCK_SIZE=256 with head_dim=128 gives dv_group=2; the V aggregation work
     // is split across two thread groups whose partial sums are reduced at the
@@ -690,19 +681,25 @@ static bool launch_small_nq_kernel(int n_q, std::byte* attn_val, const std::byte
         constexpr int N_Q = decltype(n_q_const)::value;
         // s_q + s_scores + s_reduce + s_phys
         size_t smem_size = static_cast<size_t>(N_Q) * head_dim * sizeof(float)
-                           + static_cast<size_t>(N_Q) * PA_TILE_KV * sizeof(float)
-                           + NUM_WARPS * sizeof(float) + PA_TILE_KV * sizeof(int);
+                         + static_cast<size_t>(N_Q) * PA_TILE_KV * sizeof(float) + NUM_WARPS * sizeof(float)
+                         + PA_TILE_KV * sizeof(int);
         paged_attention_small_nq_kernel<T, N_Q><<<grid, block, smem_size>>>(
             reinterpret_cast<T*>(attn_val), reinterpret_cast<const T*>(q), reinterpret_cast<const T*>(k_pool_base),
-            reinterpret_cast<const T*>(v_pool_base), page_table, scale, nhead, nkvhead, head_dim, past_len,
-            block_size);
+            reinterpret_cast<const T*>(v_pool_base), page_table, scale, nhead, nkvhead, head_dim, past_len, block_size);
     };
 
     switch (n_q) {
-        case 2: run(std::integral_constant<int, 2>{}); return true;
-        case 3: run(std::integral_constant<int, 3>{}); return true;
-        case 4: run(std::integral_constant<int, 4>{}); return true;
-        default: return false;
+        case 2:
+            run(std::integral_constant<int, 2>{});
+            return true;
+        case 3:
+            run(std::integral_constant<int, 3>{});
+            return true;
+        case 4:
+            run(std::integral_constant<int, 4>{});
+            return true;
+        default:
+            return false;
     }
 }
 
@@ -715,14 +712,14 @@ bool paged_attention_small_nq(std::byte* attn_val, const std::byte* q, const std
     }
     switch (type) {
         case ZEDINFER_DTYPE_F32:
-            return launch_small_nq_kernel<float>(seqlen_q, attn_val, q, k_pool_base, v_pool_base, page_table,
-                                                  past_len, scale, nhead, nkvhead, head_dim, block_size);
+            return launch_small_nq_kernel<float>(seqlen_q, attn_val, q, k_pool_base, v_pool_base, page_table, past_len,
+                                                 scale, nhead, nkvhead, head_dim, block_size);
         case ZEDINFER_DTYPE_F16:
-            return launch_small_nq_kernel<half>(seqlen_q, attn_val, q, k_pool_base, v_pool_base, page_table,
-                                                 past_len, scale, nhead, nkvhead, head_dim, block_size);
+            return launch_small_nq_kernel<half>(seqlen_q, attn_val, q, k_pool_base, v_pool_base, page_table, past_len,
+                                                scale, nhead, nkvhead, head_dim, block_size);
         case ZEDINFER_DTYPE_BF16:
             return launch_small_nq_kernel<cuda_bfloat16>(seqlen_q, attn_val, q, k_pool_base, v_pool_base, page_table,
-                                                          past_len, scale, nhead, nkvhead, head_dim, block_size);
+                                                         past_len, scale, nhead, nkvhead, head_dim, block_size);
         default:
             return false;
     }

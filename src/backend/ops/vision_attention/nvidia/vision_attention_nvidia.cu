@@ -37,14 +37,14 @@ template <typename T, int BLOCK = 128>
 __global__ void vision_attention_kernel(T* __restrict__ out, const T* __restrict__ q, const T* __restrict__ k,
                                         const T* __restrict__ v, float* __restrict__ scratch, int N, int H, int D,
                                         float scale) {
-    const int i   = blockIdx.x;
-    const int h   = blockIdx.y;
+    const int i = blockIdx.x;
+    const int h = blockIdx.y;
     const int tid = threadIdx.x;
 
-    const T* qrow    = q + (static_cast<size_t>(i) * H + h) * D;
+    const T* qrow = q + (static_cast<size_t>(i) * H + h) * D;
     const T* k_start = k + h * D;
     const T* v_start = v + h * D;
-    T*       orow    = out + (static_cast<size_t>(i) * H + h) * D;
+    T* orow = out + (static_cast<size_t>(i) * H + h) * D;
 
     // Per-(i, h) scratch row of size N (fp32 scores then softmaxed).
     float* sc = scratch + (static_cast<size_t>(i) * H + h) * static_cast<size_t>(N);
@@ -52,10 +52,8 @@ __global__ void vision_attention_kernel(T* __restrict__ out, const T* __restrict
     // 1. Scores: sc[j] = (q . k_j) * scale
     for (int j = tid; j < N; j += BLOCK) {
         const T* krow = k_start + static_cast<size_t>(j) * H * D;
-        float    dot  = 0.0f;
-        for (int d = 0; d < D; ++d) {
-            dot += to_f32_dev<T>(qrow[d]) * to_f32_dev<T>(krow[d]);
-        }
+        float dot = 0.0f;
+        for (int d = 0; d < D; ++d) { dot += to_f32_dev<T>(qrow[d]) * to_f32_dev<T>(krow[d]); }
         sc[j] = dot * scale;
     }
     __syncthreads();
@@ -63,7 +61,7 @@ __global__ void vision_attention_kernel(T* __restrict__ out, const T* __restrict
     // 2. Row max (block reduction).
     using BR = cub::BlockReduce<float, BLOCK>;
     __shared__ typename BR::TempStorage tmp;
-    float                               local_max = -INFINITY;
+    float local_max = -INFINITY;
     for (int j = tid; j < N; j += BLOCK) {
         if (sc[j] > local_max) {
             local_max = sc[j];
@@ -81,7 +79,7 @@ __global__ void vision_attention_kernel(T* __restrict__ out, const T* __restrict
     float local_sum = 0.0f;
     for (int j = tid; j < N; j += BLOCK) {
         const float e = expf(sc[j] - s_max);
-        sc[j]         = e;
+        sc[j] = e;
         local_sum += e;
     }
     float row_sum = BR(tmp).Sum(local_sum);
@@ -105,16 +103,16 @@ __global__ void vision_attention_kernel(T* __restrict__ out, const T* __restrict
 
 template <typename T>
 void launch(T* out, const T* q, const T* k, const T* v, int N, int H, int D, float scale, cudaStream_t stream) {
-    float*       scratch  = nullptr;
+    float* scratch = nullptr;
     const size_t sc_bytes = static_cast<size_t>(N) * H * N * sizeof(float);
-    cudaError_t  err      = cudaMallocAsync(reinterpret_cast<void**>(&scratch), sc_bytes, stream);
+    cudaError_t err = cudaMallocAsync(reinterpret_cast<void**>(&scratch), sc_bytes, stream);
     if (err != cudaSuccess) {
         throw std::runtime_error(std::string("vision_attention scratch alloc failed: ") + cudaGetErrorString(err));
     }
 
     constexpr int BLOCK = 128;
-    dim3          grid(static_cast<unsigned int>(N), static_cast<unsigned int>(H));
-    dim3          block(BLOCK);
+    dim3 grid(static_cast<unsigned int>(N), static_cast<unsigned int>(H));
+    dim3 block(BLOCK);
     vision_attention_kernel<T, BLOCK><<<grid, block, 0, stream>>>(out, q, k, v, scratch, N, H, D, scale);
     err = cudaGetLastError();
     cudaFreeAsync(scratch, stream);

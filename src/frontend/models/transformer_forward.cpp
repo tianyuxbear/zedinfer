@@ -16,8 +16,7 @@ namespace zedinfer::model {
  * dynamic allocation via Tensor::create.
  */
 tensor_t transformer_forward(const ModelForwardConfig& model, PagedForwardContext& ctx,
-                             const ExecutorConfig& exec_config, DecodeScratch* scratch,
-                             tensor_t input_embeds) {
+                             const ExecutorConfig& exec_config, DecodeScratch* scratch, tensor_t input_embeds) {
     const auto& cfg = model.config;
     const size_t N = static_cast<size_t>(ctx.num_tokens());
     const size_t hidden_size = cfg.hidden_size;

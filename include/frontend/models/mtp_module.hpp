@@ -4,8 +4,8 @@
 #include "frontend/models/base.hpp"
 #include "frontend/models/expert_weights.hpp"
 #include "frontend/models/qwen3_5_config.hpp"
-#include "zedinfer/activation.hpp"   // ExecutorConfig (struct definition)
-#include "zedinfer/request.hpp"      // InferenceRequest (mtp_k_cache, etc.)
+#include "zedinfer/activation.hpp" // ExecutorConfig (struct definition)
+#include "zedinfer/request.hpp"    // InferenceRequest (mtp_k_cache, etc.)
 
 #include <memory>
 #include <vector>
@@ -64,10 +64,8 @@ public:
     //
     // Returns: logits [1, vocab] — model's guess for token t+2.
     // Throws if !ready() OR if the request's cache is full (past >= max_kv_len_).
-    tensor_t forward(InferenceRequest& req,
-                     tensor_t hidden_at_t, int next_token_id,
-                     tensor_t embed_tokens_w, tensor_t lm_head_w,
-                     const ExecutorConfig& exec) const;
+    tensor_t forward(InferenceRequest& req, tensor_t hidden_at_t, int next_token_id, tensor_t embed_tokens_w,
+                     tensor_t lm_head_w, const ExecutorConfig& exec) const;
 
     // Stage C.2 / D.0: prefill MTP K/V across the prompt for this request.
     //
@@ -83,11 +81,8 @@ public:
     //
     // Returns the LAST-position logits [1, vocab], i.e. MTP's prediction
     // for token t_{P+1}.
-    tensor_t prefill(InferenceRequest& req,
-                     tensor_t hidden_main_seq,
-                     const std::vector<int>& next_tokens,
-                     tensor_t embed_tokens_w, tensor_t lm_head_w,
-                     const ExecutorConfig& exec) const;
+    tensor_t prefill(InferenceRequest& req, tensor_t hidden_main_seq, const std::vector<int>& next_tokens,
+                     tensor_t embed_tokens_w, tensor_t lm_head_w, const ExecutorConfig& exec) const;
 
     // Stage D max KV length per request (default matches Stage C.1's
     // single-tenant fixed buffer). Callers can override at engine init.
@@ -100,38 +95,38 @@ public:
 
 private:
     const Qwen3_5Config& main_cfg_;
-    ExecutorConfig       exec_;
-    bool                 ready_  = false;
+    ExecutorConfig exec_;
+    bool ready_ = false;
     // True if the MTP layer's FFN is MoE (experts + router + shared expert);
     // false if it is a plain dense FFN (gate/up/down_proj). Set in the ctor.
-    bool                 is_moe_ = false;
+    bool is_moe_ = false;
     // Dense-FFN MTP path (is_moe_ == false): the single MLP's projections and
     // the inferred intermediate size. Null/0 on the MoE path.
-    tensor_t             mlp_gate_proj_; // [inter, H]
-    tensor_t             mlp_up_proj_;   // [inter, H]
-    tensor_t             mlp_down_proj_; // [H, inter]
-    size_t               dense_inter_ = 0;
+    tensor_t mlp_gate_proj_; // [inter, H]
+    tensor_t mlp_up_proj_;   // [inter, H]
+    tensor_t mlp_down_proj_; // [H, inter]
+    size_t dense_inter_ = 0;
 
     // Pre-fc projection norms (Qwen3_5MoeRMSNorm, (1+w) at kernel time).
     tensor_t pre_fc_norm_embedding_; // [hidden]
     tensor_t pre_fc_norm_hidden_;    // [hidden]
 
     // Fusion projection: 2*hidden -> hidden.
-    tensor_t fc_weight_;             // [hidden, 2*hidden]
+    tensor_t fc_weight_; // [hidden, 2*hidden]
 
     // Single transformer block (mtp.layers.0.*) — slice references into the
     // main ModelWeights map. Naming mirrors the main hybrid layer so the
     // forward (when implemented in Stage B) can reuse the per-layer helpers.
-    tensor_t in_layernorm_;          // [hidden]   mtp.layers.0.input_layernorm.weight
-    tensor_t post_layernorm_;        // [hidden]   mtp.layers.0.post_attention_layernorm.weight
-    tensor_t q_proj_;                // [2*Hq*Dh, hidden]  (q + output-gate doubled, like main full-attn)
-    tensor_t k_proj_;                // [Hkv*Dh, hidden]
-    tensor_t v_proj_;                // [Hkv*Dh, hidden]
-    tensor_t o_proj_;                // [hidden, Hq*Dh]
-    tensor_t q_norm_;                // [Dh]      (1+w) per-head RMSNorm
-    tensor_t k_norm_;                // [Dh]
-    tensor_t mlp_gate_router_;       // [num_experts, hidden]  MoE router
-    tensor_t shared_expert_gate_;    // [1, hidden]            sigmoid gate for shared expert contribution
+    tensor_t in_layernorm_;       // [hidden]   mtp.layers.0.input_layernorm.weight
+    tensor_t post_layernorm_;     // [hidden]   mtp.layers.0.post_attention_layernorm.weight
+    tensor_t q_proj_;             // [2*Hq*Dh, hidden]  (q + output-gate doubled, like main full-attn)
+    tensor_t k_proj_;             // [Hkv*Dh, hidden]
+    tensor_t v_proj_;             // [Hkv*Dh, hidden]
+    tensor_t o_proj_;             // [hidden, Hq*Dh]
+    tensor_t q_norm_;             // [Dh]      (1+w) per-head RMSNorm
+    tensor_t k_norm_;             // [Dh]
+    tensor_t mlp_gate_router_;    // [num_experts, hidden]  MoE router
+    tensor_t shared_expert_gate_; // [1, hidden]            sigmoid gate for shared expert contribution
     tensor_t shared_expert_gate_proj_;
     tensor_t shared_expert_up_proj_;
     tensor_t shared_expert_down_proj_;
@@ -143,7 +138,7 @@ private:
     std::unique_ptr<ExpertWeights> experts_;
 
     // Final RMSNorm before lm_head, mtp.norm.weight.
-    tensor_t final_norm_;            // [hidden]
+    tensor_t final_norm_; // [hidden]
 
     // ----- Stage D.0: MTP K/V cache is now per-Request -----
     // Buffers live on InferenceRequest (req.mtp_k_cache / mtp_v_cache /
@@ -151,16 +146,14 @@ private:
     // weights + the cache size. This makes concurrent multi-request decode
     // safe — no shared mutable state to trample.
     static constexpr size_t kDefaultMaxKvLen_ = 4096;
-    size_t                  max_kv_len_      = kDefaultMaxKvLen_;
+    size_t max_kv_len_ = kDefaultMaxKvLen_;
 };
 
 // Helper: lazily allocate a request's MTP K/V buffers + reset past_seq_len.
 // Idempotent — calling on an already-initialised request just zeros the
 // past counter (buffer reuse). Public so serving_loop can call it before
 // each turn / at request admission.
-void mtp_reset_request_state(InferenceRequest& req,
-                             size_t max_kv_len,
-                             size_t num_kv_heads, size_t head_dim,
+void mtp_reset_request_state(InferenceRequest& req, size_t max_kv_len, size_t num_kv_heads, size_t head_dim,
                              const ExecutorConfig& exec);
 
 } // namespace zedinfer::model

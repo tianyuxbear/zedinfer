@@ -35,16 +35,16 @@ protected:
     void SetUp() override {
         try {
             context().setDevice(ZEDINFER_DEVICE_NVIDIA, 0);
-        } catch (const std::exception& e) {
-            GTEST_SKIP() << "NVIDIA runtime init failed: " << e.what();
-        }
+        } catch (const std::exception& e) { GTEST_SKIP() << "NVIDIA runtime init failed: " << e.what(); }
     }
 };
 
 // Read whole binary file into a buffer of N bytes; returns false on miss/size mismatch.
 bool read_exact(const std::string& path, void* dst, size_t bytes) {
     std::ifstream in(path, std::ios::binary);
-    if (!in) return false;
+    if (!in) {
+        return false;
+    }
     in.read(reinterpret_cast<char*>(dst), static_cast<std::streamsize>(bytes));
     return in.gcount() == static_cast<std::streamsize>(bytes);
 }
@@ -61,8 +61,8 @@ TEST_F(OpsMrope3d, MatchesPythonReference) {
     //   x_in.bin       : bf16 [N, H, Dh]    = 5 * 2 * 256 * 2  = 5120 bytes
     //   x_out_ref.bin  : bf16 [N, H, Dh]    = 5120 bytes
     //   pos_thw.bin    : int32 [3, N]       = 3 * 5 * 4        = 60 bytes
-    constexpr int N  = 5;
-    constexpr int H  = 2;
+    constexpr int N = 5;
+    constexpr int H = 2;
     constexpr int Dh = 256;
     constexpr float partial_factor = 0.25f;
     constexpr int Dh_rot = static_cast<int>(Dh * partial_factor); // 64
@@ -70,29 +70,28 @@ TEST_F(OpsMrope3d, MatchesPythonReference) {
     const std::string fixture_dir = "tests/fixtures/mrope_3d/";
     std::vector<uint16_t> x_host(static_cast<size_t>(N) * H * Dh);
     std::vector<uint16_t> ref_host(static_cast<size_t>(N) * H * Dh);
-    std::vector<int32_t>  pos_host(3 * N);
+    std::vector<int32_t> pos_host(3 * N);
 
-    if (!read_exact(fixture_dir + "x_in.bin",       x_host.data(),   x_host.size()   * sizeof(uint16_t)) ||
-        !read_exact(fixture_dir + "x_out_ref.bin",  ref_host.data(), ref_host.size() * sizeof(uint16_t)) ||
-        !read_exact(fixture_dir + "pos_thw.bin",    pos_host.data(), pos_host.size() * sizeof(int32_t))) {
+    if (!read_exact(fixture_dir + "x_in.bin", x_host.data(), x_host.size() * sizeof(uint16_t))
+        || !read_exact(fixture_dir + "x_out_ref.bin", ref_host.data(), ref_host.size() * sizeof(uint16_t))
+        || !read_exact(fixture_dir + "pos_thw.bin", pos_host.data(), pos_host.size() * sizeof(int32_t))) {
         GTEST_SKIP() << "mrope_3d fixtures missing or wrong size; "
                      << "regenerate via `python3 tests/fixtures/mrope_3d/gen_reference.py`";
     }
 
-    auto x   = Tensor::create({static_cast<size_t>(N), static_cast<size_t>(H), static_cast<size_t>(Dh)},
-                              ZEDINFER_DTYPE_BF16, ZEDINFER_DEVICE_NVIDIA, 0);
-    auto pos = Tensor::create({3, static_cast<size_t>(N)},
-                              ZEDINFER_DTYPE_I32, ZEDINFER_DEVICE_NVIDIA, 0);
+    auto x = Tensor::create({static_cast<size_t>(N), static_cast<size_t>(H), static_cast<size_t>(Dh)},
+                            ZEDINFER_DTYPE_BF16, ZEDINFER_DEVICE_NVIDIA, 0);
+    auto pos = Tensor::create({3, static_cast<size_t>(N)}, ZEDINFER_DTYPE_I32, ZEDINFER_DEVICE_NVIDIA, 0);
 
     auto* api = zedinfer::device::getRuntimeAPI(ZEDINFER_DEVICE_NVIDIA);
-    api->memcpy_sync(x->data(),   x_host.data(),   x_host.size()   * sizeof(uint16_t), ZEDINFER_MEMCPY_H2D);
-    api->memcpy_sync(pos->data(), pos_host.data(), pos_host.size() * sizeof(int32_t),  ZEDINFER_MEMCPY_H2D);
+    api->memcpy_sync(x->data(), x_host.data(), x_host.size() * sizeof(uint16_t), ZEDINFER_MEMCPY_H2D);
+    api->memcpy_sync(pos->data(), pos_host.data(), pos_host.size() * sizeof(int32_t), ZEDINFER_MEMCPY_H2D);
 
     zedinfer::model::MRoPEConfig cfg;
-    cfg.interleaved    = true;
-    cfg.section        = {11, 11, 10};
+    cfg.interleaved = true;
+    cfg.section = {11, 11, 10};
     cfg.partial_factor = partial_factor;
-    cfg.theta          = 1e7f;
+    cfg.theta = 1e7f;
 
     ASSERT_NO_THROW(mrope_3d(x, pos, cfg));
     context().runtime().synchronize();
@@ -102,7 +101,7 @@ TEST_F(OpsMrope3d, MatchesPythonReference) {
 
     // 1) Numerical correctness against the Python reference (bf16 tolerance).
     float max_abs_diff = 0.0f;
-    int   max_idx      = -1;
+    int max_idx = -1;
     for (size_t i = 0; i < got_host.size(); ++i) {
         const float g = bf16_to_float(got_host[i]);
         const float r = bf16_to_float(ref_host[i]);
@@ -111,13 +110,11 @@ TEST_F(OpsMrope3d, MatchesPythonReference) {
         const float d = std::abs(g - r);
         if (d > max_abs_diff) {
             max_abs_diff = d;
-            max_idx      = static_cast<int>(i);
+            max_idx = static_cast<int>(i);
         }
     }
-    std::cout << "[ok] mrope_3d max_abs_diff=" << max_abs_diff
-              << " (worst flat idx=" << max_idx << ")\n";
-    EXPECT_LT(max_abs_diff, 0.01f)
-        << "mrope_3d numerical drift exceeds bf16 tolerance";
+    std::cout << "[ok] mrope_3d max_abs_diff=" << max_abs_diff << " (worst flat idx=" << max_idx << ")\n";
+    EXPECT_LT(max_abs_diff, 0.01f) << "mrope_3d numerical drift exceeds bf16 tolerance";
 
     // 2) Pass-through verification: dims [Dh_rot, Dh) must be bitwise unchanged
     //    relative to the input (since the kernel writes only the rotary half).
@@ -126,8 +123,7 @@ TEST_F(OpsMrope3d, MatchesPythonReference) {
             for (int d = Dh_rot; d < Dh; ++d) {
                 const size_t flat = (static_cast<size_t>(n) * H + hd) * Dh + d;
                 EXPECT_EQ(got_host[flat], x_host[flat])
-                    << "pass-through dim " << d << " changed at (n=" << n
-                    << ", hd=" << hd << ")";
+                    << "pass-through dim " << d << " changed at (n=" << n << ", hd=" << hd << ")";
             }
         }
     }

@@ -20,21 +20,19 @@ bool try_activate_device(zedinferDeviceType_t device_type, int device_id) {
     try {
         zedinfer::core::context().setDevice(device_type, device_id);
         return true;
-    } catch (const std::exception&) {
-        return false;
-    }
+    } catch (const std::exception&) { return false; }
 }
 
 SSMStatePoolConfig make_test_config() {
     SSMStatePoolConfig cfg;
     cfg.num_linear_layers = 4;
-    cfg.num_v_heads       = 8;
-    cfg.value_head_dim    = 16;
-    cfg.d_state           = 16;
-    cfg.conv_kernel_dim   = 4;
-    cfg.qkv_dim           = 256;
-    cfg.max_concurrent    = 2;
-    cfg.state_dtype       = ZEDINFER_DTYPE_BF16;
+    cfg.num_v_heads = 8;
+    cfg.value_head_dim = 16;
+    cfg.d_state = 16;
+    cfg.conv_kernel_dim = 4;
+    cfg.qkv_dim = 256;
+    cfg.max_concurrent = 2;
+    cfg.state_dtype = ZEDINFER_DTYPE_BF16;
     return cfg;
 }
 

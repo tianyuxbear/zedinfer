@@ -17,14 +17,14 @@ namespace zedinfer::model {
 // Qwen3.5 linear-attention sub-config (LinearAttnConfig); max_concurrent is the
 // number of concurrent requests the engine guarantees to admit.
 struct SSMStatePoolConfig {
-    int                num_linear_layers = 0;
-    int                num_v_heads       = 0;
-    int                value_head_dim    = 0;
-    int                d_state           = 0;
-    int                conv_kernel_dim   = 4;
-    int                qkv_dim           = 0;
-    int                max_concurrent    = 1;
-    zedinferDataType_t state_dtype       = ZEDINFER_DTYPE_BF16;
+    int num_linear_layers = 0;
+    int num_v_heads = 0;
+    int value_head_dim = 0;
+    int d_state = 0;
+    int conv_kernel_dim = 4;
+    int qkv_dim = 0;
+    int max_concurrent = 1;
+    zedinferDataType_t state_dtype = ZEDINFER_DTYPE_BF16;
 };
 
 // Lightweight view into an SSMStatePool's underlying buffers. The pool's ctor
@@ -32,18 +32,18 @@ struct SSMStatePoolConfig {
 // the raw bases + per-slot/per-layer byte strides to address into the buffers
 // without taking a dependency on tensor_t / TensorMeta. Stride fields are bytes.
 struct SSMStateView {
-    void*              ssm_base          = nullptr;
-    void*              conv_base         = nullptr;
-    int64_t            ssm_stride_slot   = 0;
-    int64_t            ssm_stride_layer  = 0;
-    int64_t            conv_stride_slot  = 0;
-    int64_t            conv_stride_layer = 0;
-    int                num_v_heads       = 0;
-    int                value_head_dim    = 0;
-    int                d_state           = 0;
-    int                conv_kernel_dim   = 0;
-    int                qkv_dim           = 0;
-    zedinferDataType_t dtype             = ZEDINFER_DTYPE_BF16;
+    void* ssm_base = nullptr;
+    void* conv_base = nullptr;
+    int64_t ssm_stride_slot = 0;
+    int64_t ssm_stride_layer = 0;
+    int64_t conv_stride_slot = 0;
+    int64_t conv_stride_layer = 0;
+    int num_v_heads = 0;
+    int value_head_dim = 0;
+    int d_state = 0;
+    int conv_kernel_dim = 0;
+    int qkv_dim = 0;
+    zedinferDataType_t dtype = ZEDINFER_DTYPE_BF16;
 };
 
 // Frozen byte-level copy of one slot's combined SSM + conv state. Used by the
@@ -70,10 +70,10 @@ public:
     SSMStatePool(const SSMStatePoolConfig& cfg, const ExecutorConfig& exec);
     ~SSMStatePool() = default;
 
-    SSMStatePool(const SSMStatePool&)            = delete;
+    SSMStatePool(const SSMStatePool&) = delete;
     SSMStatePool& operator=(const SSMStatePool&) = delete;
-    SSMStatePool(SSMStatePool&&)                 = delete;
-    SSMStatePool& operator=(SSMStatePool&&)      = delete;
+    SSMStatePool(SSMStatePool&&) = delete;
+    SSMStatePool& operator=(SSMStatePool&&) = delete;
 
     // Returns the index of a free slot and marks it in-use. Throws
     // std::runtime_error when every slot is currently held.
@@ -127,22 +127,22 @@ public:
     // accidentally mutate pool state.
     SSMStateView view() const { return view_; }
 
-    int                       num_free_slots() const;
-    size_t                    bytes_per_slot() const { return ssm_bytes_per_slot_ + conv_bytes_per_slot_; }
+    int num_free_slots() const;
+    size_t bytes_per_slot() const { return ssm_bytes_per_slot_ + conv_bytes_per_slot_; }
     const SSMStatePoolConfig& config() const { return cfg_; }
 
 private:
     SSMStatePoolConfig cfg_;
-    tensor_t           ssm_buffer_;
-    tensor_t           conv_buffer_;
+    tensor_t ssm_buffer_;
+    tensor_t conv_buffer_;
     // char (not bool) so we can iterate without vector<bool> bit-packing
     // surprises and so we can later swap for an atomic flag if we need
     // thread-safe acquire/release.
-    std::vector<char>  slot_in_use_;
-    int                next_hint_           = 0;
-    size_t             ssm_bytes_per_slot_  = 0;
-    size_t             conv_bytes_per_slot_ = 0;
-    SSMStateView       view_{};
+    std::vector<char> slot_in_use_;
+    int next_hint_ = 0;
+    size_t ssm_bytes_per_slot_ = 0;
+    size_t conv_bytes_per_slot_ = 0;
+    SSMStateView view_{};
 };
 
 } // namespace zedinfer::model

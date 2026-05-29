@@ -53,7 +53,7 @@ public:
     }
 
 private:
-    Qwen3_5MoEConfig            moe_config_;
+    Qwen3_5MoEConfig moe_config_;
     std::unique_ptr<ExpertPool> expert_pool_;
 };
 

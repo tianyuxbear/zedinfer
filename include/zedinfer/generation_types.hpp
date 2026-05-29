@@ -61,13 +61,13 @@ struct GenerationConfig {
     //                           when use_argmax is false.
     //   stop_sequences        : string-level stop substrings checked by the
     //                           HTTP layer on the decoded output stream.
-    bool         has_sampling_override = false;
-    bool         use_argmax            = false;
-    float        temperature           = 1.0f;
-    int          top_k                 = 0;
-    float        top_p                 = 1.0f;
-    float        repetition_penalty    = 1.0f;
-    unsigned int seed                  = 0;
+    bool has_sampling_override = false;
+    bool use_argmax = false;
+    float temperature = 1.0f;
+    int top_k = 0;
+    float top_p = 1.0f;
+    float repetition_penalty = 1.0f;
+    unsigned int seed = 0;
     std::vector<std::string> stop_sequences;
 
     // Diagnostics

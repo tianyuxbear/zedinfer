@@ -37,14 +37,14 @@ int main() {
     cudaStreamCreate(&stream);
 
     try {
-        flashinfer::mamba::mtp::invokeSelectiveStateUpdateMTP<
-            __nv_bfloat16,  // input_t
-            __nv_bfloat16,  // weight_t
-            float,          // matrixA_t
-            __nv_bfloat16,  // state_t
-            int32_t,        // stateIndex_t
-            void            // state_scale_t
-        >(params, flashinfer::mamba::SSUAlgorithm::kSimple, stream);
+        flashinfer::mamba::mtp::invokeSelectiveStateUpdateMTP<__nv_bfloat16, // input_t
+                                                              __nv_bfloat16, // weight_t
+                                                              float,         // matrixA_t
+                                                              __nv_bfloat16, // state_t
+                                                              int32_t,       // stateIndex_t
+                                                              void           // state_scale_t
+                                                              >(params, flashinfer::mamba::SSUAlgorithm::kSimple,
+                                                                stream);
     } catch (...) {
         // Runtime errors expected with zero-filled params; only care about link.
     }

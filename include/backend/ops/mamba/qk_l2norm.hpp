@@ -15,7 +15,6 @@ namespace zedinfer::ops::mamba {
 // and l2norm(key, eps=1e-6); the recurrence then scales the query by
 // 1/sqrt(head_k_dim). Call this op once per layer for q (scale=1/sqrt(Dk))
 // and once for k (scale=1) before invoking ops::mamba::gdn.
-void qk_l2norm_inplace(tensor_t qk, int num_heads, int head_dim,
-                       float scale = 1.0f, float eps = 1e-6f);
+void qk_l2norm_inplace(tensor_t qk, int num_heads, int head_dim, float scale = 1.0f, float eps = 1e-6f);
 
 } // namespace zedinfer::ops::mamba

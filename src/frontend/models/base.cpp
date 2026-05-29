@@ -6,9 +6,9 @@
 #include "frontend/models/qwen3_5_config.hpp"
 #include "frontend/models/qwen3_5_moe.hpp"
 #include "frontend/models/qwen3_moe.hpp"
-#include "zedinfer/activation.hpp"
 #include "utils/types.hpp"
 #include "zedinfer.h"
+#include "zedinfer/activation.hpp"
 #ifdef ZEDINFER_USE_TERMBAR
 #include "termbar.h"
 #endif
@@ -648,8 +648,7 @@ std::unique_ptr<ModelConfig> Model::load_config(const std::string& config_path) 
         // Qwen3.5-MoE text_config omits because every layer uses experts).
         json text_for_base = j["text_config"];
         if (!text_for_base.contains("intermediate_size")) {
-            text_for_base["intermediate_size"]
-                = text_for_base.value("moe_intermediate_size", static_cast<size_t>(0));
+            text_for_base["intermediate_size"] = text_for_base.value("moe_intermediate_size", static_cast<size_t>(0));
         }
         load_base_config(base_config, text_for_base);
         // load_base_config copies model_type out of the nested JSON (e.g. "qwen3_5_text"
@@ -745,9 +744,7 @@ std::unique_ptr<ModelConfig> Model::load_config(const std::string& config_path) 
     } else if (model_type == "qwen3_5" || model_type == "qwen3_5_moe") {
         // base_config has already been populated from text_config above (see is_qwen3_5
         // dispatch). Here we layer on the hybrid / vision / mrope / linear-attn fields.
-        const json& text_json = j.contains("text_config") && j["text_config"].is_object()
-                                    ? j["text_config"]
-                                    : j;
+        const json& text_json = j.contains("text_config") && j["text_config"].is_object() ? j["text_config"] : j;
         const json vision_json = j.value("vision_config", json::object());
 
         // Hybrid attention layout.
@@ -766,11 +763,8 @@ std::unique_ptr<ModelConfig> Model::load_config(const std::string& config_path) 
             const auto& rp = text_json["rope_parameters"];
             base_config.partial_rotary_factor = rp.value("partial_rotary_factor", 1.0f);
             base_config.mrope_interleaved = rp.value("mrope_interleaved", false);
-            if (rp.contains("mrope_section") && rp["mrope_section"].is_array()
-                && rp["mrope_section"].size() == 3) {
-                for (int i = 0; i < 3; ++i) {
-                    base_config.mrope_section[i] = rp["mrope_section"][i].get<int>();
-                }
+            if (rp.contains("mrope_section") && rp["mrope_section"].is_array() && rp["mrope_section"].size() == 3) {
+                for (int i = 0; i < 3; ++i) { base_config.mrope_section[i] = rp["mrope_section"][i].get<int>(); }
             }
             base_config.rope_theta = rp.value("rope_theta", base_config.rope_theta);
         }
@@ -830,9 +824,8 @@ std::unique_ptr<ModelConfig> Model::load_config(const std::string& config_path) 
         }
 
         auto dense_cfg = std::make_unique<Qwen3_5Config>(std::move(base_config));
-        LOGI.printf("[Model] Qwen3.5: %zu layers (hybrid, linear_v_heads=%d), vision=%s",
-                    dense_cfg->num_hidden_layers, dense_cfg->linear_attn.num_v_heads,
-                    dense_cfg->has_vision ? "true" : "false");
+        LOGI.printf("[Model] Qwen3.5: %zu layers (hybrid, linear_v_heads=%d), vision=%s", dense_cfg->num_hidden_layers,
+                    dense_cfg->linear_attn.num_v_heads, dense_cfg->has_vision ? "true" : "false");
         return dense_cfg;
     }
 
