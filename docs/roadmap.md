@@ -21,6 +21,23 @@
 | HTTP API + Web UI + SSE | PR-10 | `http_server.cpp`, `web/index.html` |
 | FlashInfer paged attention backend | post-PR-10 | `paged_forward_context.cpp`, `flashinfer_wrapper.cu` |
 
+### Qwen3.5 / Qwen3.6 Family (v0.2.0 → present)
+
+Full enablement of the Qwen3.5/3.6 hybrid-MoE-VL family (dense 27B + MoE 35B-A3B), plus the GPTQ-INT4, MoE-offload, and heterogeneous-inference items that were previously "upcoming".
+
+| Area | Description | Key Files |
+|------|-------------|-----------|
+| Hybrid forward | Per-layer dispatch: GatedDeltaNet linear-attn + full-attn + MoE/dense FFN | `hybrid_transformer_forward.cpp` |
+| Linear attention | GDN decode/prefill kernels, `causal_conv1d`, `qk_l2norm`, SSU; `SSMStatePool` + `SSMSnapshotCache` | `ops/mamba/`, `ssm_state_pool.cpp` |
+| MoE + expert offload | `ExpertPool` + PINNED_LRU host staging (35B-A3B INT4 on 24GB), GPU top-k, fused 3-D expert load, auto GPU-slot sizing | `expert_pool.cpp`, `moe_forward.cpp` |
+| GPTQ INT4 | int4 weight-only quantized linear / expert dispatch (w4a8 matvec) | `linear` quantized path |
+| Vision / multimodal | Qwen3.5-VL vision tower + CUDA kernels, multimodal processor, `--image`, OpenAI multimodal HTTP | `vision_tower.cpp`, `multimodal_processor.cpp` |
+| MTP speculative decode | MTP head (dense + MoE), per-request K/V, SSM temp-slot reject, true rejection sampling; opt-in `--mtp` | `mtp_module.cpp`, `scheduler.cpp` |
+| Positional / gates | 3D mRoPE (interleaved), `attn_output_gate`, `shared_expert_gate` | `ops/...` |
+| Chat / reasoning | minja Jinja templates, thinking-budget force-emit, open/closed-think | `chat_template_jinja.cpp` |
+
+See `docs/debug/mtp_correctness_dense_and_deployment.md` for the MTP findings (when it nets a speedup) and `docs/perf/moe_offload_24g.md` for the 24GB offload validation.
+
 ### Refactoring (R1-R6)
 | Refactor | Description |
 |----------|-------------|
@@ -81,40 +98,21 @@
 
 **Plan:** `docs/plan/cuda_graph.md`
 
-### Priority 3: INT8 Quantization
+> **Done since v0.2.0** (was Priorities 4–6): GPTQ **INT4** quantization, **MoE expert offloading** (`ExpertPool` PINNED_LRU, 35B-A3B on 24GB), and **heterogeneous CPU/GPU** inference (pinned host experts + async prefetch overlap) all shipped with the Qwen3.5/3.6 enablement above. INT8 was skipped (INT4 supersedes it for the VRAM-limited target).
 
-**Goal:** 2x model memory reduction, enabling larger batch sizes or bigger models on same hardware.
+### Priority 3: Fused MoE GEMM (ALL-GPU only)
 
-**Approach:**
-- Per-channel symmetric quantization for linear weights
-- `QuantizationConfig` in model config
-- `QuantizedLinearWeight` storage (int8 weight + fp16 scale)
-- Dispatch: `ops::linear_quantized()` for CPU (oneDNN INT8) and GPU (cuBLAS INT8)
+**Goal:** Replace the per-token, per-expert int4 matvec loop (launch-bound: ~990 tiny launches/token, GPU ~70% idle) with a grouped int4 expert GEMM. Raises the MoE decode baseline and lets MTP's n_q=2 verify amortize.
 
-**Plan:** `docs/plan/quantization.md`
+**Constraint:** Requires experts resident (ALL_GPU). **Mutually exclusive with PINNED_LRU offload** (it breaks the sliding-window prefetch/compute overlap), so it applies to ≥32GB GPUs, not the 24GB offload path. FlashInfer ships a usable W4-group-scaled cutlass fused MoE (`use_w4_group_scaling`, C++ runner) — integration = build kernels per arch + repack GPTQ → cutlass layout.
 
-### Priority 4: INT4 Quantization (GPTQ/AWQ)
+### Priority 4: Wider INT4 coverage
 
-**Goal:** 4x model memory reduction. Run 30B+ models on 24GB GPUs.
+**Goal:** Quantize the still-bf16 parts (linear-attn / embed / lm_head — currently ~7GB on 35B-A3B, ~20GB on dense 27B) to fit the **dense 27B in 24GB ALL_GPU**, which would make MTP a net speedup on a 4090. Risk: quantizing GatedDeltaNet recurrent state may hurt quality.
 
-**Depends on:** INT8 infrastructure (same quantized weight path, extended to 4-bit).
+### Priority 5: Better MTP draft head / offload H2D
 
-### Priority 5: Heterogeneous CPU/GPU Inference
-
-**Goal:** Mixed device execution — part of model on GPU, part on CPU with pinned memory transfers.
-
-**Key design:**
-- Per-layer device placement
-- Pinned host memory for CPU-resident weights
-- Async prefetch with compute overlap
-
-**Plan:** `docs/plan/heterogeneous_moe.md`
-
-### Priority 6: MoE Expert Offloading
-
-**Goal:** Run large MoE models (Qwen-30B-A3B) on 24GB GPUs by dynamically loading experts.
-
-**Depends on:** Quantization (INT4 to fit), heterogeneous inference (CPU/GPU transfer), paged KV cache (memory efficiency).
+**MTP draft quality:** accept rate is workload-dependent (~10–64%) and capped by the 1-layer head; a stronger draft head raises the dense-27B win beyond +11.5%. **Offload H2D:** the only lever for the 24GB-4090 35B-A3B path (transfer coalescing, prefetch depth, LRU hit rate) — orthogonal to MTP/fused-MoE.
 
 ---
 
