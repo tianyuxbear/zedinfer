@@ -23,14 +23,26 @@ ServingLoop::ServingLoop(InferenceEngine& engine, SchedulerConfig sched_config)
     if (engine_->block_allocator()) {
         scheduler_.set_block_allocator(engine_->block_allocator());
     }
-    if (engine_->prefix_cache()) {
-        scheduler_.set_prefix_cache(engine_->prefix_cache());
-    }
     // Wire SSMStatePool for hybrid models (Qwen3.5 / Qwen3.5-MoE). Non-hybrid
     // models return nullptr from ssm_state_pool() and the scheduler keeps the
     // pre-existing single-pool admission semantics.
-    if (auto* pool = engine_->ssm_state_pool()) {
-        scheduler_.set_ssm_state_pool(pool);
+    auto* ssm_pool = engine_->ssm_state_pool();
+    if (ssm_pool) {
+        scheduler_.set_ssm_state_pool(ssm_pool);
+    }
+    // PrefixCache is now safe to wire even for hybrid models: the scheduler
+    // pairs it with the SSMSnapshotCache below so that a prefix-cache hit is
+    // only honored when the SSM/conv state for the exact prompt is also
+    // restorable. Without that pairing, partial-prefix KV reuse would leave
+    // the linear-attention layers prefix-blind and the output would diverge
+    // from a cold-cache run.
+    if (engine_->prefix_cache()) {
+        scheduler_.set_prefix_cache(engine_->prefix_cache());
+    }
+    if (engine_->ssm_snapshot_cache()) {
+        scheduler_.set_ssm_snapshot_cache(engine_->ssm_snapshot_cache());
+        LOGI << "[ServingLoop] Hybrid model: SSM snapshot cache enabled; "
+                "prefix cache reuse limited to exact full-prompt matches.";
     }
     // Pass <think> / </think> ids (Qwen3.5 family) so the scheduler can drive
     // the per-request thinking-budget force-emit. Returns -1 for models without
@@ -191,7 +203,7 @@ bool ServingLoop::step() {
                 }
             }
             logits = model::hybrid_transformer_forward(hcfg, ctx, *req, engine_->exec_config(), scratch,
-                                                         req->image_embeds(), hidden_out_ptr);
+                                                         req->input_embeds(), hidden_out_ptr);
         } else {
             logits = model::transformer_forward(engine_->model().forward_config(), ctx, engine_->exec_config(),
                                                   scratch);
@@ -217,7 +229,8 @@ bool ServingLoop::step() {
             }
         }
 
-        scheduler_.process_results(batch, logits, engine_->sampler(), engine_->tokenizer(), engine_->stop_token_ids());
+        scheduler_.process_results(batch, logits, engine_->sampler(), engine_->argmax_sampler(),
+                                   engine_->general_sampler(), engine_->tokenizer(), engine_->stop_token_ids());
 
         // Stage D.1 MTP integration: after scheduler picks tokens for this
         // step, advance MTP's K/V cache and produce the next draft. Gated

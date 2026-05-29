@@ -20,12 +20,14 @@ namespace kvcache {
 class KVCache;
 class BlockAllocator;
 class PrefixCache;
+class SSMSnapshotCache;
 } // namespace kvcache
 namespace model {
 class SSMStatePool;
 } // namespace model
 namespace sampler {
 class Sampler;
+class GeneralSampler;
 }
 namespace tokenizer {
 class Tokenizer;
@@ -71,6 +73,14 @@ public:
     // Set prefix cache (optional, enables prefix sharing across requests)
     void set_prefix_cache(kvcache::PrefixCache* cache);
 
+    // Set SSM snapshot cache (optional, paired with prefix_cache on hybrid
+    // models). When both are set, the scheduler honors PrefixCache hits only
+    // for the exact full prompt AND when the SSM snapshot is restored — this
+    // keeps the linear-attention state coherent with the cached KV. Without
+    // this cache wired, prefix matching on hybrid models is silently ignored
+    // (partial hits would be prefix-blind for SSM layers).
+    void set_ssm_snapshot_cache(kvcache::SSMSnapshotCache* cache);
+
     // Wire an SSM state pool for hybrid models (Qwen3.5). When set, can_admit
     // also checks pool availability; admission grabs a slot, completion releases it.
     // Pass nullptr (the default) for non-hybrid models.
@@ -112,14 +122,24 @@ public:
     /**
      * Process results after model forward.
      * Samples tokens, advances state, completes finished requests.
+     *
+     * Three samplers are passed so the scheduler can route each request:
+     *   - default_sampler: used when the request has NO sampling overrides
+     *     (matches the model's generation_config.json choice)
+     *   - argmax_sampler:  used when override sets use_argmax=true or
+     *     temperature == 0 (OpenAI greedy semantics)
+     *   - general_sampler: used otherwise; per-request temperature/top_p/top_k
+     *     /repetition_penalty/seed land via setParams() right before sample()
      */
-    void process_results(ScheduledBatch& batch, tensor_t logits, sampler::Sampler& sampler,
+    void process_results(ScheduledBatch& batch, tensor_t logits, sampler::Sampler& default_sampler,
+                         sampler::Sampler& argmax_sampler, sampler::GeneralSampler& general_sampler,
                          tokenizer::Tokenizer& tokenizer, const std::vector<int>& stop_token_ids);
 
 private:
     SchedulerConfig config_;
     kvcache::BlockAllocator* block_allocator_ = nullptr;
     kvcache::PrefixCache* prefix_cache_ = nullptr;
+    kvcache::SSMSnapshotCache* ssm_snapshot_cache_ = nullptr;
     model::SSMStatePool* ssm_state_pool_ = nullptr;
     int think_open_token_id_ = -1;
     int think_close_token_id_ = -1;

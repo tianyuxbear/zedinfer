@@ -9,6 +9,11 @@
 #include "frontend/tokenizer/hf_tokenizer.hpp"
 #include "utils/logging.hpp"
 #include "utils/types.hpp"
+#include "backend/ops/ops.hpp"
+#include "backend/ops/scatter_image_embeds/scatter_image_embeds.hpp"
+#include "frontend/models/vision_tower.hpp"
+#include "zedinfer/chat_template_jinja.hpp"
+#include "zedinfer/multimodal_processor.hpp"
 #include "zedinfer/session.hpp"
 
 #include <algorithm>
@@ -225,6 +230,62 @@ std::shared_ptr<InferenceEngine> InferenceEngine::create(const std::string& mode
     auto engine = std::shared_ptr<InferenceEngine>(new InferenceEngine(
         std::move(model), std::move(tokenizer), std::move(sampler), device, exec_config, std::move(chat_template)));
 
+    // Always also instantiate an ArgmaxSampler and a GeneralSampler so the HTTP
+    // layer's per-request sampling overrides have something to dispatch to,
+    // regardless of which one engine.sampler() points at by default.
+    engine->argmax_sampler_ = sampler::createSampler(exec_config, sampler::SamplerType::ARGMAX);
+    {
+        sampler::SamplerParams default_general_params;
+        engine->general_sampler_
+            = std::static_pointer_cast<sampler::GeneralSampler>(
+                sampler::createSampler(exec_config, sampler::SamplerType::GENERAL, default_general_params));
+    }
+
+    // Try to load a Jinja chat template from common HF locations so every model
+    // — not just Qwen3.5 — gets the canonical prompt formatter. Sources, in
+    // priority order:
+    //   1. <model_path>/chat_template.jinja        (Qwen3.5+, latest HF export)
+    //   2. <model_path>/tokenizer_config.json's "chat_template" key
+    //      (legacy convention used by DeepSeek-R1, Qwen2/Qwen3, Llama, Mistral)
+    // Failure on either path falls through to the legacy hardcoded ChatTemplate.
+    {
+        namespace fs = std::filesystem;
+        fs::path jinja_file = fs::path(model_path) / "chat_template.jinja";
+        if (fs::exists(jinja_file)) {
+            try {
+                engine->chat_template_jinja_ = std::make_shared<ChatTemplateJinja>(
+                    ChatTemplateJinja::load(jinja_file.string()));
+                LOGI << "[Engine] Loaded Jinja chat template from " << jinja_file;
+            } catch (const std::exception& e) {
+                LOGW << "[Engine] chat_template.jinja load failed: " << e.what();
+            }
+        }
+        if (!engine->chat_template_jinja_) {
+            fs::path tcfg = fs::path(model_path) / "tokenizer_config.json";
+            if (fs::exists(tcfg)) {
+                try {
+                    std::ifstream f(tcfg);
+                    nlohmann::json j;
+                    f >> j;
+                    if (j.contains("chat_template") && j["chat_template"].is_string()) {
+                        std::string src = j["chat_template"].get<std::string>();
+                        if (!src.empty()) {
+                            engine->chat_template_jinja_ = std::make_shared<ChatTemplateJinja>(
+                                ChatTemplateJinja::load_from_source(src));
+                            LOGI.printf("[Engine] Loaded Jinja chat template from tokenizer_config.json (%zu bytes)",
+                                        src.size());
+                        }
+                    }
+                } catch (const std::exception& e) {
+                    LOGW << "[Engine] tokenizer_config.json chat_template extract failed: " << e.what();
+                }
+            }
+        }
+        if (!engine->chat_template_jinja_) {
+            LOGI << "[Engine] No Jinja chat template found; falling back to legacy ChatTemplate";
+        }
+    }
+
     engine->build_stop_token_ids();
 
     // Resolve <think>/</think> token ids from the tokenizer once at engine
@@ -258,6 +319,28 @@ std::shared_ptr<InferenceEngine> InferenceEngine::create(const std::string& mode
     if (engine->block_pool_ && engine->block_allocator_) {
         engine->prefix_cache_
             = std::make_unique<kvcache::PrefixCache>(*engine->block_pool_, engine->block_allocator_->num_layers());
+    }
+
+    // Hybrid models (Qwen3.5 family) need a paired SSM snapshot cache so the
+    // prefix-cache fast path stays correct for the linear-attention layers.
+    // Capacity defaults to 8 entries — one snapshot is ~ssm_bytes/slot +
+    // conv_bytes/slot (~50 MB for Qwen3.5-27B), so 8 entries ≈ 400 MB host RAM.
+    // Tunable later via env var if multi-user serving brings in more
+    // concurrent prompts.
+    if (auto* ssm_pool = engine->ssm_state_pool()) {
+        engine->ssm_snapshot_cache_ = std::make_unique<kvcache::SSMSnapshotCache>(*ssm_pool, /*max_entries=*/8);
+    }
+
+    // Multimodal pipeline init for vision-capable Qwen3.5 models. The
+    // MultiModalProcessor caches just the VisionConfig copy; the heavy lifting
+    // (stb_image decode + resize + patchify) happens per request.
+    if (auto* q35 = dynamic_cast<model::Qwen3_5Model*>(engine->model_.get())) {
+        if (q35->vision_tower() != nullptr) {
+            engine->mm_processor_ = std::make_unique<MultiModalProcessor>(
+                static_cast<const model::Qwen3_5Config&>(q35->config()).vision);
+            engine->image_pad_token_id_ = engine->tokenizer_->get_special_token_id("<|image_pad|>");
+            LOGI.printf("[Engine] Vision pipeline enabled; <|image_pad|>=%d", engine->image_pad_token_id_);
+        }
     }
 
     // Create decode scratch buffers (pre-allocated for N=1 decode)
@@ -599,6 +682,80 @@ model::SSMStatePool* InferenceEngine::ssm_state_pool() {
         return &q35->ssm_state_pool();
     }
     return nullptr;
+}
+
+bool InferenceEngine::has_vision() const {
+    if (auto* q35 = dynamic_cast<const model::Qwen3_5Model*>(model_.get())) {
+        return q35->vision_tower() != nullptr;
+    }
+    return false;
+}
+
+int InferenceEngine::image_pad_token_id() const { return image_pad_token_id_; }
+
+tensor_t InferenceEngine::encode_image_data_uri(std::string_view data_uri) {
+    auto* q35 = dynamic_cast<model::Qwen3_5Model*>(model_.get());
+    if (!q35 || !q35->vision_tower() || !mm_processor_) {
+        throw std::runtime_error("[Engine] encode_image_data_uri called on a non-vision model");
+    }
+    ImagePayload   payload   = MultiModalProcessor::decode_data_uri(data_uri);
+    ProcessedImage processed = mm_processor_->process(payload, exec_config_);
+    return q35->vision_tower()->forward(processed.patches, processed.pos_ids_thw, processed.grid_h, processed.grid_w,
+                                        exec_config_);
+}
+
+tensor_t InferenceEngine::build_multimodal_input_embeds(const std::vector<int>&      input_ids,
+                                                        const std::vector<tensor_t>& image_embeds_chunks) {
+    if (image_pad_token_id_ < 0) {
+        throw std::runtime_error("[Engine] build_multimodal_input_embeds: model has no <|image_pad|> token");
+    }
+    const size_t N            = input_ids.size();
+    const size_t hidden_size  = model_->config().hidden_size;
+    auto*        api          = core::context().runtime().api();
+
+    // 1. Host → device upload of input_ids.
+    auto ids_dev = Tensor::create({N}, ZEDINFER_DTYPE_I32, exec_config_.device_type, exec_config_.device_id);
+    api->memcpy_sync(ids_dev->data(), input_ids.data(), N * sizeof(int32_t),
+                     exec_config_.device_type == ZEDINFER_DEVICE_CPU ? ZEDINFER_MEMCPY_H2H : ZEDINFER_MEMCPY_H2D);
+
+    // 2. Text token embed lookup.
+    auto embeds = Tensor::create({N, hidden_size}, exec_config_.data_type, exec_config_.device_type,
+                                 exec_config_.device_id);
+    ops::embedding(embeds, ids_dev, model_->weights().get_tensor("embed_tokens.weight"));
+
+    if (image_embeds_chunks.empty()) {
+        return embeds;
+    }
+
+    // 3. Concat all image embeds chunks (in encounter order) so we can scatter
+    //    in a single op call. For the common single-image case this is just a
+    //    pointer rebind; for multi-image we copy each chunk into the right
+    //    offset via D2D memcpy_async.
+    tensor_t image_embeds;
+    if (image_embeds_chunks.size() == 1) {
+        image_embeds = image_embeds_chunks.front();
+    } else {
+        size_t total_rows = 0;
+        for (const auto& c : image_embeds_chunks) {
+            total_rows += c->dim(0);
+        }
+        image_embeds        = Tensor::create({total_rows, hidden_size}, exec_config_.data_type, exec_config_.device_type,
+                                              exec_config_.device_id);
+        auto*  stream       = core::context().runtime().stream();
+        size_t off_bytes    = 0;
+        const auto kind     = exec_config_.device_type == ZEDINFER_DEVICE_CPU ? ZEDINFER_MEMCPY_H2H
+                                                                              : ZEDINFER_MEMCPY_D2D;
+        for (const auto& c : image_embeds_chunks) {
+            const size_t bytes = c->numel() * c->elementSize();
+            api->memcpy_async(reinterpret_cast<std::byte*>(image_embeds->data()) + off_bytes, c->data(), bytes, kind,
+                              stream);
+            off_bytes += bytes;
+        }
+    }
+
+    // 4. Scatter into the text embed sequence at <|image_pad|> positions.
+    ops::scatter_image_embeds(embeds, ids_dev, image_embeds, image_pad_token_id_);
+    return embeds;
 }
 
 void InferenceEngine::init_block_pool() {

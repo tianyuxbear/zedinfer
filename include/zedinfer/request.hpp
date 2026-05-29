@@ -21,6 +21,10 @@ namespace zedinfer {
 struct GenerationResult {
     std::vector<int> output_ids;
     GenerationStats stats;
+    // OpenAI-compatible finish_reason: "stop" (EOS / cancellation),
+    // "length" (max_new_tokens reached), "tool_calls" (model emitted a tool call
+    // sequence; set by the HTTP layer after parsing). Default "stop".
+    std::string finish_reason = "stop";
 };
 
 /**
@@ -49,6 +53,19 @@ struct InferenceRequest {
     int last_token = -1;
 
     std::vector<int> output_ids;
+
+    // OpenAI-compatible finish_reason. Set by the scheduler when transitioning
+    // a request to RequestPhase::COMPLETE; "stop" on EOS / cancellation,
+    // "length" when generated_count reaches max_new_tokens. The HTTP layer may
+    // overwrite this with "tool_calls" after parsing the model output for a
+    // tool-call sequence.
+    std::string finish_reason = "stop";
+
+    // Latched flag set the first time the scheduler applies this request's
+    // GenerationConfig.seed to the GeneralSampler. Stops the per-token
+    // pick_sampler() path from re-seeding on every sample(), which would
+    // collapse the RNG into a deterministic single-step sequence.
+    bool sampler_seeded = false;
 
     // Reasoning-model thinking-block state (Qwen3.5 family). Tracks whether
     // the request is currently inside an open <think>...</think> block and
@@ -106,20 +123,25 @@ struct InferenceRequest {
     // Qwen3.5 hybrid-path state. Default-valued for non-hybrid models; the
     // Scheduler populates ssm_slot_idx_ at admit and clears it on finish.
     //
-    // ssm_slot_idx_   : index into SSMStatePool; -1 = no slot held
-    // image_embeds_   : pre-computed vision-tower output, scattered into the
-    //                   input embedding sequence at <|image_pad|> positions
-    // pos_ids_thw_    : [3, N_total] int32 (t, h, w) positions per token for
-    //                   3D MRoPE; null for non-hybrid models
-    // has_images_    : convenience flag mirroring image_embeds_ != nullptr
+    // ssm_slot_idx_       : index into SSMStatePool; -1 = no slot held
+    // input_embeds_       : pre-built layer-0 hidden state for multimodal
+    //                       prefill. Holds the FULL input embedding sequence
+    //                       [N_total, hidden] — text token embeddings with
+    //                       vision-tower outputs already scattered into
+    //                       <|image_pad|> positions. Despite the field name
+    //                       containing only the image-scattered final tensor,
+    //                       it is what the forward pass consumes as input.
+    // pos_ids_thw_        : [3, N_total] int32 (t, h, w) positions per token
+    //                       for 3D MRoPE; null for non-hybrid models
+    // has_input_embeds_   : convenience flag mirroring input_embeds_ != nullptr
     int  ssm_slot_idx() const { return ssm_slot_idx_; }
     void set_ssm_slot_idx(int idx) { ssm_slot_idx_ = idx; }
 
-    bool has_images() const { return has_images_; }
-    tensor_t image_embeds() const { return image_embeds_; }
-    void set_image_embeds(tensor_t e) {
-        image_embeds_ = std::move(e);
-        has_images_ = static_cast<bool>(image_embeds_);
+    bool     has_input_embeds() const { return has_input_embeds_; }
+    tensor_t input_embeds() const { return input_embeds_; }
+    void     set_input_embeds(tensor_t e) {
+        input_embeds_     = std::move(e);
+        has_input_embeds_ = static_cast<bool>(input_embeds_);
     }
 
     tensor_t pos_ids_thw() const { return pos_ids_thw_; }
@@ -131,9 +153,9 @@ private:
     bool owns_block_table_ = false;
 
     int      ssm_slot_idx_ = -1;
-    tensor_t image_embeds_;
+    tensor_t input_embeds_;
     tensor_t pos_ids_thw_;
-    bool     has_images_ = false;
+    bool     has_input_embeds_ = false;
 
 public:
     // ----- Qwen3.5 MTP (Stage D) per-request K/V state -----

@@ -1,6 +1,7 @@
 #include "zedinfer/scheduler.hpp"
 #include "backend/kvcache/block_pool.hpp"
 #include "backend/kvcache/prefix_cache.hpp"
+#include "backend/kvcache/ssm_snapshot_cache.hpp"
 #include "frontend/models/ssm_state_pool.hpp"
 #include "frontend/sampler/sampler.hpp"
 #include "frontend/tokenizer/base.hpp"
@@ -32,6 +33,10 @@ void Scheduler::set_block_allocator(kvcache::BlockAllocator* allocator) {
 
 void Scheduler::set_prefix_cache(kvcache::PrefixCache* cache) {
     prefix_cache_ = cache;
+}
+
+void Scheduler::set_ssm_snapshot_cache(kvcache::SSMSnapshotCache* cache) {
+    ssm_snapshot_cache_ = cache;
 }
 
 void Scheduler::submit(std::unique_ptr<InferenceRequest> request) {
@@ -151,17 +156,51 @@ void Scheduler::allocate_blocks_for_request(InferenceRequest* req) {
     }
 
     if (!req->has_block_table() || req->block_table().num_layers == 0) {
-        // New request: try prefix cache match first
+        // New request: try prefix cache match first.
+        //
+        // Hybrid model gate: KV-only prefix reuse is unsafe when the request
+        // also has SSM/conv state that would be left at post-reset zero — the
+        // linear-attention layers would run "prefix-blind" and diverge from a
+        // cold-cache run. We only honor a PrefixCache hit when (a) the SSM
+        // snapshot cache is wired, (b) it holds a snapshot keyed on the EXACT
+        // full prompt (so partial-prefix KV reuse is impossible), and (c) the
+        // snapshot restores cleanly into the freshly-acquired SSM slot.
         if (prefix_cache_ && !req->input_ids.empty()) {
-            kvcache::SequenceBlockTable matched;
-            int cached = prefix_cache_->match_prefix(req->input_ids, block_allocator_->block_size(), matched);
-            if (cached > 0) {
-                if (req->has_block_table()) {
-                    req->block_table() = std::move(matched);
-                } else {
-                    req->own_block_table(std::move(matched));
+            const bool hybrid                = (ssm_state_pool_ != nullptr);
+            const bool ssm_snapshot_present  = hybrid && ssm_snapshot_cache_
+                                              && ssm_snapshot_cache_->has(req->input_ids);
+            const bool skip_prefix_for_hybrid = hybrid && !ssm_snapshot_present;
+
+            if (!skip_prefix_for_hybrid) {
+                kvcache::SequenceBlockTable matched;
+                int cached = prefix_cache_->match_prefix(req->input_ids, block_allocator_->block_size(), matched);
+
+                // Hybrid models accept only exact full-prompt matches.
+                // Anything shorter would expose the SSM bleed bug.
+                if (hybrid && cached > 0 && cached < static_cast<int>(req->input_ids.size())) {
+                    block_allocator_->release_sequence(matched);
+                    cached = 0;
                 }
-                req->prefill_progress = cached;
+
+                if (hybrid && cached > 0) {
+                    // SSM restore for the matched (full) prompt.
+                    if (!ssm_snapshot_cache_
+                        || !ssm_snapshot_cache_->try_restore(req->input_ids, req->ssm_slot_idx())) {
+                        // Snapshot evicted between has() and try_restore() (LRU race) —
+                        // fall back to cold prefill rather than risk a prefix-blind run.
+                        block_allocator_->release_sequence(matched);
+                        cached = 0;
+                    }
+                }
+
+                if (cached > 0) {
+                    if (req->has_block_table()) {
+                        req->block_table() = std::move(matched);
+                    } else {
+                        req->own_block_table(std::move(matched));
+                    }
+                    req->prefill_progress = cached;
+                }
             }
         }
 
@@ -247,9 +286,47 @@ ScheduledBatch Scheduler::schedule() {
     return batch;
 }
 
-void Scheduler::process_results(ScheduledBatch& batch, tensor_t logits, sampler::Sampler& sampler,
+void Scheduler::process_results(ScheduledBatch& batch, tensor_t logits, sampler::Sampler& default_sampler,
+                                sampler::Sampler& argmax_sampler, sampler::GeneralSampler& general_sampler,
                                 tokenizer::Tokenizer& tokenizer, const std::vector<int>& stop_token_ids) {
     int offset = 0;
+
+    // Pick a sampler honoring the request's GenerationConfig overrides. Called
+    // immediately before each sample() so per-request temperature / top_p /
+    // top_k / seed / repetition_penalty land on the GeneralSampler instance.
+    // Single-threaded process_results means there is no concurrent setParams.
+    //
+    // Important: setSeed() is applied at most ONCE per request, gated by
+    // req.sampler_seeded. Re-seeding on every token would collapse the RNG
+    // into a deterministic single-step sequence (token 2 would resample from
+    // the same state as token 1), which breaks the OpenAI seed-per-request
+    // semantics ("seed initializes the run, subsequent tokens advance the RNG").
+    auto pick_sampler = [&](InferenceRequest& req) -> sampler::Sampler& {
+        const auto& gc = req.config;
+        if (!gc.has_sampling_override) {
+            return default_sampler;
+        }
+        if (gc.use_argmax || gc.temperature <= 0.0f) {
+            return argmax_sampler;
+        }
+        sampler::SamplerParams p;
+        p.temperature        = gc.temperature;
+        p.top_k              = gc.top_k;
+        p.top_p              = (gc.top_p <= 0.0f) ? 1.0f : gc.top_p;
+        p.repetition_penalty = (gc.repetition_penalty <= 0.0f) ? 1.0f : gc.repetition_penalty;
+        p.seed               = gc.seed;
+        if (p.validate()) {
+            general_sampler.setParams(p);
+            if (gc.seed != 0 && !req.sampler_seeded) {
+                general_sampler.setSeed(gc.seed);
+                req.sampler_seeded = true;
+            }
+        } else {
+            LOGW << "[Scheduler] Invalid sampler params (req=" << req.request_id
+                 << "), keeping previous params: " << p.info();
+        }
+        return general_sampler;
+    };
 
     // Inline helper: apply the "force-emit </think>" budget to a freshly
     // sampled token, then update the request's thinking state. Centralized so
@@ -329,13 +406,14 @@ void Scheduler::process_results(ScheduledBatch& batch, tensor_t logits, sampler:
             // main's corrected token and let next step overwrite the dirty
             // K/V slot we just wrote with the wrong input.
             auto row0 = logits->slice(0, offset,     offset + 1);
-            int  t0   = sampler.sample(row0, &req->output_ids);
+            sampler::Sampler& spec_sampler = pick_sampler(*req);
+            int  t0   = spec_sampler.sample(row0, &req->output_ids);
             t0 = apply_think_budget(req, t0);
 
             if (t0 == draft) {
                 // ACCEPT: commit draft + sample next from logits[1].
                 auto row1 = logits->slice(0, offset + 1, offset + 2);
-                int  t1   = sampler.sample(row1, &req->output_ids);
+                int  t1   = spec_sampler.sample(row1, &req->output_ids);
                 // think-budget on the second emitted token too.
                 t1 = apply_think_budget(req, t1);
 
@@ -354,8 +432,11 @@ void Scheduler::process_results(ScheduledBatch& batch, tensor_t logits, sampler:
                 req->mtp_accept_count  += 1;
                 req->mtp_last_n_committed = 2;
 
-                if (is_stop_token(t0, stop_token_ids) || is_stop_token(t1, stop_token_ids)
-                    || req->generated_count >= req->config.max_new_tokens) {
+                if (is_stop_token(t0, stop_token_ids) || is_stop_token(t1, stop_token_ids)) {
+                    req->finish_reason = "stop";
+                    complete_request(*req);
+                } else if (req->generated_count >= req->config.max_new_tokens) {
+                    req->finish_reason = "length";
                     complete_request(*req);
                 } else if (req->config.stream && req->stream_callback) {
                     req->stream_callback(tokenizer.decode({t0, t1}));
@@ -378,8 +459,11 @@ void Scheduler::process_results(ScheduledBatch& batch, tensor_t logits, sampler:
                 req->mtp_reject_count += 1;
                 req->mtp_last_n_committed = 1;
 
-                if (is_stop_token(t0, stop_token_ids)
-                    || req->generated_count >= req->config.max_new_tokens) {
+                if (is_stop_token(t0, stop_token_ids)) {
+                    req->finish_reason = "stop";
+                    complete_request(*req);
+                } else if (req->generated_count >= req->config.max_new_tokens) {
+                    req->finish_reason = "length";
                     complete_request(*req);
                 } else if (req->config.stream && req->stream_callback) {
                     req->stream_callback(tokenizer.decode({t0}));
@@ -389,7 +473,7 @@ void Scheduler::process_results(ScheduledBatch& batch, tensor_t logits, sampler:
         } else {
             // Normal 1-token decode (no draft pending OR spec disabled).
             auto req_logits = logits->slice(0, offset, offset + 1);
-            int  token = sampler.sample(req_logits, &req->output_ids);
+            int  token = pick_sampler(*req).sample(req_logits, &req->output_ids);
             token = apply_think_budget(req, token);
 
             if (const char* env = std::getenv("ZEDINFER_DUMP_TOKEN_IDS"); env && env[0] == '1') {
@@ -402,7 +486,11 @@ void Scheduler::process_results(ScheduledBatch& batch, tensor_t logits, sampler:
             req->block_table().seq_len++;
             req->mtp_last_n_committed = 1;
 
-            if (is_stop_token(token, stop_token_ids) || req->generated_count >= req->config.max_new_tokens) {
+            if (is_stop_token(token, stop_token_ids)) {
+                req->finish_reason = "stop";
+                complete_request(*req);
+            } else if (req->generated_count >= req->config.max_new_tokens) {
+                req->finish_reason = "length";
                 complete_request(*req);
             } else if (req->config.stream && req->stream_callback) {
                 req->stream_callback(tokenizer.decode({token}));
@@ -437,10 +525,31 @@ void Scheduler::process_results(ScheduledBatch& batch, tensor_t logits, sampler:
             if (prefix_cache_ && block_allocator_) {
                 prefix_cache_->insert_blocks(req->input_ids, block_allocator_->block_size(), req->block_table());
             }
+            // Multimodal prefill consumed the pre-baked input_embeds in this
+            // step; subsequent decode steps must NOT re-use the [N_total, H]
+            // input_embeds buffer (forward would see size mismatch against the
+            // N=1 decode batch). Clear it now that prefill is fully done.
+            if (req->has_input_embeds()) {
+                req->set_input_embeds(nullptr);
+            }
+            // Hybrid model: snapshot the SSM/conv state at the prefill boundary
+            // so a future request with the same exact prompt can restore it
+            // and skip prefill. The sample() call that immediately follows
+            // does not advance SSM state (it only reads logits), so capturing
+            // here is equivalent to capturing right after the last prefill
+            // chunk finished. We only record on the path where prefill
+            // actually ran end-to-end (`req->prefill_progress` advanced to
+            // input_ids.size() through scheduler chunks); on a full prefix-
+            // cache hit the SSM state is already a restored snapshot and
+            // re-recording would just rewrite identical bytes.
+            if (ssm_snapshot_cache_ != nullptr && ssm_state_pool_ != nullptr
+                && req->ssm_slot_idx() >= 0) {
+                ssm_snapshot_cache_->record(req->input_ids, req->ssm_slot_idx());
+            }
 
             auto req_logits = logits->slice(0, offset, offset + chunk);
             // First sampled token of a request: no generated history yet.
-            int token = sampler.sample(req_logits, &req->output_ids);
+            int token = pick_sampler(*req).sample(req_logits, &req->output_ids);
             token = apply_think_budget(req, token);
 
             if (const char* env = std::getenv("ZEDINFER_DUMP_TOKEN_IDS"); env && env[0] == '1') {
@@ -453,6 +562,12 @@ void Scheduler::process_results(ScheduledBatch& batch, tensor_t logits, sampler:
             req->stats.prompt_tokens = req->input_ids.size();
 
             if (is_stop_token(token, stop_token_ids)) {
+                req->finish_reason = "stop";
+                complete_request(*req);
+            } else if (req->generated_count >= req->config.max_new_tokens) {
+                // max_new_tokens == 1 edge case: the first prefill token is
+                // already the last allowed token, finish with "length".
+                req->finish_reason = "length";
                 complete_request(*req);
             } else if (req->config.stream && req->stream_callback) {
                 req->stream_callback(tokenizer.decode({token}));
@@ -488,6 +603,7 @@ void Scheduler::complete_request(InferenceRequest& req) {
     result.stats = req.stats;
     result.stats.generated_tokens = result.output_ids.size();
     result.stats.total_tokens = result.stats.prompt_tokens + result.stats.generated_tokens;
+    result.finish_reason = req.finish_reason;
 
     try {
         req.result_promise.set_value(std::move(result));
