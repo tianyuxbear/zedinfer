@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <nlohmann/json_fwd.hpp>
 #include <string>
 #include <variant>
 #include <vector>
@@ -44,13 +45,25 @@ public:
     // matching the T2 smoke test.
     static ChatTemplateJinja load(const std::string& template_file);
 
+    // Compile an inline Jinja source string (without going through disk). Used
+    // when the template ships embedded inside tokenizer_config.json under the
+    // "chat_template" key — the convention for most HuggingFace models that
+    // predate the standalone chat_template.jinja file (DeepSeek-R1, Qwen2, etc.).
+    static ChatTemplateJinja load_from_source(const std::string& source);
+
     // Render a list of messages.
     //   add_generation_prompt: append the `<|im_start|>assistant\n` opener.
     //   enable_thinking:       toggle Qwen3.5's `<think>` block. When false,
     //                          the template emits an empty `<think>\n\n</think>\n\n`
     //                          stub instead of the open `<think>\n` tag.
+    //   tools:                 OpenAI-style tools array (each entry shaped as
+    //                          `{"type":"function","function":{...}}`) forwarded
+    //                          to minja's chat_template_inputs.tools so the
+    //                          Jinja template can format function definitions
+    //                          into the prompt. Empty / null disables tool use.
     std::string render(const std::vector<ChatMessageMM>& messages, bool add_generation_prompt = true,
-                       bool enable_thinking = true) const;
+                       bool enable_thinking = true,
+                       const nlohmann::ordered_json* tools = nullptr) const;
 
 private:
     struct Impl;

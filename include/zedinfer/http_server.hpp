@@ -25,6 +25,15 @@ struct ServerConfig {
     int request_timeout_sec = 300;
     int max_sessions = 100;
     int session_idle_timeout = 1800;
+    // Override the model id surfaced in /v1/models, /health, and chat
+    // completion responses. Empty -> use engine.model_name() (the raw path).
+    // Useful for impersonating an OpenAI model id from existing clients.
+    std::string served_model_name;
+    // Bearer token expected in Authorization header on protected endpoints.
+    // Empty -> auth disabled (backward compatible). When set, /v1/* and
+    // /tokenize / /detokenize require "Authorization: Bearer <api_key>".
+    // /health and static files are always public.
+    std::string api_key;
 };
 
 class HttpServer {
@@ -40,6 +49,9 @@ private:
     httplib::Server server_;
     std::atomic<uint64_t> request_counter_{0};
     std::string web_root_;
+    // Model id used in API responses; resolved once at construction from
+    // ServerConfig.served_model_name override, falling back to engine.model_name().
+    std::string display_model_name_;
 
     // Static file cache
     std::unordered_map<std::string, std::pair<std::string, std::string>> file_cache_;
@@ -95,6 +107,8 @@ private:
     void handle_models(const httplib::Request& req, httplib::Response& res);
     void handle_health(const httplib::Request& req, httplib::Response& res);
     void handle_delete_session(const httplib::Request& req, httplib::Response& res);
+    void handle_tokenize(const httplib::Request& req, httplib::Response& res);
+    void handle_detokenize(const httplib::Request& req, httplib::Response& res);
 
     // Helpers
     std::string generate_request_id();

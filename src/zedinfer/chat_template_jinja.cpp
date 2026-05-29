@@ -101,8 +101,20 @@ ChatTemplateJinja ChatTemplateJinja::load(const std::string& template_file) {
     return out;
 }
 
+ChatTemplateJinja ChatTemplateJinja::load_from_source(const std::string& source) {
+    auto impl = std::make_shared<Impl>();
+    if (source.empty()) {
+        throw std::runtime_error("[ChatTemplateJinja] empty inline chat template source");
+    }
+    impl->tpl = std::make_unique<minja::chat_template>(source, /*bos_token=*/"", /*eos_token=*/"");
+    LOGI << "[ChatTemplateJinja] Compiled chat template from inline source (" << source.size() << " bytes)";
+    ChatTemplateJinja out;
+    out.impl_ = std::move(impl);
+    return out;
+}
+
 std::string ChatTemplateJinja::render(const std::vector<ChatMessageMM>& messages, bool add_generation_prompt,
-                                      bool enable_thinking) const {
+                                      bool enable_thinking, const nlohmann::ordered_json* tools) const {
     if (!impl_ || !impl_->tpl) {
         throw std::runtime_error("[ChatTemplateJinja] render() called on an uninitialised template");
     }
@@ -116,6 +128,9 @@ std::string ChatTemplateJinja::render(const std::vector<ChatMessageMM>& messages
     minja::chat_template_inputs inputs;
     inputs.messages = std::move(msgs_json);
     inputs.add_generation_prompt = add_generation_prompt;
+    if (tools != nullptr && !tools->is_null()) {
+        inputs.tools = *tools;
+    }
     // The Qwen3.5 template reads `enable_thinking` from its evaluation context.
     // Pass it via extra_context — minja's apply() forwards extra_context entries
     // as top-level variables to the rendered template.

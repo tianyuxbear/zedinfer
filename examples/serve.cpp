@@ -58,6 +58,16 @@ int main(int argc, char* argv[]) {
         .default_value(false)
         .implicit_value(true);
 
+    program.add_argument("--served-model-name")
+        .help("Model id surfaced in /v1/models and chat completion responses. "
+              "Defaults to the model path. Useful for impersonating an OpenAI model id.")
+        .default_value(std::string(""));
+
+    program.add_argument("--api-key")
+        .help("Bearer token required on /v1/* and /tokenize endpoints. "
+              "Empty (default) disables auth.")
+        .default_value(std::string(""));
+
     try {
         program.parse_args(argc, argv);
     } catch (const std::exception& err) {
@@ -95,6 +105,8 @@ int main(int argc, char* argv[]) {
     ServerConfig server_config;
     server_config.host = host;
     server_config.port = port;
+    server_config.served_model_name = program.get<std::string>("--served-model-name");
+    server_config.api_key = program.get<std::string>("--api-key");
 
     HttpServer server(server_config, engine);
     g_server = &server;
@@ -106,6 +118,12 @@ int main(int argc, char* argv[]) {
     printf("\n========================================\n");
     printf("  ZedInfer Server\n");
     printf("  Model: %s\n", engine->model_name().c_str());
+    if (!server_config.served_model_name.empty()) {
+        printf("  Served as: %s\n", server_config.served_model_name.c_str());
+    }
+    if (!server_config.api_key.empty()) {
+        printf("  Auth: Bearer (api-key required)\n");
+    }
     printf("  Listening: http://%s:%d\n", host.c_str(), port);
     printf("  Web UI: http://%s:%d/\n", host.c_str(), port);
     printf("  API: http://%s:%d/v1/chat/completions\n", host.c_str(), port);

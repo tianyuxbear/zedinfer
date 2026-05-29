@@ -1,5 +1,6 @@
 #include "zedinfer/http_server.hpp"
 #include "utils/logging.hpp"
+#include "zedinfer/chat_template_jinja.hpp"
 #include "zedinfer/engine.hpp"
 #include "zedinfer/request.hpp"
 
@@ -50,6 +51,288 @@ private:
     std::mutex mutex_;
     std::condition_variable cv_;
 };
+
+// Parse an OpenAI-style chat message (string content OR content-parts array)
+// into a ChatMessageMM. Sets `had_images` to true when at least one image part
+// was found, so the caller can warn about the vision encoder not yet running.
+//
+// content parts schema supported (matches OpenAI / Qwen3.5 spec):
+//   {"type": "text",      "text": "..."}
+//   {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}
+//   {"type": "image_url", "image_url": "data:image/png;base64,..."}    // shorthand
+//   {"type": "image",     "image": "data:image/png;base64,..."}        // Qwen3.5 style
+//
+// Unknown part types are ignored. A message with no recognizable parts becomes
+// an empty string content.
+static ChatMessageMM parse_openai_message(const json& msg, bool& had_images) {
+    ChatMessageMM out;
+    out.role = msg.value("role", "");
+    if (!msg.contains("content")) {
+        out.content = std::string();
+        return out;
+    }
+    const auto& c = msg["content"];
+    if (c.is_string()) {
+        out.content = c.get<std::string>();
+        return out;
+    }
+    if (!c.is_array()) {
+        out.content = std::string();
+        return out;
+    }
+    std::vector<ContentPart> parts;
+    for (const auto& p : c) {
+        if (!p.is_object()) {
+            continue;
+        }
+        std::string ptype = p.value("type", "");
+        if (ptype == "text" && p.contains("text") && p["text"].is_string()) {
+            parts.push_back(TextPart{p["text"].get<std::string>()});
+        } else if (ptype == "image_url" && p.contains("image_url")) {
+            const auto& iu = p["image_url"];
+            std::string url;
+            if (iu.is_string()) {
+                url = iu.get<std::string>();
+            } else if (iu.is_object() && iu.contains("url") && iu["url"].is_string()) {
+                url = iu["url"].get<std::string>();
+            }
+            if (!url.empty()) {
+                parts.push_back(ImagePart{std::move(url)});
+                had_images = true;
+            }
+        } else if (ptype == "image" && p.contains("image") && p["image"].is_string()) {
+            parts.push_back(ImagePart{p["image"].get<std::string>()});
+            had_images = true;
+        }
+    }
+    out.content = std::move(parts);
+    return out;
+}
+
+// Flatten a content (string or array) into a single text string for the legacy
+// chat_template path which only understands plain text. Image parts are
+// dropped silently (with a single caller-side warning when images were seen).
+static std::string flatten_message_content(const json& msg) {
+    if (!msg.contains("content")) {
+        return "";
+    }
+    const auto& c = msg["content"];
+    if (c.is_string()) {
+        return c.get<std::string>();
+    }
+    if (!c.is_array()) {
+        return "";
+    }
+    std::string flat;
+    for (const auto& p : c) {
+        if (p.is_object() && p.value("type", "") == "text" && p.contains("text") && p["text"].is_string()) {
+            flat += p["text"].get<std::string>();
+        }
+    }
+    return flat;
+}
+
+// ----------------------------------------------------------------------------
+// Qwen3 tool-call output parsing.
+// Qwen3 / Qwen3-Coder emit tool calls as:
+//
+//   <tool_call>
+//   {"name": "get_weather", "arguments": {"city": "Beijing"}}
+//   </tool_call>
+//
+// (sometimes with `parameters` instead of `arguments`). We extract every block
+// and reshape into OpenAI's standard tool_calls schema. Anything outside the
+// blocks stays as content text. Malformed JSON inside a block is preserved
+// verbatim as inline text so we do not silently swallow data.
+struct ToolCallParseResult {
+    std::string content;      // text outside any <tool_call> block
+    json        tool_calls;   // array; each entry {id, type:"function", function:{name,arguments}}
+    bool        has_tool_calls = false;
+};
+
+static std::string trim_ascii_ws(std::string s) {
+    auto issp = [](char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; };
+    while (!s.empty() && issp(s.front())) {
+        s.erase(s.begin());
+    }
+    while (!s.empty() && issp(s.back())) {
+        s.pop_back();
+    }
+    return s;
+}
+
+// Try to parse Qwen3-Coder XML-style payload between <tool_call>...</tool_call>:
+//
+//   <function=get_weather>
+//   <parameter=city>
+//   Beijing
+//   </parameter>
+//   </function>
+//
+// Returns true and fills name/args_json on success; args_json is an
+// ordered object whose values are parsed as JSON when possible, else strings.
+static bool parse_xml_tool_call_inner(const std::string& inner, std::string& name, json& args_json) {
+    size_t fn_open = inner.find("<function=");
+    if (fn_open == std::string::npos) {
+        return false;
+    }
+    size_t fn_name_start = fn_open + 10; // strlen("<function=")
+    size_t fn_name_end = inner.find('>', fn_name_start);
+    if (fn_name_end == std::string::npos) {
+        return false;
+    }
+    name = trim_ascii_ws(inner.substr(fn_name_start, fn_name_end - fn_name_start));
+    if (name.empty()) {
+        return false;
+    }
+    size_t fn_close = inner.find("</function>", fn_name_end);
+    if (fn_close == std::string::npos) {
+        return false;
+    }
+    std::string body = inner.substr(fn_name_end + 1, fn_close - (fn_name_end + 1));
+    args_json = json::object();
+    size_t pos = 0;
+    while (pos < body.size()) {
+        size_t p_open = body.find("<parameter=", pos);
+        if (p_open == std::string::npos) {
+            break;
+        }
+        size_t p_name_start = p_open + 11; // strlen("<parameter=")
+        size_t p_name_end = body.find('>', p_name_start);
+        if (p_name_end == std::string::npos) {
+            break;
+        }
+        std::string key = trim_ascii_ws(body.substr(p_name_start, p_name_end - p_name_start));
+        size_t p_close = body.find("</parameter>", p_name_end);
+        if (p_close == std::string::npos) {
+            break;
+        }
+        std::string raw_value = trim_ascii_ws(body.substr(p_name_end + 1, p_close - (p_name_end + 1)));
+        // Try parsing as JSON literal first (numbers, bools, arrays, nested objects);
+        // fall back to the raw string when not valid JSON.
+        try {
+            args_json[key] = json::parse(raw_value);
+        } catch (const std::exception&) {
+            args_json[key] = raw_value;
+        }
+        pos = p_close + 12; // strlen("</parameter>")
+    }
+    return true;
+}
+
+static ToolCallParseResult parse_qwen3_tool_calls(const std::string& text) {
+    ToolCallParseResult out;
+    out.tool_calls = json::array();
+    static constexpr const char* OPEN = "<tool_call>";
+    static constexpr const char* CLOSE = "</tool_call>";
+    static constexpr size_t OPEN_LEN = 11;
+    static constexpr size_t CLOSE_LEN = 12;
+    size_t pos = 0;
+    int counter = 0;
+    while (pos < text.size()) {
+        size_t open = text.find(OPEN, pos);
+        if (open == std::string::npos) {
+            out.content.append(text, pos, text.size() - pos);
+            break;
+        }
+        out.content.append(text, pos, open - pos);
+        size_t close = text.find(CLOSE, open + OPEN_LEN);
+        if (close == std::string::npos) {
+            // Unterminated <tool_call>: keep the rest as plain text (the model
+            // got cut off mid-emission).
+            out.content.append(text, open, text.size() - open);
+            break;
+        }
+        std::string inner = trim_ascii_ws(text.substr(open + OPEN_LEN, close - (open + OPEN_LEN)));
+        bool consumed = false;
+        std::string fn_name;
+        json fn_args;
+        // Try Hermes/JSON style: {"name": "...", "arguments": {...}}
+        try {
+            auto j = json::parse(inner);
+            if (j.is_object() && j.contains("name") && j["name"].is_string()) {
+                fn_name = j["name"].get<std::string>();
+                fn_args = j.contains("arguments") ? j["arguments"]
+                          : (j.contains("parameters") ? j["parameters"] : json::object());
+                consumed = true;
+            }
+        } catch (const std::exception&) {
+            // Not JSON; try Qwen3-Coder XML style below.
+        }
+        // Try Qwen3-Coder XML style.
+        if (!consumed) {
+            if (parse_xml_tool_call_inner(inner, fn_name, fn_args)) {
+                consumed = true;
+            }
+        }
+        if (consumed) {
+            json call;
+            call["id"] = std::string("call_") + std::to_string(counter++);
+            call["type"] = "function";
+            json fn;
+            fn["name"] = fn_name;
+            // OpenAI requires arguments as a JSON-encoded STRING, not an object.
+            fn["arguments"] = fn_args.is_string() ? fn_args.get<std::string>() : fn_args.dump();
+            call["function"] = std::move(fn);
+            out.tool_calls.push_back(std::move(call));
+            out.has_tool_calls = true;
+        } else {
+            out.content.append(text, open, close + CLOSE_LEN - open);
+        }
+        pos = close + CLOSE_LEN;
+    }
+    return out;
+}
+
+// Reasoning-mode tag literals. Qwen3.5 / DeepSeek-R1 emit these as exactly the
+// substrings "<think>" / "</think>" after token decoding (each is a single
+// special token id in those vocabs). We surface anything between them via the
+// OpenAI o1-style `reasoning_content` field so clients can fold thinking out
+// of the main reply.
+static constexpr const char* kReasoningOpenTag = "<think>";
+static constexpr const char* kReasoningCloseTag = "</think>";
+static constexpr size_t kReasoningOpenLen = 7;  // strlen("<think>")
+static constexpr size_t kReasoningCloseLen = 8; // strlen("</think>")
+
+struct ReasoningSplit {
+    std::string reasoning;
+    std::string content;
+};
+
+// Walk text from left to right, accumulating into `reasoning` while inside an
+// open <think>...</think> block, and into `content` otherwise. `initial_in_think`
+// lets callers seed the state from a session prefix (e.g. DeepSeek-R1's
+// "<think> " output_prefix opens a block before the model has emitted anything).
+// Unterminated <think> blocks at end-of-text are treated as fully reasoning.
+static ReasoningSplit split_reasoning(const std::string& text, bool initial_in_think = false) {
+    ReasoningSplit out;
+    bool in_think = initial_in_think;
+    size_t pos = 0;
+    while (pos < text.size()) {
+        if (in_think) {
+            size_t end = text.find(kReasoningCloseTag, pos);
+            if (end == std::string::npos) {
+                out.reasoning.append(text, pos, text.size() - pos);
+                pos = text.size();
+            } else {
+                out.reasoning.append(text, pos, end - pos);
+                pos = end + kReasoningCloseLen;
+                in_think = false;
+            }
+        } else {
+            size_t open = text.find(kReasoningOpenTag, pos);
+            if (open == std::string::npos) {
+                out.content.append(text, pos, text.size() - pos);
+                pos = text.size();
+            } else {
+                out.content.append(text, pos, open - pos);
+                pos = open + kReasoningOpenLen;
+                in_think = true;
+            }
+        }
+    }
+    return out;
+}
 
 static size_t valid_utf8_length(const std::string& s) {
     size_t i = 0, last_good = 0;
@@ -268,9 +551,52 @@ void HttpServer::cleanup_idle_sessions() {
 
 HttpServer::HttpServer(ServerConfig config, std::shared_ptr<InferenceEngine> engine)
     : config_(std::move(config)), engine_(std::move(engine)) {
+    display_model_name_ = !config_.served_model_name.empty() ? config_.served_model_name : engine_->model_name();
     web_root_ = resolve_web_root();
     cache_static_files();
     server_.set_payload_max_length(10 * 1024 * 1024);
+
+    // CORS: allow browser clients from any origin to call the API. Permissive
+    // because this is a single-user local-deployment service; tighten by editing
+    // these headers if you front the server with a reverse proxy that enforces
+    // its own origin policy.
+    server_.set_default_headers({
+        {"Access-Control-Allow-Origin", "*"},
+        {"Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS"},
+        {"Access-Control-Allow-Headers", "Content-Type, Authorization"},
+        {"Access-Control-Max-Age", "86400"},
+    });
+    // CORS preflight: respond 204 to any OPTIONS request without invoking handlers.
+    server_.Options("(.*)", [](const httplib::Request&, httplib::Response& res) { res.status = 204; });
+
+    // Bearer-token auth: gate /v1/*, /tokenize, /detokenize when api_key is set.
+    // /health and static files stay public so browsers / monitors can probe the
+    // server without a credential. CORS preflight (OPTIONS) is always allowed.
+    if (!config_.api_key.empty()) {
+        server_.set_pre_routing_handler([this](const httplib::Request& req, httplib::Response& res) {
+            if (req.method == "OPTIONS") {
+                return httplib::Server::HandlerResponse::Unhandled;
+            }
+            const std::string& path = req.path;
+            bool needs_auth = (path.rfind("/v1/", 0) == 0) || (path == "/tokenize")
+                              || (path == "/detokenize");
+            if (!needs_auth) {
+                return httplib::Server::HandlerResponse::Unhandled;
+            }
+            std::string auth = req.get_header_value("Authorization");
+            const std::string prefix = "Bearer ";
+            if (auth.size() <= prefix.size() || auth.compare(0, prefix.size(), prefix) != 0) {
+                send_error(res, 401, "Missing or malformed Authorization header (expected 'Bearer <api_key>')",
+                           "authentication_error", "invalid_api_key");
+                return httplib::Server::HandlerResponse::Handled;
+            }
+            if (auth.substr(prefix.size()) != config_.api_key) {
+                send_error(res, 401, "Invalid API key", "authentication_error", "invalid_api_key");
+                return httplib::Server::HandlerResponse::Handled;
+            }
+            return httplib::Server::HandlerResponse::Unhandled;
+        });
+    }
 
     // HTTP access logger
     server_.set_logger([](const httplib::Request& req, const httplib::Response& res) {
@@ -287,6 +613,10 @@ HttpServer::HttpServer(ServerConfig config, std::shared_ptr<InferenceEngine> eng
     server_.Get("/health", [this](const httplib::Request& req, httplib::Response& res) { handle_health(req, res); });
     server_.Delete("/v1/sessions/(.*)",
                    [this](const httplib::Request& req, httplib::Response& res) { handle_delete_session(req, res); });
+    server_.Post("/tokenize",
+                 [this](const httplib::Request& req, httplib::Response& res) { handle_tokenize(req, res); });
+    server_.Post("/detokenize",
+                 [this](const httplib::Request& req, httplib::Response& res) { handle_detokenize(req, res); });
 
     // Static files from cache
     server_.Get("/(.*)", [this](const httplib::Request& req, httplib::Response& res) {
@@ -325,7 +655,7 @@ void HttpServer::handle_models(const httplib::Request&, httplib::Response& res) 
 
     json response;
     response["object"] = "list";
-    response["data"] = json::array({{{"id", engine_->model_name()}, {"object", "model"}, {"created", epoch}}});
+    response["data"] = json::array({{{"id", display_model_name_}, {"object", "model"}, {"created", epoch}}});
     res.set_content(response.dump(), "application/json");
 }
 
@@ -336,7 +666,7 @@ void HttpServer::handle_models(const httplib::Request&, httplib::Response& res) 
 void HttpServer::handle_health(const httplib::Request&, httplib::Response& res) {
     json response;
     response["status"] = "ok";
-    response["model"] = engine_->model_name();
+    response["model"] = display_model_name_;
     response["active_requests"] = engine_->serving_loop().active_count();
     response["pending_requests"] = engine_->serving_loop().pending_count();
 
@@ -365,6 +695,82 @@ void HttpServer::handle_delete_session(const httplib::Request& req, httplib::Res
 }
 
 // ============================================================================
+// POST /tokenize and /detokenize (vLLM-style extensions, non-OpenAI standard)
+// ============================================================================
+
+void HttpServer::handle_tokenize(const httplib::Request& req, httplib::Response& res) {
+    json body;
+    try {
+        body = json::parse(req.body);
+    } catch (const json::parse_error& e) {
+        send_error(res, 400, std::string("Invalid JSON: ") + e.what(), "invalid_request_error", "invalid_json");
+        return;
+    }
+
+    // Accept either {"prompt": "..."} or {"text": "..."}; vLLM uses "prompt".
+    std::string text;
+    if (body.contains("prompt") && body["prompt"].is_string()) {
+        text = body["prompt"].get<std::string>();
+    } else if (body.contains("text") && body["text"].is_string()) {
+        text = body["text"].get<std::string>();
+    } else {
+        send_error(res, 400, "Missing 'prompt' or 'text' field", "invalid_request_error", "missing_field");
+        return;
+    }
+
+    std::vector<int> ids;
+    try {
+        ids = engine_->tokenizer().encode(text);
+    } catch (const std::exception& e) {
+        send_error(res, 500, std::string("Tokenization failed: ") + e.what(), "internal_error", "tokenize_failed");
+        return;
+    }
+
+    json response;
+    response["count"] = ids.size();
+    response["max_model_len"] = engine_->exec_config().max_seq_len;
+    response["tokens"] = ids;
+    res.set_content(response.dump(), "application/json");
+}
+
+void HttpServer::handle_detokenize(const httplib::Request& req, httplib::Response& res) {
+    json body;
+    try {
+        body = json::parse(req.body);
+    } catch (const json::parse_error& e) {
+        send_error(res, 400, std::string("Invalid JSON: ") + e.what(), "invalid_request_error", "invalid_json");
+        return;
+    }
+
+    if (!body.contains("tokens") || !body["tokens"].is_array()) {
+        send_error(res, 400, "Missing or invalid 'tokens' array", "invalid_request_error", "missing_field");
+        return;
+    }
+
+    std::vector<int> ids;
+    ids.reserve(body["tokens"].size());
+    for (const auto& tok : body["tokens"]) {
+        if (!tok.is_number_integer()) {
+            send_error(res, 400, "'tokens' must be an array of integers", "invalid_request_error", "invalid_token");
+            return;
+        }
+        ids.push_back(tok.get<int>());
+    }
+
+    std::string text;
+    try {
+        text = engine_->tokenizer().decode(ids);
+    } catch (const std::exception& e) {
+        send_error(res, 500, std::string("Detokenization failed: ") + e.what(), "internal_error", "detokenize_failed");
+        return;
+    }
+
+    json response;
+    response["prompt"] = text;
+    res.set_content(response.dump(), "application/json");
+}
+
+// ============================================================================
 // POST /v1/chat/completions
 // ============================================================================
 
@@ -387,12 +793,44 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
     bool stream = body.value("stream", false);
     int max_tokens = body.value("max_tokens", 512);
     std::string session_id = body.value("session_id", std::string(""));
+    // Non-OpenAI extension: opt into Qwen3.5 thinking-mode prompt rendering.
+    // Default false matches GenerationConfig and the existing serve behavior.
+    bool enable_thinking = body.value("enable_thinking", false);
 
-    // 3. Extract last user message
+    // Pre-scan messages for image parts. When the request carries images the
+    // KV cache from a prior session turn cannot be reused (vision embeddings
+    // change the prefix), so we forcibly downgrade to stateless full-prefill
+    // and warn — preserves the OpenAI contract without crashing in the
+    // session-vs-multimodal corner.
+    bool request_has_images = false;
+    for (const auto& msg : body["messages"]) {
+        if (!msg.contains("content") || !msg["content"].is_array()) {
+            continue;
+        }
+        for (const auto& p : msg["content"]) {
+            if (p.is_object() && (p.value("type", "") == "image_url" || p.value("type", "") == "image")) {
+                request_has_images = true;
+                break;
+            }
+        }
+        if (request_has_images) {
+            break;
+        }
+    }
+    if (request_has_images && !session_id.empty()) {
+        LOGW << "[HttpServer] Session " << session_id
+             << " has image input; ignoring session_id and using stateless full prefill "
+                "(image embeddings invalidate cached prefix KV).";
+        session_id.clear();
+    }
+
+    // 3. Extract last user message. Multimodal `content` arrays are flattened
+    // to their text parts so logging and session-continuation can use a plain
+    // string. Image parts are skipped here (the vision encoder owns them).
     std::string last_user_message;
     for (auto it = body["messages"].rbegin(); it != body["messages"].rend(); ++it) {
         if ((*it).value("role", "") == "user") {
-            last_user_message = (*it).value("content", "");
+            last_user_message = flatten_message_content(*it);
             break;
         }
     }
@@ -407,10 +845,108 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
         session_lock = SessionLock(this, session_id);
     }
 
-    // 5. Build prompt — session vs stateless
+    // 4b. response_format (simplified JSON mode). When the client sets
+    //   {"response_format": {"type": "json_object"}} or
+    //   {"response_format": {"type": "json_schema", "json_schema": {...}}}
+    // we inject a system-side instruction telling the model to reply with valid
+    // JSON. This is the prompt-injection variant — NOT constrained decoding;
+    // accuracy depends on the model honoring the directive (>95% on Qwen3.5).
+    //
+    // We always PREPEND a fresh system message rather than mutating the
+    // caller's existing one — multiple system messages are well-defined under
+    // OpenAI's spec and every modern chat template handles them, and it keeps
+    // the injection independent of whatever shape (string / parts array /
+    // other) the caller's system content has.
+    if (body.contains("response_format") && body["response_format"].is_object()) {
+        const auto& rf = body["response_format"];
+        std::string ftype = rf.value("type", "");
+        if (ftype == "json_object" || ftype == "json_schema") {
+            std::string instruction = "You must respond with valid JSON only. Do not include any text outside the JSON object.";
+            if (ftype == "json_schema" && rf.contains("json_schema")) {
+                instruction += " The JSON must conform to this schema: " + rf["json_schema"].dump();
+            }
+            json sys_msg = {{"role", "system"}, {"content", instruction}};
+            body["messages"].insert(body["messages"].begin(), sys_msg);
+        }
+    }
+
+    // 5. Build prompt — session vs stateless. Two template paths:
+    //   (a) Jinja path: when the engine has a compiled ChatTemplateJinja
+    //       (Qwen3.5 family) we go through it so multimodal `content` arrays
+    //       with image_url parts can be rendered. The Jinja template itself
+    //       expands image parts into <|image_pad|> placeholders.
+    //   (b) Legacy path: data-driven ChatTemplate for everyone else. Image
+    //       parts in the request are dropped here (text-only models cannot
+    //       consume them anyway); a single warning is emitted.
+    const ChatTemplateJinja* jinja_tpl = engine_->chat_template_jinja();
+    bool any_image_part = false;
+
+    // OpenAI `tools` array. Forwarded to the Jinja chat template so the model
+    // sees function signatures in its context. We re-parse the raw request
+    // body as ordered_json so that property order inside each function
+    // schema (parameters, required, etc.) is preserved — minja uses
+    // ordered_json under the hood and HF chat templates iterate JSON schema
+    // properties in insertion order.
+    nlohmann::ordered_json tools_ordered;
+    bool has_tools = false;
+    if (body.contains("tools") && body["tools"].is_array() && !body["tools"].empty()) {
+        try {
+            nlohmann::ordered_json ordered_body = nlohmann::ordered_json::parse(req.body);
+            if (ordered_body.contains("tools") && ordered_body["tools"].is_array()
+                && !ordered_body["tools"].empty()) {
+                tools_ordered = ordered_body["tools"];
+                has_tools = true;
+            }
+        } catch (const std::exception& e) {
+            LOGW << "[HttpServer] Failed to re-parse request body for ordered tools: " << e.what();
+        }
+    }
+
+    auto build_prompt_from_messages = [&]() -> std::string {
+        if (jinja_tpl) {
+            std::vector<ChatMessageMM> mm_messages;
+            mm_messages.reserve(body["messages"].size());
+            for (const auto& msg : body["messages"]) {
+                mm_messages.push_back(parse_openai_message(msg, any_image_part));
+            }
+            return jinja_tpl->render(mm_messages, /*add_generation_prompt=*/true,
+                                     /*enable_thinking=*/enable_thinking,
+                                     has_tools ? &tools_ordered : nullptr);
+        }
+        std::vector<std::pair<std::string, std::string>> messages;
+        messages.reserve(body["messages"].size());
+        for (const auto& msg : body["messages"]) {
+            // Detect images for the warning; legacy template ignores them.
+            if (msg.contains("content") && msg["content"].is_array()) {
+                for (const auto& p : msg["content"]) {
+                    if (p.is_object()
+                        && (p.value("type", "") == "image_url" || p.value("type", "") == "image")) {
+                        any_image_part = true;
+                        break;
+                    }
+                }
+            }
+            messages.emplace_back(msg.value("role", ""), flatten_message_content(msg));
+        }
+        return engine_->chat_template().apply(messages);
+    };
+
     std::vector<int> input_ids;
     InferenceSession* session = nullptr;
     bool use_session = false;
+
+    // Track whether the rendered prompt ends inside an open <think> block so
+    // that streaming reasoning_content routing knows the first decoded token is
+    // already thinking content (DeepSeek-R1 always, Qwen3.5 enable_thinking=true).
+    bool prompt_opens_think = false;
+    auto detect_open_think = [](const std::string& prompt) {
+        size_t open = prompt.rfind(kReasoningOpenTag);
+        if (open == std::string::npos) {
+            return false;
+        }
+        size_t close = prompt.rfind(kReasoningCloseTag);
+        return close == std::string::npos || close < open;
+    };
 
     if (!session_id.empty()) {
         session = get_or_create_session(session_id);
@@ -418,25 +954,119 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
         // Check if session KV cache is still valid (not expired/recreated)
         if (session->is_valid() && session->past_len() > 0) {
             // Session alive with history — only prefill new message
-            input_ids = engine_->tokenizer().encode(session->prepare_prompt(last_user_message));
+            std::string session_prompt = session->prepare_prompt(last_user_message);
+            prompt_opens_think = detect_open_think(session_prompt);
+            input_ids = engine_->tokenizer().encode(session_prompt);
             use_session = true;
         } else {
             // Session is fresh (new or recreated after expiry) — full prefill
-            std::vector<std::pair<std::string, std::string>> messages;
-            for (const auto& msg : body["messages"]) {
-                messages.emplace_back(msg.value("role", ""), msg.value("content", ""));
-            }
-            input_ids = engine_->tokenizer().encode(engine_->chat_template().apply(messages));
+            std::string prompt = build_prompt_from_messages();
+            prompt_opens_think = detect_open_think(prompt);
+            input_ids = engine_->tokenizer().encode(prompt);
             use_session = true;
             LOGI << "[HttpServer] Session " << session_id << " fresh start, full prefill";
         }
     } else {
         // Stateless mode
-        std::vector<std::pair<std::string, std::string>> messages;
+        std::string prompt = build_prompt_from_messages();
+        prompt_opens_think = detect_open_think(prompt);
+        input_ids = engine_->tokenizer().encode(prompt);
+    }
+    // Vision pipeline. The Jinja chat template renders ONE <|image_pad|>
+    // placeholder per image part; the vision tower outputs num_image_tokens
+    // (= patches / spatial_merge^2) rows per image. Before scattering we must
+    // expand each single placeholder into num_image_tokens copies so the
+    // tokenized input_ids have a matching count of <|image_pad|> positions.
+    tensor_t multimodal_input_embeds;
+    if (any_image_part && engine_->has_vision()) {
+        // 1. Encode every image to its embedding tensor — chunks come out in
+        // encounter order across all messages.
+        std::vector<tensor_t> image_chunks;
+        image_chunks.reserve(4);
         for (const auto& msg : body["messages"]) {
-            messages.emplace_back(msg.value("role", ""), msg.value("content", ""));
+            if (!msg.contains("content") || !msg["content"].is_array()) {
+                continue;
+            }
+            for (const auto& part : msg["content"]) {
+                if (!part.is_object()) {
+                    continue;
+                }
+                const std::string ptype = part.value("type", "");
+                std::string       uri;
+                if (ptype == "image_url" && part.contains("image_url")) {
+                    const auto& iu = part["image_url"];
+                    if (iu.is_string()) {
+                        uri = iu.get<std::string>();
+                    } else if (iu.is_object() && iu.contains("url") && iu["url"].is_string()) {
+                        uri = iu["url"].get<std::string>();
+                    }
+                } else if (ptype == "image" && part.contains("image") && part["image"].is_string()) {
+                    uri = part["image"].get<std::string>();
+                }
+                if (uri.empty()) {
+                    continue;
+                }
+                try {
+                    image_chunks.push_back(engine_->encode_image_data_uri(uri));
+                } catch (const std::exception& e) {
+                    send_error(res, 400,
+                               std::string("Failed to decode / encode image: ") + e.what(),
+                               "invalid_request_error", "invalid_image_data");
+                    LOGW << "[HttpServer] Image encode failed: " << e.what();
+                    return;
+                }
+            }
         }
-        input_ids = engine_->tokenizer().encode(engine_->chat_template().apply(messages));
+
+        if (!image_chunks.empty()) {
+            // 2. Re-render the prompt and expand each <|image_pad|> to num_image_tokens copies.
+            const int          pad_id   = engine_->image_pad_token_id();
+            const std::string  pad_str  = "<|image_pad|>";
+            std::string        prompt   = build_prompt_from_messages();
+            std::string        expanded;
+            expanded.reserve(prompt.size() + image_chunks.size() * 4096);
+            size_t pos = 0, img_idx = 0;
+            while (pos < prompt.size() && img_idx < image_chunks.size()) {
+                const size_t hit = prompt.find(pad_str, pos);
+                if (hit == std::string::npos) {
+                    break;
+                }
+                expanded.append(prompt, pos, hit - pos);
+                const int n_tok = static_cast<int>(image_chunks[img_idx]->dim(0));
+                for (int k = 0; k < n_tok; ++k) {
+                    expanded.append(pad_str);
+                }
+                pos = hit + pad_str.size();
+                ++img_idx;
+            }
+            expanded.append(prompt, pos, prompt.size() - pos);
+            if (img_idx != image_chunks.size()) {
+                LOGW << "[HttpServer] Multimodal: encoded " << image_chunks.size()
+                     << " image(s) but the rendered prompt only carries " << img_idx << " <|image_pad|> placeholder(s)";
+            }
+
+            // 3. Re-tokenize the expanded prompt and reset prompt_opens_think
+            //    from the expanded form (image placeholder expansion happens
+            //    after the assistant <think> marker so this is identical).
+            prompt_opens_think = detect_open_think(expanded);
+            input_ids          = engine_->tokenizer().encode(expanded);
+
+            try {
+                multimodal_input_embeds = engine_->build_multimodal_input_embeds(input_ids, image_chunks);
+                LOGI.printf(
+                    "[HttpServer] Multimodal: %zu image chunk(s), %zu prompt tokens, pad_id=%d",
+                    image_chunks.size(), input_ids.size(), pad_id);
+            } catch (const std::exception& e) {
+                send_error(res, 500,
+                           std::string("Failed to build multimodal input embeddings: ") + e.what(),
+                           "internal_error", "multimodal_embeds_failed");
+                LOGW << "[HttpServer] build_multimodal_input_embeds failed: " << e.what();
+                return;
+            }
+        }
+    } else if (any_image_part) {
+        LOGW << "[HttpServer] Multimodal request received but the loaded model has no vision tower; "
+                "image data ignored.";
     }
 
     // 6. Validate length
@@ -465,8 +1095,69 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
     auto inference_req = std::make_unique<InferenceRequest>();
     inference_req->input_ids = std::move(input_ids);
     inference_req->config.max_new_tokens = max_tokens;
+    inference_req->config.enable_thinking = enable_thinking;
     inference_req->arrival_time = std::chrono::steady_clock::now();
     inference_req->cancelled = cancel_flag;
+    // Attach vision-pre-baked input_embeds when present; the serving loop
+    // forwards this tensor to hybrid_transformer_forward, which bypasses the
+    // text embed_tokens lookup and uses our tensor (with image embeddings
+    // already scattered) as the layer-0 hidden state.
+    if (multimodal_input_embeds) {
+        inference_req->set_input_embeds(multimodal_input_embeds);
+    }
+
+    // OpenAI-compatible sampling overrides. Setting has_sampling_override
+    // tells the scheduler to bypass the engine's default sampler and route
+    // through the argmax/general samplers based on these fields.
+    auto& gen_cfg = inference_req->config;
+    bool any_sampling_field = false;
+    if (body.contains("temperature") && body["temperature"].is_number()) {
+        gen_cfg.temperature = body["temperature"].get<float>();
+        any_sampling_field = true;
+    }
+    if (body.contains("top_p") && body["top_p"].is_number()) {
+        gen_cfg.top_p = body["top_p"].get<float>();
+        any_sampling_field = true;
+    }
+    if (body.contains("top_k") && body["top_k"].is_number_integer()) {
+        gen_cfg.top_k = body["top_k"].get<int>();
+        any_sampling_field = true;
+    }
+    if (body.contains("repetition_penalty") && body["repetition_penalty"].is_number()) {
+        gen_cfg.repetition_penalty = body["repetition_penalty"].get<float>();
+        any_sampling_field = true;
+    }
+    if (body.contains("seed") && body["seed"].is_number_integer()) {
+        gen_cfg.seed = static_cast<unsigned int>(body["seed"].get<int64_t>());
+        any_sampling_field = true;
+    }
+    // OpenAI `stop` may be either a string or array of strings. Stored on the
+    // request; the HTTP layer enforces it on the decoded stream (the scheduler
+    // operates at token-id granularity and would not match arbitrary substrings).
+    if (body.contains("stop")) {
+        const auto& s = body["stop"];
+        if (s.is_string()) {
+            gen_cfg.stop_sequences.push_back(s.get<std::string>());
+            any_sampling_field = true;
+        } else if (s.is_array()) {
+            for (const auto& v : s) {
+                if (v.is_string()) {
+                    gen_cfg.stop_sequences.push_back(v.get<std::string>());
+                }
+            }
+            if (!gen_cfg.stop_sequences.empty()) {
+                any_sampling_field = true;
+            }
+        }
+    }
+    gen_cfg.has_sampling_override = any_sampling_field;
+    // OpenAI greedy semantics: temperature == 0 maps to argmax.
+    if (any_sampling_field && gen_cfg.temperature <= 0.0f) {
+        gen_cfg.use_argmax = true;
+    }
+    // Snapshot stop_sequences for HTTP-layer post-processing; the inference_req
+    // is about to be moved into the scheduler and must not be touched after.
+    std::vector<std::string> stop_sequences_snapshot = gen_cfg.stop_sequences;
     if (use_session && session) {
         inference_req->borrow_block_table(session->block_table());
     }
@@ -510,6 +1201,34 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
             bool sent_prefix = false;
             std::string utf8_buf, full_output;
             std::chrono::steady_clock::time_point last_activity;
+            // Reasoning-mode state machine. in_thinking flips on <think> and
+            // back on </think>; output emitted while in_thinking==true lands in
+            // delta.reasoning_content, otherwise delta.content. reasoning_carry
+            // holds a short tail of bytes that *might* be the start of a
+            // <think>/</think> tag — they are withheld from emission until the
+            // next chunk arrives so we never split a tag across deltas.
+            bool        in_thinking = false;
+            std::string reasoning_carry;
+            // Stop-sequence filter. When stop_sequences is non-empty, the
+            // flush pipeline scans the cumulative byte stream for any stop
+            // string, truncates the output there, and sets stop_hit so the
+            // outer loop emits finish_reason="stop" + [DONE]. stop_pending
+            // holds the trailing bytes that might be a partial prefix of any
+            // stop string (so a stop can be detected even when split across
+            // two SSE chunks).
+            std::vector<std::string> stop_sequences;
+            std::string              stop_pending;
+            bool                     stop_hit = false;
+            // Tool-call streaming state machine. Recognises Qwen3-style
+            // <tool_call>...</tool_call> blocks, accumulates the inner text,
+            // parses it (JSON or XML), and emits delta.tool_calls chunks.
+            // tool_carry holds a short tail that might be a partial prefix of
+            // <tool_call> / </tool_call>.
+            bool        in_tool_call = false;
+            std::string tool_buf;
+            std::string tool_carry;
+            int         tool_id_counter      = 0;
+            bool        has_emitted_tool_call = false;
         };
 
         auto ctx = std::make_shared<Ctx>();
@@ -517,7 +1236,7 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
         ctx->queue = std::move(token_queue);
         ctx->cancel_flag = cancel_flag;
         ctx->req_id = request_id;
-        ctx->model = engine_->model_name();
+        ctx->model = display_model_name_;
         ctx->user_msg = last_user_message;
         ctx->output_prefix = session ? session->output_prefix() : "";
         ctx->epoch
@@ -528,6 +1247,13 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
         ctx->lock = std::move(session_lock); // transfer lock ownership to ctx
         ctx->t_start = t_start;
         ctx->last_activity = std::chrono::steady_clock::now();
+        // Seed reasoning state from the rendered prompt: if the chat template's
+        // generation_prompt left a <think> open, the first decoded token is
+        // already reasoning content.
+        ctx->in_thinking = prompt_opens_think;
+        // Hand the stop-sequence list over to the SSE state so the streaming
+        // path can enforce it in lock-step with the blocking path.
+        ctx->stop_sequences = stop_sequences_snapshot;
 
         res.set_header("Cache-Control", "no-cache");
         res.set_header("Connection", "keep-alive");
@@ -546,22 +1272,243 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
                                     {"created", ctx->epoch},
                                     {"model", ctx->model}};
                     };
-                    auto send_content = [&ctx, &sse, &base](const std::string& text) {
+                    // Emit one delta payload — `is_reasoning` selects between
+                    // delta.content (normal text) and delta.reasoning_content
+                    // (text inside <think>...</think>). full_output keeps the
+                    // raw concatenation including tags, so post-stream stop_seq
+                    // logic and session storage stay consistent.
+                    auto send_chunk = [&ctx, &sse, &base](const std::string& text, bool is_reasoning) {
+                        if (text.empty()) {
+                            return;
+                        }
                         ctx->full_output += text;
+                        json delta;
+                        if (is_reasoning) {
+                            delta["reasoning_content"] = text;
+                        } else {
+                            delta["content"] = text;
+                        }
                         json c = base();
                         c["choices"]
-                            = json::array({{{"index", 0}, {"delta", {{"content", text}}}, {"finish_reason", nullptr}}});
+                            = json::array({{{"index", 0}, {"delta", delta}, {"finish_reason", nullptr}}});
                         sse(c);
                     };
-                    auto flush = [&ctx, &send_content](bool force) {
-                        if (ctx->utf8_buf.empty()) {
+                    // Route `chunk` into reasoning / content deltas honoring the
+                    // running ctx->in_thinking state and the <think>/</think>
+                    // tag boundaries. To avoid splitting a tag across two SSE
+                    // chunks, hold back any trailing suffix that *might* be a
+                    // tag prefix into ctx->reasoning_carry; the next call
+                    // prepends it. On `force`, the carry is flushed verbatim.
+                    auto route_reasoning = [&ctx, &send_chunk](std::string chunk, bool force) {
+                        chunk = ctx->reasoning_carry + chunk;
+                        ctx->reasoning_carry.clear();
+                        if (!force) {
+                            const size_t maxK = std::max(kReasoningOpenLen, kReasoningCloseLen) - 1;
+                            size_t safe_end = chunk.size();
+                            for (size_t k = std::min(chunk.size(), maxK); k > 0; --k) {
+                                std::string suffix = chunk.substr(chunk.size() - k);
+                                bool match = (std::string(kReasoningOpenTag).compare(0, k, suffix) == 0)
+                                             || (std::string(kReasoningCloseTag).compare(0, k, suffix) == 0);
+                                if (match) {
+                                    safe_end = chunk.size() - k;
+                                    break;
+                                }
+                            }
+                            ctx->reasoning_carry = chunk.substr(safe_end);
+                            chunk.resize(safe_end);
+                        }
+                        size_t pos = 0;
+                        while (pos < chunk.size()) {
+                            if (ctx->in_thinking) {
+                                size_t end = chunk.find(kReasoningCloseTag, pos);
+                                if (end == std::string::npos) {
+                                    send_chunk(chunk.substr(pos), true);
+                                    pos = chunk.size();
+                                } else {
+                                    send_chunk(chunk.substr(pos, end - pos), true);
+                                    pos = end + kReasoningCloseLen;
+                                    ctx->in_thinking = false;
+                                }
+                            } else {
+                                size_t open = chunk.find(kReasoningOpenTag, pos);
+                                if (open == std::string::npos) {
+                                    send_chunk(chunk.substr(pos), false);
+                                    pos = chunk.size();
+                                } else {
+                                    send_chunk(chunk.substr(pos, open - pos), false);
+                                    pos = open + kReasoningOpenLen;
+                                    ctx->in_thinking = true;
+                                }
+                            }
+                        }
+                    };
+                    // Emit a single Qwen3-style tool_call as a delta.tool_calls
+                    // SSE chunk. Increments tool_id_counter; flips
+                    // has_emitted_tool_call so the completion chunk uses
+                    // finish_reason="tool_calls".
+                    auto emit_tool_call_delta = [&ctx, &sse, &base](const std::string& fn_name,
+                                                                      const json& fn_args) {
+                        if (fn_name.empty()) {
+                            return;
+                        }
+                        json call;
+                        call["index"] = ctx->tool_id_counter;
+                        call["id"] = std::string("call_") + std::to_string(ctx->tool_id_counter++);
+                        call["type"] = "function";
+                        json fn;
+                        fn["name"] = fn_name;
+                        fn["arguments"] = fn_args.is_string() ? fn_args.get<std::string>() : fn_args.dump();
+                        call["function"] = std::move(fn);
+                        json delta;
+                        delta["tool_calls"] = json::array({call});
+                        json c = base();
+                        c["choices"]
+                            = json::array({{{"index", 0}, {"delta", delta}, {"finish_reason", nullptr}}});
+                        sse(c);
+                        ctx->has_emitted_tool_call = true;
+                    };
+                    // Split `chunk` at <tool_call>...</tool_call> boundaries. Text
+                    // outside tool_call blocks forwards to route_reasoning; text
+                    // inside accumulates in ctx->tool_buf and on closing tag is
+                    // parsed (JSON-then-XML) and emitted via emit_tool_call_delta.
+                    auto route_tool = [&ctx, &route_reasoning, &emit_tool_call_delta](std::string chunk, bool force) {
+                        static constexpr const char* TOPEN = "<tool_call>";
+                        static constexpr const char* TCLOSE = "</tool_call>";
+                        static constexpr size_t TOPEN_LEN = 11;
+                        static constexpr size_t TCLOSE_LEN = 12;
+                        chunk = ctx->tool_carry + chunk;
+                        ctx->tool_carry.clear();
+                        if (!force) {
+                            const size_t maxK = std::max(TOPEN_LEN, TCLOSE_LEN) - 1;
+                            size_t safe_end = chunk.size();
+                            for (size_t k = std::min(chunk.size(), maxK); k > 0; --k) {
+                                std::string suffix = chunk.substr(chunk.size() - k);
+                                bool match = (std::string(TOPEN).compare(0, k, suffix) == 0)
+                                             || (std::string(TCLOSE).compare(0, k, suffix) == 0);
+                                if (match) {
+                                    safe_end = chunk.size() - k;
+                                    break;
+                                }
+                            }
+                            ctx->tool_carry = chunk.substr(safe_end);
+                            chunk.resize(safe_end);
+                        }
+                        size_t pos = 0;
+                        while (pos < chunk.size()) {
+                            if (ctx->in_tool_call) {
+                                size_t end = chunk.find(TCLOSE, pos);
+                                if (end == std::string::npos) {
+                                    ctx->tool_buf.append(chunk, pos, chunk.size() - pos);
+                                    pos = chunk.size();
+                                } else {
+                                    ctx->tool_buf.append(chunk, pos, end - pos);
+                                    pos = end + TCLOSE_LEN;
+                                    ctx->in_tool_call = false;
+                                    std::string trimmed = trim_ascii_ws(ctx->tool_buf);
+                                    ctx->tool_buf.clear();
+                                    std::string fn_name;
+                                    json        fn_args;
+                                    bool        ok = false;
+                                    try {
+                                        auto j = json::parse(trimmed);
+                                        if (j.is_object() && j.contains("name") && j["name"].is_string()) {
+                                            fn_name = j["name"].get<std::string>();
+                                            fn_args = j.contains("arguments")
+                                                          ? j["arguments"]
+                                                          : (j.contains("parameters") ? j["parameters"]
+                                                                                       : json::object());
+                                            ok = true;
+                                        }
+                                    } catch (const std::exception&) {
+                                        // not JSON; try XML below.
+                                    }
+                                    if (!ok && parse_xml_tool_call_inner(trimmed, fn_name, fn_args)) {
+                                        ok = true;
+                                    }
+                                    if (ok) {
+                                        emit_tool_call_delta(fn_name, fn_args);
+                                    }
+                                }
+                            } else {
+                                size_t open = chunk.find(TOPEN, pos);
+                                if (open == std::string::npos) {
+                                    route_reasoning(chunk.substr(pos), force);
+                                    pos = chunk.size();
+                                } else {
+                                    if (open > pos) {
+                                        route_reasoning(chunk.substr(pos, open - pos), false);
+                                    }
+                                    pos = open + TOPEN_LEN;
+                                    ctx->in_tool_call = true;
+                                    ctx->tool_buf.clear();
+                                }
+                            }
+                        }
+                    };
+                    // Stop-sequence filter. Runs first in the flush pipeline so a
+                    // user-supplied stop terminates the stream regardless of
+                    // whether the bytes would have ended up in content,
+                    // reasoning_content, or a tool_call. Sets ctx->stop_hit and
+                    // signals scheduler cancellation; the SSE loop sees stop_hit
+                    // and stops emitting further chunks.
+                    auto stop_filter = [&ctx](std::string text, bool force) -> std::string {
+                        if (ctx->stop_sequences.empty() || ctx->stop_hit) {
+                            return text;
+                        }
+                        std::string combined = ctx->stop_pending + text;
+                        ctx->stop_pending.clear();
+                        size_t earliest = std::string::npos;
+                        for (const auto& s : ctx->stop_sequences) {
+                            if (s.empty()) {
+                                continue;
+                            }
+                            size_t p = combined.find(s);
+                            if (p != std::string::npos && (earliest == std::string::npos || p < earliest)) {
+                                earliest = p;
+                            }
+                        }
+                        if (earliest != std::string::npos) {
+                            ctx->stop_hit = true;
+                            if (ctx->cancel_flag) {
+                                ctx->cancel_flag->store(true);
+                            }
+                            return combined.substr(0, earliest);
+                        }
+                        if (!force) {
+                            size_t maxK = 0;
+                            for (const auto& s : ctx->stop_sequences) {
+                                if (s.size() > maxK) {
+                                    maxK = s.size();
+                                }
+                            }
+                            if (maxK > 0) {
+                                maxK--;
+                                size_t carry = std::min(combined.size(), maxK);
+                                ctx->stop_pending = combined.substr(combined.size() - carry);
+                                combined.resize(combined.size() - carry);
+                            }
+                        }
+                        return combined;
+                    };
+                    auto flush = [&ctx, &route_tool, &stop_filter](bool force) {
+                        if (ctx->stop_hit) {
+                            return;
+                        }
+                        const bool has_carry = !ctx->reasoning_carry.empty()
+                                               || !ctx->tool_carry.empty()
+                                               || !ctx->stop_pending.empty();
+                        if (ctx->utf8_buf.empty() && !(force && has_carry)) {
                             return;
                         }
                         size_t n = force ? ctx->utf8_buf.size() : valid_utf8_length(ctx->utf8_buf);
+                        std::string segment;
                         if (n > 0) {
-                            std::string t = ctx->utf8_buf.substr(0, n);
+                            segment = ctx->utf8_buf.substr(0, n);
                             ctx->utf8_buf.erase(0, n);
-                            send_content(t);
+                        }
+                        std::string filtered = stop_filter(std::move(segment), force);
+                        if (!filtered.empty() || force) {
+                            route_tool(std::move(filtered), force);
                         }
                     };
 
@@ -574,15 +1521,14 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
                         sse(c);
                     }
 
-                    // Send output_prefix (e.g. "<think> " for DeepSeek-R1) as first content
-                    // Note: sent to client for display but NOT included in full_output
-                    // (consistent with CLI session.cpp which stores raw model output)
+                    // Route the session's output_prefix (DeepSeek-R1 prepends
+                    // "<think> ", Qwen3.5 thinking-mode may set similar) through
+                    // the reasoning state machine so an opening <think> in the
+                    // prefix flips into reasoning_content mode for subsequent
+                    // model output. The prefix itself is sent on first activation.
                     if (!ctx->sent_prefix && !ctx->output_prefix.empty()) {
                         ctx->sent_prefix = true;
-                        json c = base();
-                        c["choices"] = json::array(
-                            {{{"index", 0}, {"delta", {{"content", ctx->output_prefix}}}, {"finish_reason", nullptr}}});
-                        sse(c);
+                        route_reasoning(ctx->output_prefix, false);
                     }
 
                     std::string tok;
@@ -636,9 +1582,20 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
                                 << (elapsed > 0 ? gen_tokens * 1000.0 / elapsed : 0) << " tok/s"
                                 << " | assistant: " << out_preview;
 
+                            // Resolve finish_reason. Priority:
+                            //   stop_hit         -> "stop"          (client stop sequence terminated us)
+                            //   tool_call emitted -> "tool_calls"   (model produced at least one tool call)
+                            //   else             -> scheduler-set    ("stop" on EOS, "length" on max_tokens)
+                            std::string fr = result.finish_reason;
+                            if (ctx->has_emitted_tool_call) {
+                                fr = "tool_calls";
+                            }
+                            if (ctx->stop_hit) {
+                                fr = "stop";
+                            }
                             json c = base();
                             c["choices"]
-                                = json::array({{{"index", 0}, {"delta", json::object()}, {"finish_reason", "stop"}}});
+                                = json::array({{{"index", 0}, {"delta", json::object()}, {"finish_reason", fr}}});
                             c["usage"] = {{"prompt_tokens", result.stats.prompt_tokens},
                                           {"completion_tokens", result.stats.generated_tokens},
                                           {"total_tokens", result.stats.total_tokens}};
@@ -712,6 +1669,26 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
         if (!output_prefix.empty()) {
             output_text = output_prefix + output_text;
         }
+        // Apply OpenAI-compatible stop sequences: scan decoded output for the
+        // earliest occurrence of any stop string and truncate there. The stop
+        // sequence itself is NOT included in the response, per OpenAI spec.
+        // finish_reason is forced to "stop" since we hit a user-defined boundary.
+        if (!stop_sequences_snapshot.empty()) {
+            size_t earliest = output_text.size();
+            for (const auto& s : stop_sequences_snapshot) {
+                if (s.empty()) {
+                    continue;
+                }
+                size_t p = output_text.find(s);
+                if (p != std::string::npos && p < earliest) {
+                    earliest = p;
+                }
+            }
+            if (earliest < output_text.size()) {
+                output_text = output_text.substr(0, earliest);
+                result.finish_reason = "stop";
+            }
+        }
 
         // Log completion with output preview
         auto elapsed = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_start).count();
@@ -728,14 +1705,55 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
             = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch())
                   .count();
 
+        // Split reasoning (<think>...</think>) from final content. Initial-state
+        // sources, in priority order:
+        //   1. Session output_prefix opens a <think> block (DeepSeek-R1 session path).
+        //   2. Stateless / fresh-session heuristic: when the chat template renders
+        //      its generation_prompt ending with an open <think> tag (Qwen3.5
+        //      enable_thinking=true, DeepSeek-R1 always), the model's first
+        //      output token is already inside the thinking block. In that case
+        //      output_text contains a </think> with no preceding <think>; treat
+        //      everything before the first </think> as reasoning.
+        bool initial_in_think = !output_prefix.empty()
+                                && (output_prefix.find(kReasoningOpenTag) != std::string::npos)
+                                && (output_prefix.find(kReasoningCloseTag) == std::string::npos);
+        if (!initial_in_think && output_text.find(kReasoningCloseTag) != std::string::npos
+            && output_text.find(kReasoningOpenTag) == std::string::npos) {
+            initial_in_think = true;
+        }
+        ReasoningSplit split = split_reasoning(output_text, initial_in_think);
+
+        // Extract Qwen3-style <tool_call>...</tool_call> blocks from the
+        // post-reasoning content. tool_calls (if any) get surfaced through the
+        // OpenAI tool_calls field and the finish_reason is upgraded to
+        // "tool_calls" so clients can dispatch.
+        ToolCallParseResult tc = parse_qwen3_tool_calls(split.content);
+
+        json message = {{"role", "assistant"}};
+        if (tc.has_tool_calls) {
+            // OpenAI spec: content may be null when only tool_calls are
+            // emitted; otherwise include the leftover text.
+            if (tc.content.empty()) {
+                message["content"] = nullptr;
+            } else {
+                message["content"] = tc.content;
+            }
+            message["tool_calls"] = std::move(tc.tool_calls);
+            result.finish_reason = "tool_calls";
+        } else {
+            message["content"] = split.content;
+        }
+        if (!split.reasoning.empty()) {
+            message["reasoning_content"] = split.reasoning;
+        }
+
         json response;
         response["id"] = request_id;
         response["object"] = "chat.completion";
         response["created"] = epoch;
-        response["model"] = engine_->model_name();
-        response["choices"] = json::array({{{"index", 0},
-                                            {"message", {{"role", "assistant"}, {"content", output_text}}},
-                                            {"finish_reason", "stop"}}});
+        response["model"] = display_model_name_;
+        response["choices"] = json::array(
+            {{{"index", 0}, {"message", std::move(message)}, {"finish_reason", result.finish_reason}}});
         response["usage"] = {{"prompt_tokens", result.stats.prompt_tokens},
                              {"completion_tokens", result.stats.generated_tokens},
                              {"total_tokens", result.stats.total_tokens}};

@@ -2,6 +2,7 @@
 
 #include <functional>
 #include <string>
+#include <vector>
 
 namespace zedinfer {
 
@@ -47,6 +48,27 @@ struct GenerationConfig {
     // Streaming output
     bool stream = false;
     std::function<void(const std::string&)> stream_callback = nullptr;
+
+    // Per-request sampling overrides (OpenAI-compatible).
+    //   has_sampling_override : true if the HTTP layer (or any caller) set any
+    //                           of the fields below; otherwise the engine uses
+    //                           its default sampler verbatim.
+    //   use_argmax            : route through ArgmaxSampler instead of
+    //                           GeneralSampler. Set by the HTTP layer when the
+    //                           client sends temperature == 0.
+    //   temperature/top_k/top_p/repetition_penalty/seed : standard sampling
+    //                           knobs. Applied to GeneralSampler before sample()
+    //                           when use_argmax is false.
+    //   stop_sequences        : string-level stop substrings checked by the
+    //                           HTTP layer on the decoded output stream.
+    bool         has_sampling_override = false;
+    bool         use_argmax            = false;
+    float        temperature           = 1.0f;
+    int          top_k                 = 0;
+    float        top_p                 = 1.0f;
+    float        repetition_penalty    = 1.0f;
+    unsigned int seed                  = 0;
+    std::vector<std::string> stop_sequences;
 
     // Diagnostics
     bool verbose = false;
