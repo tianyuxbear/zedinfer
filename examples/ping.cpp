@@ -2,17 +2,25 @@
 #include "utils/logging.hpp"
 #include "utils/system_info.hpp"
 #include "zedinfer.h"
+#include "zedinfer/chat_template_jinja.hpp"
 #include "zedinfer/engine.hpp"
+#include "zedinfer/multimodal_processor.hpp"
+#include "zedinfer/request.hpp"
 #include "zedinfer/scheduler.hpp"
+#include "zedinfer/serving_loop.hpp"
 #include "zedinfer/session.hpp"
 
 #include "zedinfer/version.hpp"
 #include <argparse/argparse.hpp>
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <fstream>
 #include <iostream>
 #include <memory>
+#include <sstream>
 #include <string>
+#include <thread>
 
 using namespace zedinfer;
 
@@ -60,6 +68,13 @@ int main(int argc, char* argv[]) {
               "Only effective when the loaded model ships an MTP head.")
         .default_value(false)
         .implicit_value(true);
+
+    program.add_argument("--image")
+        .help("Path to a local image file (PNG/JPEG) to send alongside --prompt. "
+              "Requires a vision-capable model (Qwen3.5-VL family). Mutually "
+              "exclusive with multi-turn session use — vision input always runs "
+              "stateless full prefill.")
+        .default_value(std::string(""));
 
     try {
         program.parse_args(argc, argv);
@@ -122,7 +137,123 @@ int main(int argc, char* argv[]) {
         };
     }
 
-    auto prompt = program.get<std::string>("--prompt");
+    auto prompt     = program.get<std::string>("--prompt");
+    auto image_path = program.get<std::string>("--image");
+
+    // Multimodal path: bypass InferenceSession (it does not understand
+    // pre-built input_embeds) and submit a stateless multimodal request
+    // straight to the serving loop. This mirrors the HTTP /v1/chat/completions
+    // multimodal flow so a future user can compare CLI vs HTTP outputs.
+    if (!image_path.empty()) {
+        if (!engine->has_vision()) {
+            std::cerr << "[ping] --image was passed but the loaded model has no vision tower. "
+                         "Re-run with a Qwen3.5-VL checkpoint.\n";
+            return 4;
+        }
+        const auto* jinja = engine->chat_template_jinja();
+        if (!jinja) {
+            std::cerr << "[ping] --image requires a Jinja chat template in the model directory; "
+                         "none found.\n";
+            return 4;
+        }
+
+        // 1. Read image bytes from disk and base64-encode them into a data URI.
+        std::ifstream f(image_path, std::ios::binary);
+        if (!f.is_open()) {
+            std::cerr << "[ping] failed to open image: " << image_path << "\n";
+            return 4;
+        }
+        std::ostringstream oss;
+        oss << f.rdbuf();
+        std::string raw = oss.str();
+        // Minimal in-house base64 encoder — avoids dragging another dep.
+        static const char b64alpha[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        std::string b64;
+        b64.reserve(((raw.size() + 2) / 3) * 4);
+        for (size_t i = 0; i < raw.size(); i += 3) {
+            const uint8_t b0 = static_cast<uint8_t>(raw[i]);
+            const uint8_t b1 = (i + 1 < raw.size()) ? static_cast<uint8_t>(raw[i + 1]) : 0;
+            const uint8_t b2 = (i + 2 < raw.size()) ? static_cast<uint8_t>(raw[i + 2]) : 0;
+            const uint32_t bits = (uint32_t(b0) << 16) | (uint32_t(b1) << 8) | b2;
+            b64.push_back(b64alpha[(bits >> 18) & 0x3F]);
+            b64.push_back(b64alpha[(bits >> 12) & 0x3F]);
+            b64.push_back(i + 1 < raw.size() ? b64alpha[(bits >> 6) & 0x3F] : '=');
+            b64.push_back(i + 2 < raw.size() ? b64alpha[bits & 0x3F] : '=');
+        }
+        std::string data_uri = "data:image/png;base64," + b64;
+
+        // 2. Encode the image with the vision tower.
+        tensor_t image_embed;
+        try {
+            image_embed = engine->encode_image_data_uri(data_uri);
+        } catch (const std::exception& e) {
+            std::cerr << "[ping] vision encode failed: " << e.what() << "\n";
+            return 4;
+        }
+        const int n_image_tokens = static_cast<int>(image_embed->dim(0));
+
+        // 3. Render the Jinja prompt with one (image, text) content pair.
+        std::vector<ChatMessageMM> mm_messages(1);
+        mm_messages[0].role = "user";
+        std::vector<ContentPart> parts;
+        parts.push_back(ImagePart{data_uri});
+        parts.push_back(TextPart{prompt});
+        mm_messages[0].content = std::move(parts);
+        std::string rendered = jinja->render(mm_messages, /*add_generation_prompt=*/true,
+                                              gen_config.enable_thinking);
+
+        // 4. Expand the single <|image_pad|> placeholder to N copies so the
+        //    tokenized input_ids matches the vision tower output row count.
+        const std::string pad = "<|image_pad|>";
+        std::string       expanded;
+        expanded.reserve(rendered.size() + n_image_tokens * pad.size());
+        size_t pos = rendered.find(pad);
+        if (pos == std::string::npos) {
+            std::cerr << "[ping] rendered prompt has no <|image_pad|> placeholder; chat template mismatch?\n";
+            return 4;
+        }
+        expanded.append(rendered, 0, pos);
+        for (int k = 0; k < n_image_tokens; ++k) {
+            expanded.append(pad);
+        }
+        expanded.append(rendered, pos + pad.size(), rendered.size() - pos - pad.size());
+
+        std::vector<int> input_ids = engine->tokenizer().encode(expanded);
+        tensor_t         input_embeds = engine->build_multimodal_input_embeds(input_ids, {image_embed});
+
+        // 5. Submit the request directly to the serving loop.
+        auto cancel_flag = std::make_shared<std::atomic<bool>>(false);
+        auto req         = std::make_unique<InferenceRequest>();
+        req->input_ids   = std::move(input_ids);
+        req->config      = gen_config;
+        req->cancelled   = cancel_flag;
+        if (gen_config.stream) {
+            req->stream_callback = gen_config.stream_callback;
+        }
+        req->set_input_embeds(input_embeds);
+        req->arrival_time = std::chrono::steady_clock::now();
+
+        // Drive the serving loop on this thread; the engine was created with
+        // its own thread for ServingLoop but ping does not start it. Mirror
+        // the serve binary's pattern.
+        std::thread serving_thread([&engine] { engine->serving_loop().run_serving(); });
+        auto future = engine->serving_loop().submit_async(std::move(req));
+        try {
+            auto result = future.get();
+            std::string out = engine->tokenizer().decode(result.output_ids);
+            if (!gen_config.stream) {
+                std::cout << out << std::endl;
+            } else {
+                std::cout << std::endl;
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "[ping] generation failed: " << e.what() << "\n";
+        }
+        engine->serving_loop().stop();
+        serving_thread.join();
+        return 0;
+    }
+
     try {
         auto session = engine->create_session(gen_config);
         session->chat(prompt);
