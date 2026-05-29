@@ -431,6 +431,9 @@ void Scheduler::process_results(ScheduledBatch& batch, tensor_t logits, sampler:
                 req->block_table().seq_len += 2;
                 req->mtp_accept_count  += 1;
                 req->mtp_last_n_committed = 2;
+                // Draft accepted: the in-place recurrent state (advanced by both
+                // committed tokens) is correct, so drop the pre-verify snapshot.
+                req->mtp_ssm_snapshot_valid = false;
 
                 if (is_stop_token(t0, stop_token_ids) || is_stop_token(t1, stop_token_ids)) {
                     req->finish_reason = "stop";
@@ -442,31 +445,56 @@ void Scheduler::process_results(ScheduledBatch& batch, tensor_t logits, sampler:
                     req->stream_callback(tokenizer.decode({t0, t1}));
                 }
             } else {
-                // REJECT: emit only the corrected token. Position N+1 was
-                // written with the wrong input — its K/V is dirty, but the
-                // NEXT decode step is a 1-token forward at position N+1,
-                // which overwrites the dirty slot before any attention read
-                // reaches it.
+                // REJECT. The 2-token verify forward advanced the recurrent
+                // linear-attention state (GatedDeltaNet matrix + causal-conv
+                // window) by the rejected draft, in place. The paged KV cache
+                // self-heals (the next step's 1-token forward at position N+1
+                // overwrites the dirty slot before any attention read reaches
+                // it), but the recurrent state has no positional addressing and
+                // cannot be corrected in place — leaving it would poison every
+                // subsequent token.
+                //
+                // Hybrid models therefore roll the whole speculative step back:
+                // restore the pre-verify SSM/conv snapshot taken by serving_loop,
+                // emit nothing, and leave last_token / seq_len untouched so the
+                // next scheduler iteration redoes last_token as a plain 1-token
+                // decode — rebuilding the correct post-last_token state and
+                // re-deriving t0 (identical under greedy). Pure-transformer MTP
+                // (no SSM slot) has no recurrent state and keeps the original
+                // in-place self-healing path: emit the corrected token.
+                const bool hybrid_rollback = ssm_state_pool_ != nullptr && req->ssm_slot_idx() >= 0
+                                             && req->mtp_ssm_snapshot_valid;
                 if (const char* env = std::getenv("ZEDINFER_DUMP_TOKEN_IDS"); env && env[0] == '1') {
-                    fprintf(stderr, "[zedinfer-tok] step=%d id=%d (spec-reject draft=%d)\n",
-                            req->generated_count, t0, draft);
+                    fprintf(stderr, "[zedinfer-tok] step=%d id=%d (spec-reject draft=%d%s)\n",
+                            req->generated_count, t0, draft, hybrid_rollback ? " rollback" : "");
                 }
-
-                req->output_ids.push_back(t0);
-                req->last_token = t0;
-                req->generated_count++;
-                req->block_table().seq_len += 1;
                 req->mtp_reject_count += 1;
-                req->mtp_last_n_committed = 1;
 
-                if (is_stop_token(t0, stop_token_ids)) {
-                    req->finish_reason = "stop";
-                    complete_request(*req);
-                } else if (req->generated_count >= req->config.max_new_tokens) {
-                    req->finish_reason = "length";
-                    complete_request(*req);
-                } else if (req->config.stream && req->stream_callback) {
-                    req->stream_callback(tokenizer.decode({t0}));
+                if (hybrid_rollback) {
+                    model::SSMStateSnapshot snap;
+                    snap.bytes = std::move(req->mtp_ssm_snapshot);
+                    ssm_state_pool_->restore_slot(req->ssm_slot_idx(), snap);
+                    req->mtp_ssm_snapshot_valid = false;
+                    req->mtp_last_n_committed   = 0;    // nothing committed this step
+                    req->mtp_spec_rolled_back   = true; // serving_loop skips the MTP advance
+                    // Intentionally do NOT emit t0, advance seq_len, or change
+                    // last_token: the next 1-token decode does all of that.
+                } else {
+                    req->output_ids.push_back(t0);
+                    req->last_token = t0;
+                    req->generated_count++;
+                    req->block_table().seq_len += 1;
+                    req->mtp_last_n_committed = 1;
+
+                    if (is_stop_token(t0, stop_token_ids)) {
+                        req->finish_reason = "stop";
+                        complete_request(*req);
+                    } else if (req->generated_count >= req->config.max_new_tokens) {
+                        req->finish_reason = "length";
+                        complete_request(*req);
+                    } else if (req->config.stream && req->stream_callback) {
+                        req->stream_callback(tokenizer.decode({t0}));
+                    }
                 }
             }
             offset += 2;
