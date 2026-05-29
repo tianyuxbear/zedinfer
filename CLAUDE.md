@@ -14,11 +14,11 @@ ZedInfer is a self-developed C++17 LLM inference framework. No Python in the ser
 
 ## Current State
 
-**Completed features:** direct model forward, cuBLAS/oneDNN linear, paged KV cache, paged attention, continuous batching, prefix caching, HTTP API with Web UI, SSE streaming, DecodeScratch pre-allocation.
+**Completed features:** direct model forward, cuBLAS/oneDNN linear, paged KV cache, paged attention, continuous batching, prefix caching, HTTP API with Web UI, SSE streaming, DecodeScratch pre-allocation, FlashInfer paged-attention backend, GPTQ INT4 quantization, MoE expert offloading (PINNED_LRU, 35B-A3B on 24GB), Qwen3.5/3.6 hybrid-MoE-VL family (GatedDeltaNet linear attention, Qwen3.5-VL multimodal, MTP speculative decoding).
 
-**Supported models:** Qwen2 (DeepSeek-R1-Distill-Qwen-1.5B), Qwen3 (DeepSeek-R1-0528-Qwen3-8B)
+**Supported models:** Qwen2 (DeepSeek-R1-Distill-Qwen-1.5B), Qwen3 (DeepSeek-R1-0528-Qwen3-8B, Qwen3-8B), Qwen3.5/3.6 — dense 27B + MoE 35B-A3B (hybrid linear-attn + full-attn, GPTQ-Int4, vision-language).
 
-**Upcoming work (see `docs/plan/`):** FlashInfer integration, CUDA graph, INT8/INT4 quantization, heterogeneous CPU/GPU inference, MoE expert offloading.
+**Upcoming work (see `docs/roadmap.md`, `docs/plan/`):** CUDA graph; fused int4 MoE GEMM (ALL-GPU baseline); wider INT4 coverage (linear-attn / embed / lm_head); MTP draft-head quality + offload H2D. (FlashInfer, INT4, MoE expert offload, and heterogeneous CPU/GPU inference are now done.)
 
 ---
 
