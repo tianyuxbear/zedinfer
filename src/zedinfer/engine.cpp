@@ -5,8 +5,10 @@
 #include "backend/ops/ops.hpp"
 #include "backend/ops/scatter_image_embeds/scatter_image_embeds.hpp"
 #include "frontend/models/forward_config.hpp"
+#include "frontend/models/hybrid_transformer_forward.hpp"
 #include "frontend/models/paged_forward_context.hpp"
 #include "frontend/models/qwen3_5.hpp"
+#include "frontend/models/qwen3_5_moe.hpp"
 #include "frontend/models/vision_tower.hpp"
 #include "frontend/sampler/sampler.hpp"
 #include "frontend/tokenizer/hf_tokenizer.hpp"
@@ -25,6 +27,7 @@
 #include <fstream>
 #include <iomanip>
 #include <limits>
+#include <memory>
 #include <nlohmann/json.hpp>
 #include <plog/Log.h>
 #include <sstream>
@@ -176,6 +179,64 @@ double compute_row_nll(const std::byte* data, zedinferDataType_t dtype, size_t r
     double log_denom = max_logit + std::log(exp_sum);
     return log_denom - target_logit;
 }
+
+model::HybridForwardConfig make_hybrid_config(const model::Qwen3_5Model& model) {
+    if (auto* moe_model = dynamic_cast<const model::Qwen3_5MoeModel*>(&model)) {
+        return moe_model->hybrid_forward_config_moe();
+    }
+    return model.hybrid_forward_config();
+}
+
+class PerplexityForward {
+public:
+    explicit PerplexityForward(InferenceEngine& engine)
+        : engine_(engine), hybrid_model_(dynamic_cast<const model::Qwen3_5Model*>(&engine.model())) {
+        if (hybrid_model_) {
+            auto* pool = engine_.ssm_state_pool();
+            if (!pool) {
+                throw std::runtime_error("[PPL] hybrid model has no SSMStatePool");
+            }
+            ssm_pool_ = pool;
+            ssm_slot_ = ssm_pool_->acquire_slot();
+            req_.set_ssm_slot_idx(ssm_slot_);
+            hybrid_cfg_ = std::make_unique<model::HybridForwardConfig>(make_hybrid_config(*hybrid_model_));
+        } else {
+            fwd_cfg_ = std::make_unique<model::ModelForwardConfig>(engine_.model().forward_config());
+        }
+    }
+
+    ~PerplexityForward() {
+        if (ssm_pool_ && ssm_slot_ >= 0) {
+            ssm_pool_->release_slot(ssm_slot_);
+        }
+    }
+
+    PerplexityForward(const PerplexityForward&) = delete;
+    PerplexityForward& operator=(const PerplexityForward&) = delete;
+
+    void reset_sequence() {
+        if (ssm_pool_ && ssm_slot_ >= 0) {
+            ssm_pool_->reset_slot(ssm_slot_);
+        }
+    }
+
+    tensor_t operator()(const std::vector<int>& input_block, int past_len, kvcache::SequenceBlockTable& block_table) {
+        model::PagedForwardContext ctx(input_block, past_len, block_table, *engine_.block_pool());
+        if (hybrid_cfg_) {
+            return model::hybrid_transformer_forward(*hybrid_cfg_, ctx, req_, engine_.exec_config());
+        }
+        return model::transformer_forward(*fwd_cfg_, ctx, engine_.exec_config());
+    }
+
+private:
+    InferenceEngine& engine_;
+    const model::Qwen3_5Model* hybrid_model_ = nullptr;
+    model::SSMStatePool* ssm_pool_ = nullptr;
+    int ssm_slot_ = -1;
+    InferenceRequest req_;
+    std::unique_ptr<model::HybridForwardConfig> hybrid_cfg_;
+    std::unique_ptr<model::ModelForwardConfig> fwd_cfg_;
+};
 
 } // namespace
 
@@ -426,7 +487,7 @@ PerplexityStats InferenceEngine::evaluate_perplexity(const std::vector<std::stri
     double chunk_ppl_m2 = 0.0;
 
     size_t eval_block_size = 16;
-    auto fwd_cfg = model_->forward_config();
+    PerplexityForward forward(*this);
 
     if (config.verbose) {
         LOGI << "[PPL] Start evaluation" << ", run_id=" << result.run_id << ", samples=" << result.total_samples
@@ -488,6 +549,7 @@ PerplexityStats InferenceEngine::evaluate_perplexity(const std::vector<std::stri
                 }
 
                 block_table.seq_len = 0;
+                forward.reset_sequence();
                 const size_t eval_begin = begin + eval_from + 1;
                 double window_nll_sum = 0.0;
                 size_t window_eval_tokens = 0;
@@ -501,9 +563,7 @@ PerplexityStats InferenceEngine::evaluate_perplexity(const std::vector<std::stri
                     tensor_t logits;
                     try {
                         block_allocator_->ensure_blocks(block_table, static_cast<int>(local_end));
-                        model::PagedForwardContext ctx(input_block, static_cast<int>(local_begin), block_table,
-                                                       *block_pool_);
-                        logits = model::transformer_forward(fwd_cfg, ctx, exec_config_);
+                        logits = forward(input_block, static_cast<int>(local_begin), block_table);
                     } catch (const std::runtime_error&) {
                         if (eval_block_size > 1) {
                             eval_block_size = std::max<size_t>(1, eval_block_size / 2);
