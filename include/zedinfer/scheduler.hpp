@@ -11,6 +11,7 @@
 #include <deque>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <vector>
 
 namespace zedinfer {
@@ -166,6 +167,7 @@ private:
 
     bool can_admit(const InferenceRequest& req) const;
     void allocate_blocks_for_request(InferenceRequest* req);
+    void fail_queued_request(std::unique_ptr<InferenceRequest> req, const std::string& error_msg);
     void complete_request(InferenceRequest& req);
 };
 

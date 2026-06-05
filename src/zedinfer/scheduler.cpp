@@ -276,8 +276,20 @@ ScheduledBatch Scheduler::schedule() {
         }
 
         if (!can_admit(*req)) {
-            LOGW << "[Scheduler] Cannot admit request " << req->request_id << ": prompt=" << req->input_ids.size()
-                 << " tokens" << ", available=" << (block_allocator_ ? block_allocator_->available_blocks() : -1);
+            std::string error_msg = "Cannot admit request " + std::to_string(req->request_id) + ": prompt="
+                                  + std::to_string(req->input_ids.size()) + " tokens, available="
+                                  + std::to_string(block_allocator_ ? block_allocator_->available_blocks() : -1);
+            if (!req->admission_warned) {
+                LOGW << "[Scheduler] " << error_msg;
+                req->admission_warned = true;
+            }
+            if (batch.decode_requests.empty() && batch.prefill_requests.empty() && active_requests_.empty()) {
+                LOGE << "[Scheduler] Failing queued request: " << error_msg;
+                auto failed = std::move(waiting_queue_.front());
+                waiting_queue_.pop_front();
+                fail_queued_request(std::move(failed), "[Scheduler] " + error_msg);
+                continue;
+            }
             break;
         }
 
@@ -304,6 +316,26 @@ ScheduledBatch Scheduler::schedule() {
     }
 
     return batch;
+}
+
+void Scheduler::fail_queued_request(std::unique_ptr<InferenceRequest> req, const std::string& error_msg) {
+    if (!req) {
+        return;
+    }
+    req->phase = RequestPhase::COMPLETE;
+
+    if (block_allocator_ && req->owns_block_table() && req->block_table().num_layers > 0) {
+        block_allocator_->release_sequence(req->block_table());
+    }
+
+    if (ssm_state_pool_ != nullptr && req->ssm_slot_idx() >= 0) {
+        ssm_state_pool_->release_slot(req->ssm_slot_idx());
+        req->set_ssm_slot_idx(-1);
+    }
+
+    try {
+        req->result_promise.set_exception(std::make_exception_ptr(std::runtime_error(error_msg)));
+    } catch (...) {}
 }
 
 void Scheduler::process_results(ScheduledBatch& batch, tensor_t logits, sampler::Sampler& default_sampler,

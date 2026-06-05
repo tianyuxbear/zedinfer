@@ -96,6 +96,7 @@ struct InferenceRequest {
 
     // Continuous batching fields
     int prefill_progress = 0;                      // tokens already prefilled (chunked prefill)
+    bool admission_warned = false;                 // suppress repeated cannot-admit logs while queued
     std::promise<GenerationResult> result_promise; // async result delivery
     std::shared_ptr<std::atomic<bool>> cancelled;  // set by HTTP handler on client disconnect
 

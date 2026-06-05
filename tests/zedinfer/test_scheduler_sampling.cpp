@@ -1,10 +1,15 @@
 #include "backend/tensor/tensor.hpp"
+#include "backend/kvcache/block_pool.hpp"
 #include "frontend/sampler/sampler.hpp"
 #include "frontend/tokenizer/base.hpp"
 #include "zedinfer/batch_context.hpp"
 #include "zedinfer/scheduler.hpp"
 
+#include <chrono>
+#include <future>
 #include <gtest/gtest.h>
+#include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -92,4 +97,33 @@ TEST(SchedulerSamplingTest, MixedDecodePrefillSamplesEachRequestLogitRow) {
     ASSERT_EQ(prefill_req.output_ids.size(), 1u);
     EXPECT_EQ(decode_req.output_ids[0], 0);
     EXPECT_EQ(prefill_req.output_ids[0], 2);
+}
+
+TEST(SchedulerSamplingTest, OversizedQueuedRequestFailsInsteadOfSpinning) {
+    SchedulerConfig config;
+    config.max_batch_tokens = 16;
+    config.max_prefill_tokens = 16;
+    Scheduler scheduler(config);
+
+    kvcache::BlockConfig block_config;
+    block_config.block_size = 4;
+    block_config.num_kv_heads = 1;
+    block_config.head_dim = 1;
+    block_config.dtype = ZEDINFER_DTYPE_F32;
+    kvcache::BlockPool pool(block_config, 1, ZEDINFER_DEVICE_CPU, 0);
+    kvcache::BlockAllocator allocator(pool, 1);
+    scheduler.set_block_allocator(&allocator);
+
+    auto req = std::make_unique<InferenceRequest>();
+    req->input_ids.assign(32, 1);
+    req->config.max_new_tokens = 1;
+    auto future = req->result_promise.get_future();
+    scheduler.submit(std::move(req));
+
+    ScheduledBatch batch = scheduler.schedule();
+
+    EXPECT_TRUE(batch.empty());
+    EXPECT_EQ(scheduler.pending_count(), 0);
+    ASSERT_EQ(future.wait_for(std::chrono::seconds(0)), std::future_status::ready);
+    EXPECT_THROW(future.get(), std::runtime_error);
 }
