@@ -217,6 +217,11 @@ int main(int argc, char* argv[]) {
         .default_value(0.9f)
         .scan<'g', float>();
 
+    program.add_argument("--enable-thinking")
+        .help("Accepted for CLI parity; perplexity uses raw tokenized dataset text")
+        .default_value(false)
+        .implicit_value(true);
+
     try {
         program.parse_args(argc, argv);
     } catch (const std::exception& err) {
@@ -233,6 +238,7 @@ int main(int argc, char* argv[]) {
     const int context_window_i = program.get<int>("--context-window");
     const auto csv_out = program.get<std::string>("--csv-out");
     const bool use_nvidia = program.get<bool>("--nvidia");
+    const bool enable_thinking = program.get<bool>("--enable-thinking");
 
     if (max_samples_i < 0 || max_length_i < 0 || context_window_i < 0) {
         std::cerr << "max-samples, max-length and context-window must be >= 0" << std::endl;
@@ -262,6 +268,9 @@ int main(int argc, char* argv[]) {
 
     SchedulerConfig sched_config;
     sched_config.gpu_memory_utilization = program.get<float>("--gpu-memory-utilization");
+    if (enable_thinking) {
+        LOGW << "--enable-thinking has no effect in ppl; perplexity uses raw tokenized dataset text";
+    }
 
     LOGI << "Loaded samples: " << samples.size();
     LOGI << "Initializing engine on device: " << device_name;

@@ -457,7 +457,7 @@ void HttpServer::cache_static_files() {
 // Session Management
 // ============================================================================
 
-InferenceSession* HttpServer::acquire_session(const std::string& session_id) {
+InferenceSession* HttpServer::acquire_session(const std::string& session_id, bool enable_thinking) {
     std::lock_guard<std::mutex> lock(sessions_mutex_);
 
     auto it = sessions_.find(session_id);
@@ -466,6 +466,7 @@ InferenceSession* HttpServer::acquire_session(const std::string& session_id) {
         if (!it->second->busy.compare_exchange_strong(expected, true)) {
             return nullptr;
         }
+        it->second->session->set_enable_thinking(enable_thinking);
         it->second->last_access = std::chrono::steady_clock::now();
         return it->second->session.get();
     }
@@ -474,6 +475,7 @@ InferenceSession* HttpServer::acquire_session(const std::string& session_id) {
 
     GenerationConfig config;
     config.max_new_tokens = 1024;
+    config.enable_thinking = enable_thinking;
     auto session = engine_->create_session(config);
     auto* ptr = session.get();
 
@@ -795,8 +797,9 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
     int max_tokens = body.value("max_tokens", 512);
     std::string session_id = body.value("session_id", std::string(""));
     // Non-OpenAI extension: opt into Qwen3.5 thinking-mode prompt rendering.
-    // Default false matches GenerationConfig and the existing serve behavior.
-    bool enable_thinking = body.value("enable_thinking", false);
+    // If omitted, use the server CLI default so clients that cannot send the
+    // extension field can still select the prompt variant at startup.
+    bool enable_thinking = body.value("enable_thinking", config_.default_enable_thinking);
 
     // Pre-scan messages for image parts. When the request carries images the
     // KV cache from a prior session turn cannot be reused (vision embeddings
@@ -840,7 +843,7 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
     SessionLock session_lock;
     InferenceSession* session = nullptr;
     if (!session_id.empty()) {
-        session = acquire_session(session_id);
+        session = acquire_session(session_id, enable_thinking);
         if (session == nullptr) {
             send_error(res, 409, "Session is busy with another request", "conflict_error", "session_busy");
             return;

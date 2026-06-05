@@ -34,6 +34,9 @@ struct ServerConfig {
     // /tokenize / /detokenize require "Authorization: Bearer <api_key>".
     // /health and static files are always public.
     std::string api_key;
+    // Default used when a chat-completions request omits the non-OpenAI
+    // enable_thinking field. Explicit request fields still take precedence.
+    bool default_enable_thinking = false;
 };
 
 class HttpServer {
@@ -103,7 +106,7 @@ private:
 
     // Atomically get/create and mark a session busy. Returns nullptr when an
     // existing session is already serving another request.
-    InferenceSession* acquire_session(const std::string& session_id);
+    InferenceSession* acquire_session(const std::string& session_id, bool enable_thinking);
     void unlock_session(const std::string& session_id);
     void delete_session(const std::string& session_id);
     void cleanup_idle_sessions();

@@ -106,6 +106,11 @@ std::string InferenceSession::prepare_prompt(const std::string& user_input) {
     return input;
 }
 
+const std::string& InferenceSession::output_prefix() const {
+    const bool use_no_think = !config_.enable_thinking && !template_.output_prefix_no_think.empty();
+    return use_no_think ? template_.output_prefix_no_think : template_.output_prefix;
+}
+
 void InferenceSession::complete_turn(const std::string& user_input, const std::string& raw_output) {
     is_first_turn_ = false;
     chat_history_.push_back({"user", user_input});

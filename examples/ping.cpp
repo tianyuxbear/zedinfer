@@ -46,7 +46,7 @@ int main(int argc, char* argv[]) {
         .default_value(512)
         .scan<'i', int>();
 
-    program.add_argument("--thinking")
+    program.add_argument("--thinking", "--enable-thinking")
         .help("Enable the reasoning <think> block (Qwen3.5). Off by default because the "
               "open-<think> branch is fragile on GPTQ-Int4 weights and produces hallucinated "
               "prompt content. Opt in if the weights handle empty-thinking-start cleanly.")

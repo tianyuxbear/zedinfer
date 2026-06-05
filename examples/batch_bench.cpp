@@ -47,6 +47,11 @@ int main(int argc, char* argv[]) {
         .default_value(0.9f)
         .scan<'g', float>();
 
+    program.add_argument("--enable-thinking")
+        .help("Set GenerationConfig.enable_thinking on benchmark requests")
+        .default_value(false)
+        .implicit_value(true);
+
     try {
         program.parse_args(argc, argv);
     } catch (const std::exception& err) {
@@ -64,6 +69,7 @@ int main(int argc, char* argv[]) {
     int decode_len = program.get<int>("--decode-len");
     int rounds = program.get<int>("--rounds");
     bool use_nvidia = program.get<bool>("--nvidia");
+    bool enable_thinking = program.get<bool>("--enable-thinking");
 
     zedinferDeviceType_t device_type = use_nvidia ? ZEDINFER_DEVICE_NVIDIA : ZEDINFER_DEVICE_CPU;
     device::Device device(device_type, 0);
@@ -112,6 +118,7 @@ int main(int argc, char* argv[]) {
             for (auto& t : req->input_ids) { t = utils::randint(min_id, max_id); }
 
             req->config.max_new_tokens = decode_len;
+            req->config.enable_thinking = enable_thinking;
             req->config.verbose = false;
             req->arrival_time = std::chrono::steady_clock::now();
 

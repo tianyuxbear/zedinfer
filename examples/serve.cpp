@@ -58,6 +58,11 @@ int main(int argc, char* argv[]) {
         .default_value(false)
         .implicit_value(true);
 
+    program.add_argument("--enable-thinking")
+        .help("Default enable_thinking value for chat-completions requests that omit the field")
+        .default_value(false)
+        .implicit_value(true);
+
     program.add_argument("--served-model-name")
         .help("Model id surfaced in /v1/models and chat completion responses. "
               "Defaults to the model path. Useful for impersonating an OpenAI model id.")
@@ -107,6 +112,7 @@ int main(int argc, char* argv[]) {
     server_config.port = port;
     server_config.served_model_name = program.get<std::string>("--served-model-name");
     server_config.api_key = program.get<std::string>("--api-key");
+    server_config.default_enable_thinking = program.get<bool>("--enable-thinking");
 
     HttpServer server(server_config, engine);
     g_server = &server;
@@ -124,6 +130,7 @@ int main(int argc, char* argv[]) {
     if (!server_config.api_key.empty()) {
         printf("  Auth: Bearer (api-key required)\n");
     }
+    printf("  Thinking default: %s\n", server_config.default_enable_thinking ? "enabled" : "disabled");
     printf("  Listening: http://%s:%d\n", host.c_str(), port);
     printf("  Web UI: http://%s:%d/\n", host.c_str(), port);
     printf("  API: http://%s:%d/v1/chat/completions\n", host.c_str(), port);

@@ -51,6 +51,11 @@ int main(int argc, char* argv[]) {
         .default_value(false)
         .implicit_value(true);
 
+    program.add_argument("--enable-thinking")
+        .help("Enable the reasoning <think> block in chat-template rendering")
+        .default_value(false)
+        .implicit_value(true);
+
     try {
         program.parse_args(argc, argv);
     } catch (const std::exception& err) {
@@ -78,6 +83,7 @@ int main(int argc, char* argv[]) {
     GenerationConfig gen_config;
     gen_config.gen_mode = GenerationMode::CHAT;
     gen_config.max_new_tokens = max_tokens;
+    gen_config.enable_thinking = program.get<bool>("--enable-thinking");
     gen_config.verbose = true;
     gen_config.print_stats = true;
     gen_config.stream = true;
