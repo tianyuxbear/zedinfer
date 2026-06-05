@@ -113,6 +113,9 @@ private:
 
     // Route handlers
     void handle_chat_completions(const httplib::Request& req, httplib::Response& res);
+    void handle_responses(const httplib::Request& req, httplib::Response& res);
+    void handle_anthropic_messages(const httplib::Request& req, httplib::Response& res);
+    void handle_anthropic_count_tokens(const httplib::Request& req, httplib::Response& res);
     void handle_models(const httplib::Request& req, httplib::Response& res);
     void handle_health(const httplib::Request& req, httplib::Response& res);
     void handle_delete_session(const httplib::Request& req, httplib::Response& res);

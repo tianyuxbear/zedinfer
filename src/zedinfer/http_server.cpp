@@ -1,5 +1,6 @@
 #include "zedinfer/http_server.hpp"
 #include "utils/logging.hpp"
+#include "zedinfer/api_compat.hpp"
 #include "zedinfer/chat_template_jinja.hpp"
 #include "zedinfer/engine.hpp"
 #include "zedinfer/request.hpp"
@@ -365,6 +366,38 @@ static size_t valid_utf8_length(const std::string& s) {
     return last_good;
 }
 
+static constexpr const char* kCompatFormatField = "__zedinfer_compat_format";
+
+static api_compat::ResponseFormat parse_compat_format(json& body) {
+    api_compat::ResponseFormat format = api_compat::ResponseFormat::OpenAIChat;
+    if (body.contains(kCompatFormatField) && body[kCompatFormatField].is_string()) {
+        const std::string value = body[kCompatFormatField].get<std::string>();
+        if (value == "responses") {
+            format = api_compat::ResponseFormat::OpenAIResponses;
+        } else if (value == "anthropic") {
+            format = api_compat::ResponseFormat::Anthropic;
+        }
+        body.erase(kCompatFormatField);
+    }
+    return format;
+}
+
+static std::string compat_suffix_from_chat_id(const std::string& id) {
+    size_t pos = id.rfind('-');
+    return pos == std::string::npos ? id : id.substr(pos + 1);
+}
+
+static void inject_tool_prompt_message(json& body) {
+    if (!body.contains("messages") || !body["messages"].is_array() || !body.contains("tools")) {
+        return;
+    }
+    std::string tool_prompt = api_compat::build_tool_prompt(body["tools"]);
+    if (tool_prompt.empty()) {
+        return;
+    }
+    body["messages"].insert(body["messages"].begin(), json{{"role", "system"}, {"content", tool_prompt}});
+}
+
 } // anonymous namespace
 
 // ============================================================================
@@ -567,7 +600,7 @@ HttpServer::HttpServer(ServerConfig config, std::shared_ptr<InferenceEngine> eng
     server_.set_default_headers({
         {"Access-Control-Allow-Origin", "*"},
         {"Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS"},
-        {"Access-Control-Allow-Headers", "Content-Type, Authorization"},
+        {"Access-Control-Allow-Headers", "Content-Type, Authorization, X-Api-Key, Anthropic-Version, Anthropic-Beta"},
         {"Access-Control-Max-Age", "86400"},
     });
     // CORS preflight: respond 204 to any OPTIONS request without invoking handlers.
@@ -582,18 +615,25 @@ HttpServer::HttpServer(ServerConfig config, std::shared_ptr<InferenceEngine> eng
                 return httplib::Server::HandlerResponse::Unhandled;
             }
             const std::string& path = req.path;
-            bool needs_auth = (path.rfind("/v1/", 0) == 0) || (path == "/tokenize") || (path == "/detokenize");
+            bool needs_auth = (path.rfind("/v1/", 0) == 0) || (path == "/responses") || (path == "/tokenize")
+                            || (path == "/detokenize");
             if (!needs_auth) {
                 return httplib::Server::HandlerResponse::Unhandled;
             }
             std::string auth = req.get_header_value("Authorization");
+            if (auth.empty()) {
+                auth = req.get_header_value("X-Api-Key");
+            }
             const std::string prefix = "Bearer ";
-            if (auth.size() <= prefix.size() || auth.compare(0, prefix.size(), prefix) != 0) {
+            if (auth.rfind(prefix, 0) == 0) {
+                auth = auth.substr(prefix.size());
+            }
+            if (auth.empty()) {
                 send_error(res, 401, "Missing or malformed Authorization header (expected 'Bearer <api_key>')",
                            "authentication_error", "invalid_api_key");
                 return httplib::Server::HandlerResponse::Handled;
             }
-            if (auth.substr(prefix.size()) != config_.api_key) {
+            if (auth != config_.api_key) {
                 send_error(res, 401, "Invalid API key", "authentication_error", "invalid_api_key");
                 return httplib::Server::HandlerResponse::Handled;
             }
@@ -612,6 +652,14 @@ HttpServer::HttpServer(ServerConfig config, std::shared_ptr<InferenceEngine> eng
     // API routes
     server_.Post("/v1/chat/completions",
                  [this](const httplib::Request& req, httplib::Response& res) { handle_chat_completions(req, res); });
+    server_.Post("/v1/responses",
+                 [this](const httplib::Request& req, httplib::Response& res) { handle_responses(req, res); });
+    server_.Post("/responses",
+                 [this](const httplib::Request& req, httplib::Response& res) { handle_responses(req, res); });
+    server_.Post("/v1/messages",
+                 [this](const httplib::Request& req, httplib::Response& res) { handle_anthropic_messages(req, res); });
+    server_.Post("/v1/messages/count_tokens",
+                 [this](const httplib::Request& req, httplib::Response& res) { handle_anthropic_count_tokens(req, res); });
     server_.Get("/v1/models", [this](const httplib::Request& req, httplib::Response& res) { handle_models(req, res); });
     server_.Get("/health", [this](const httplib::Request& req, httplib::Response& res) { handle_health(req, res); });
     server_.Delete("/v1/sessions/(.*)",
@@ -774,6 +822,114 @@ void HttpServer::handle_detokenize(const httplib::Request& req, httplib::Respons
 }
 
 // ============================================================================
+// POST /v1/responses and /responses (OpenAI Responses-compatible)
+// ============================================================================
+
+void HttpServer::handle_responses(const httplib::Request& req, httplib::Response& res) {
+    json body;
+    try {
+        body = json::parse(req.body);
+        body = api_compat::convert_responses_to_chat(body);
+    } catch (const json::parse_error& e) {
+        send_error(res, 400, std::string("Invalid JSON: ") + e.what(), "invalid_request_error", "invalid_json");
+        return;
+    } catch (const std::exception& e) {
+        send_error(res, 400, e.what(), "invalid_request_error", "invalid_request");
+        return;
+    }
+
+    body[kCompatFormatField] = "responses";
+    httplib::Request chat_req = req;
+    chat_req.path = "/v1/chat/completions";
+    chat_req.body = body.dump();
+    handle_chat_completions(chat_req, res);
+}
+
+// ============================================================================
+// POST /v1/messages (Anthropic Messages-compatible)
+// ============================================================================
+
+void HttpServer::handle_anthropic_messages(const httplib::Request& req, httplib::Response& res) {
+    json body;
+    try {
+        body = json::parse(req.body);
+        body = api_compat::convert_anthropic_to_chat(body);
+    } catch (const json::parse_error& e) {
+        send_error(res, 400, std::string("Invalid JSON: ") + e.what(), "invalid_request_error", "invalid_json");
+        return;
+    } catch (const std::exception& e) {
+        send_error(res, 400, e.what(), "invalid_request_error", "invalid_request");
+        return;
+    }
+
+    body[kCompatFormatField] = "anthropic";
+    httplib::Request chat_req = req;
+    chat_req.path = "/v1/chat/completions";
+    chat_req.body = body.dump();
+    handle_chat_completions(chat_req, res);
+}
+
+// ============================================================================
+// POST /v1/messages/count_tokens (Anthropic-compatible)
+// ============================================================================
+
+void HttpServer::handle_anthropic_count_tokens(const httplib::Request& req, httplib::Response& res) {
+    json body;
+    try {
+        body = json::parse(req.body);
+        body = api_compat::convert_anthropic_to_chat(body);
+    } catch (const json::parse_error& e) {
+        send_error(res, 400, std::string("Invalid JSON: ") + e.what(), "invalid_request_error", "invalid_json");
+        return;
+    } catch (const std::exception& e) {
+        send_error(res, 400, e.what(), "invalid_request_error", "invalid_request");
+        return;
+    }
+
+    bool enable_thinking = body.value("enable_thinking", config_.default_enable_thinking);
+    bool any_image_part = false;
+    std::string prompt;
+    const ChatTemplateJinja* jinja_tpl = engine_->chat_template_jinja();
+
+    nlohmann::ordered_json tools_ordered;
+    bool has_tools = false;
+    if (body.contains("tools") && body["tools"].is_array() && !body["tools"].empty()) {
+        try {
+            nlohmann::ordered_json ordered_body = nlohmann::ordered_json::parse(body.dump());
+            tools_ordered = ordered_body["tools"];
+            has_tools = true;
+        } catch (const std::exception&) {}
+    }
+    if (has_tools) {
+        inject_tool_prompt_message(body);
+    }
+
+    if (jinja_tpl) {
+        std::vector<ChatMessageMM> messages;
+        messages.reserve(body["messages"].size());
+        for (const auto& msg : body["messages"]) {
+            messages.push_back(parse_openai_message(msg, any_image_part));
+        }
+        prompt = jinja_tpl->render(messages, /*add_generation_prompt=*/true, enable_thinking,
+                                   has_tools ? &tools_ordered : nullptr);
+    } else {
+        std::vector<std::pair<std::string, std::string>> messages;
+        messages.reserve(body["messages"].size());
+        for (const auto& msg : body["messages"]) {
+            messages.emplace_back(msg.value("role", ""), flatten_message_content(msg));
+        }
+        prompt = engine_->chat_template().apply(messages);
+    }
+
+    try {
+        auto ids = engine_->tokenizer().encode(prompt);
+        res.set_content(json{{"input_tokens", ids.size()}}.dump(), "application/json");
+    } catch (const std::exception& e) {
+        send_error(res, 500, std::string("Token counting failed: ") + e.what(), "internal_error", "tokenize_failed");
+    }
+}
+
+// ============================================================================
 // POST /v1/chat/completions
 // ============================================================================
 
@@ -790,6 +946,16 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
     if (!body.contains("messages") || !body["messages"].is_array() || body["messages"].empty()) {
         send_error(res, 400, "Missing or empty 'messages' array", "invalid_request_error", "missing_field");
         return;
+    }
+
+    api_compat::ResponseFormat compat_format = parse_compat_format(body);
+
+    if (body.contains("n") && body["n"].is_number_integer() && body["n"].get<int>() != 1) {
+        send_error(res, 400, "Only n=1 is supported", "invalid_request_error", "unsupported_parameter");
+        return;
+    }
+    if (!body.contains("max_tokens") && body.contains("max_completion_tokens")) {
+        body["max_tokens"] = body["max_completion_tokens"];
     }
 
     // 2. Extract parameters
@@ -906,6 +1072,9 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
         } catch (const std::exception& e) {
             LOGW << "[HttpServer] Failed to re-parse request body for ordered tools: " << e.what();
         }
+    }
+    if (has_tools) {
+        inject_tool_prompt_message(body);
     }
 
     auto build_prompt_from_messages = [&]() -> std::string {
@@ -1074,7 +1243,6 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
                    "invalid_request_error", "prompt_too_long");
         return;
     }
-
     // 7. Log request with content
     std::string request_id = generate_request_id();
     std::string msg_preview = last_user_message.substr(0, 100);
@@ -1088,6 +1256,7 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
     // 8. Build inference request
     auto cancel_flag = std::make_shared<std::atomic<bool>>(false);
 
+    const int prompt_token_count = static_cast<int>(input_ids.size());
     auto inference_req = std::make_unique<InferenceRequest>();
     inference_req->input_ids = std::move(input_ids);
     inference_req->config.max_new_tokens = max_tokens;
@@ -1189,6 +1358,7 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
             std::shared_ptr<std::atomic<bool>> cancel_flag;
             std::string req_id, model, user_msg, output_prefix;
             int64_t epoch;
+            int prompt_tokens = 0;
             int timeout_sec;
             InferenceSession* session;
             SessionLock lock;
@@ -1225,6 +1395,16 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
             std::string tool_carry;
             int tool_id_counter = 0;
             bool has_emitted_tool_call = false;
+            api_compat::ResponseFormat format = api_compat::ResponseFormat::OpenAIChat;
+            std::string resp_id, resp_msg_id, resp_reasoning_id;
+            bool responses_reasoning_started = false;
+            bool responses_text_started = false;
+            bool anthropic_thinking_started = false;
+            bool anthropic_text_started = false;
+            int anthropic_tool_count = 0;
+            std::string stream_content_text;
+            std::string stream_reasoning_text;
+            json stream_tool_calls = json::array();
         };
 
         auto ctx = std::make_shared<Ctx>();
@@ -1233,11 +1413,19 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
         ctx->cancel_flag = cancel_flag;
         ctx->req_id = request_id;
         ctx->model = display_model_name_;
+        ctx->format = compat_format;
+        {
+            std::string suffix = compat_suffix_from_chat_id(request_id);
+            ctx->resp_id = "resp_" + suffix;
+            ctx->resp_msg_id = "msg_" + suffix;
+            ctx->resp_reasoning_id = "rs_" + suffix;
+        }
         ctx->user_msg = last_user_message;
         ctx->output_prefix = session ? session->output_prefix() : "";
         ctx->epoch
             = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch())
                   .count();
+        ctx->prompt_tokens = prompt_token_count;
         ctx->timeout_sec = config_.request_timeout_sec;
         ctx->session = session;
         ctx->lock = std::move(session_lock); // transfer lock ownership to ctx
@@ -1250,7 +1438,6 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
         // Hand the stop-sequence list over to the SSE state so the streaming
         // path can enforce it in lock-step with the blocking path.
         ctx->stop_sequences = stop_sequences_snapshot;
-
         res.set_header("Cache-Control", "no-cache");
         res.set_header("Connection", "keep-alive");
 
@@ -1260,6 +1447,10 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
                 try {
                     auto sse = [&sink](const json& j) {
                         std::string d = "data: " + j.dump() + "\n\n";
+                        sink.write(d.data(), d.size());
+                    };
+                    auto sse_event = [&sink](const std::string& event, const json& data) {
+                        std::string d = "event: " + event + "\ndata: " + data.dump() + "\n\n";
                         sink.write(d.data(), d.size());
                     };
                     auto base = [&ctx]() {
@@ -1273,11 +1464,86 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
                     // (text inside <think>...</think>). full_output keeps the
                     // raw concatenation including tags, so post-stream stop_seq
                     // logic and session storage stay consistent.
-                    auto send_chunk = [&ctx, &sse, &base](const std::string& text, bool is_reasoning) {
+                    auto send_chunk = [&ctx, &sse, &sse_event, &base](const std::string& text, bool is_reasoning) {
                         if (text.empty()) {
                             return;
                         }
                         ctx->full_output += text;
+                        if (is_reasoning) {
+                            ctx->stream_reasoning_text += text;
+                        } else {
+                            ctx->stream_content_text += text;
+                        }
+                        if (ctx->format == api_compat::ResponseFormat::Anthropic) {
+                            if (is_reasoning) {
+                                if (!ctx->anthropic_thinking_started) {
+                                    sse_event("content_block_start",
+                                              {{"type", "content_block_start"},
+                                               {"index", 0},
+                                               {"content_block", {{"type", "thinking"}, {"thinking", ""}}}});
+                                    ctx->anthropic_thinking_started = true;
+                                }
+                                sse_event("content_block_delta",
+                                          {{"type", "content_block_delta"},
+                                           {"index", 0},
+                                           {"delta", {{"type", "thinking_delta"}, {"thinking", text}}}});
+                            } else {
+                                const int index = ctx->anthropic_thinking_started ? 1 : 0;
+                                if (!ctx->anthropic_text_started) {
+                                    sse_event("content_block_start",
+                                              {{"type", "content_block_start"},
+                                               {"index", index},
+                                               {"content_block", {{"type", "text"}, {"text", ""}}}});
+                                    ctx->anthropic_text_started = true;
+                                }
+                                sse_event("content_block_delta",
+                                          {{"type", "content_block_delta"},
+                                           {"index", index},
+                                           {"delta", {{"type", "text_delta"}, {"text", text}}}});
+                            }
+                            return;
+                        }
+                        if (ctx->format == api_compat::ResponseFormat::OpenAIResponses) {
+                            if (is_reasoning) {
+                                if (!ctx->responses_reasoning_started) {
+                                    sse_event("response.output_item.added",
+                                              {{"type", "response.output_item.added"},
+                                               {"item",
+                                                {{"id", ctx->resp_reasoning_id},
+                                                 {"summary", json::array()},
+                                                 {"type", "reasoning"},
+                                                 {"content", json::array()},
+                                                 {"encrypted_content", ""},
+                                                 {"status", "in_progress"}}}});
+                                    ctx->responses_reasoning_started = true;
+                                }
+                                sse_event("response.reasoning_text.delta",
+                                          {{"type", "response.reasoning_text.delta"},
+                                           {"item_id", ctx->resp_reasoning_id},
+                                           {"delta", text}});
+                            } else {
+                                if (!ctx->responses_text_started) {
+                                    sse_event("response.output_item.added",
+                                              {{"type", "response.output_item.added"},
+                                               {"item",
+                                                {{"id", ctx->resp_msg_id},
+                                                 {"type", "message"},
+                                                 {"role", "assistant"},
+                                                 {"status", "in_progress"},
+                                                 {"content", json::array()}}}});
+                                    sse_event("response.content_part.added",
+                                              {{"type", "response.content_part.added"},
+                                               {"item_id", ctx->resp_msg_id},
+                                               {"part", {{"type", "output_text"}, {"text", ""}}}});
+                                    ctx->responses_text_started = true;
+                                }
+                                sse_event("response.output_text.delta",
+                                          {{"type", "response.output_text.delta"},
+                                           {"item_id", ctx->resp_msg_id},
+                                           {"delta", text}});
+                            }
+                            return;
+                        }
                         json delta;
                         if (is_reasoning) {
                             delta["reasoning_content"] = text;
@@ -1341,7 +1607,8 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
                     // SSE chunk. Increments tool_id_counter; flips
                     // has_emitted_tool_call so the completion chunk uses
                     // finish_reason="tool_calls".
-                    auto emit_tool_call_delta = [&ctx, &sse, &base](const std::string& fn_name, const json& fn_args) {
+                    auto emit_tool_call_delta = [&ctx, &sse, &sse_event, &base](const std::string& fn_name,
+                                                                                const json& fn_args) {
                         if (fn_name.empty()) {
                             return;
                         }
@@ -1353,12 +1620,44 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
                         fn["name"] = fn_name;
                         fn["arguments"] = fn_args.is_string() ? fn_args.get<std::string>() : fn_args.dump();
                         call["function"] = std::move(fn);
+                        ctx->stream_tool_calls.push_back(call);
+                        ctx->has_emitted_tool_call = true;
+
+                        if (ctx->format == api_compat::ResponseFormat::Anthropic) {
+                            const int index = (ctx->anthropic_thinking_started ? 1 : 0)
+                                            + (ctx->anthropic_text_started ? 1 : 0) + ctx->anthropic_tool_count++;
+                            sse_event("content_block_start",
+                                      {{"type", "content_block_start"},
+                                       {"index", index},
+                                       {"content_block",
+                                        {{"type", "tool_use"}, {"id", call["id"]}, {"name", fn_name}}}});
+                            sse_event("content_block_delta",
+                                      {{"type", "content_block_delta"},
+                                       {"index", index},
+                                       {"delta", {{"type", "input_json_delta"}, {"partial_json", call["function"]["arguments"]}}}});
+                            return;
+                        }
+                        if (ctx->format == api_compat::ResponseFormat::OpenAIResponses) {
+                            const std::string fc_id = "fc_" + call["id"].get<std::string>();
+                            sse_event("response.output_item.added",
+                                      {{"type", "response.output_item.added"},
+                                       {"item",
+                                        {{"type", "function_call"},
+                                         {"status", "in_progress"},
+                                         {"arguments", ""},
+                                         {"call_id", fc_id},
+                                         {"name", fn_name}}}});
+                            sse_event("response.function_call_arguments.delta",
+                                      {{"type", "response.function_call_arguments.delta"},
+                                       {"item_id", fc_id},
+                                       {"delta", call["function"]["arguments"]}});
+                            return;
+                        }
                         json delta;
                         delta["tool_calls"] = json::array({call});
                         json c = base();
                         c["choices"] = json::array({{{"index", 0}, {"delta", delta}, {"finish_reason", nullptr}}});
                         sse(c);
-                        ctx->has_emitted_tool_call = true;
                     };
                     // Split `chunk` at <tool_call>...</tool_call> boundaries. Text
                     // outside tool_call blocks forwards to route_reasoning; text
@@ -1506,10 +1805,36 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
                     // Send role delta
                     if (!ctx->sent_role) {
                         ctx->sent_role = true;
-                        json c = base();
-                        c["choices"] = json::array(
-                            {{{"index", 0}, {"delta", {{"role", "assistant"}}}, {"finish_reason", nullptr}}});
-                        sse(c);
+                        if (ctx->format == api_compat::ResponseFormat::Anthropic) {
+                            sse_event("message_start",
+                                      {{"type", "message_start"},
+                                       {"message",
+                                        {{"id", ctx->req_id},
+                                         {"type", "message"},
+                                         {"role", "assistant"},
+                                         {"content", json::array()},
+                                         {"model", ctx->model},
+                                         {"stop_reason", nullptr},
+                                         {"stop_sequence", nullptr},
+                                         {"usage",
+                                          {{"cache_read_input_tokens", 0},
+                                           {"input_tokens", ctx->prompt_tokens},
+                                           {"output_tokens", 0}}}}}});
+                        } else if (ctx->format == api_compat::ResponseFormat::OpenAIResponses) {
+                            json response = {{"id", ctx->resp_id},
+                                             {"object", "response"},
+                                             {"created_at", ctx->epoch},
+                                             {"status", "in_progress"},
+                                             {"model", ctx->model},
+                                             {"output", json::array()}};
+                            sse_event("response.created", {{"type", "response.created"}, {"response", response}});
+                            sse_event("response.in_progress", {{"type", "response.in_progress"}, {"response", response}});
+                        } else {
+                            json c = base();
+                            c["choices"] = json::array(
+                                {{{"index", 0}, {"delta", {{"role", "assistant"}}}, {"finish_reason", nullptr}}});
+                            sse(c);
+                        }
                     }
 
                     // Route the session's output_prefix (DeepSeek-R1 prepends
@@ -1584,13 +1909,89 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
                             if (ctx->stop_hit) {
                                 fr = "stop";
                             }
-                            json c = base();
-                            c["choices"]
-                                = json::array({{{"index", 0}, {"delta", json::object()}, {"finish_reason", fr}}});
-                            c["usage"] = {{"prompt_tokens", result.stats.prompt_tokens},
-                                          {"completion_tokens", result.stats.generated_tokens},
-                                          {"total_tokens", result.stats.total_tokens}};
-                            sse(c);
+                            json message = {{"role", "assistant"}};
+                            if (!ctx->stream_tool_calls.empty()) {
+                                message["content"] = ctx->stream_content_text.empty() ? json(nullptr)
+                                                                                      : json(ctx->stream_content_text);
+                                message["tool_calls"] = ctx->stream_tool_calls;
+                            } else {
+                                message["content"] = ctx->stream_content_text;
+                            }
+                            if (!ctx->stream_reasoning_text.empty()) {
+                                message["reasoning_content"] = ctx->stream_reasoning_text;
+                            }
+                            json chat_response = {{"id", ctx->req_id},
+                                                  {"object", "chat.completion"},
+                                                  {"created", ctx->epoch},
+                                                  {"model", ctx->model},
+                                                  {"choices",
+                                                   json::array(
+                                                       {{{"index", 0}, {"message", message}, {"finish_reason", fr}}})},
+                                                  {"usage",
+                                                   {{"prompt_tokens", result.stats.prompt_tokens},
+                                                    {"completion_tokens", result.stats.generated_tokens},
+                                                    {"total_tokens", result.stats.total_tokens}}}};
+
+                            if (ctx->format == api_compat::ResponseFormat::OpenAIChat) {
+                                json c = base();
+                                c["choices"] = json::array(
+                                    {{{"index", 0}, {"delta", json::object()}, {"finish_reason", fr}}});
+                                c["usage"] = chat_response["usage"];
+                                sse(c);
+                            } else if (ctx->format == api_compat::ResponseFormat::Anthropic) {
+                                if (!ctx->anthropic_thinking_started && !ctx->anthropic_text_started
+                                    && ctx->anthropic_tool_count == 0) {
+                                    ctx->anthropic_text_started = true;
+                                    sse_event("content_block_start",
+                                              {{"type", "content_block_start"},
+                                               {"index", 0},
+                                               {"content_block", {{"type", "text"}, {"text", ""}}}});
+                                }
+                                if (ctx->anthropic_thinking_started) {
+                                    sse_event("content_block_delta",
+                                              {{"type", "content_block_delta"},
+                                               {"index", 0},
+                                               {"delta", {{"type", "signature_delta"}, {"signature", ""}}}});
+                                    sse_event("content_block_stop", {{"type", "content_block_stop"}, {"index", 0}});
+                                }
+                                if (ctx->anthropic_text_started) {
+                                    const int index = ctx->anthropic_thinking_started ? 1 : 0;
+                                    sse_event("content_block_stop", {{"type", "content_block_stop"}, {"index", index}});
+                                }
+                                const int tool_base = (ctx->anthropic_thinking_started ? 1 : 0)
+                                                    + (ctx->anthropic_text_started ? 1 : 0);
+                                for (int i = 0; i < ctx->anthropic_tool_count; ++i) {
+                                    sse_event("content_block_stop",
+                                              {{"type", "content_block_stop"}, {"index", tool_base + i}});
+                                }
+                                const std::string stop_reason
+                                    = api_compat::normalize_anthropic_stop_reason(fr, !ctx->stream_tool_calls.empty());
+                                sse_event("message_delta",
+                                          {{"type", "message_delta"},
+                                           {"delta", {{"stop_reason", stop_reason}, {"stop_sequence", nullptr}}},
+                                           {"usage", {{"output_tokens", result.stats.generated_tokens}}}});
+                                sse_event("message_stop", {{"type", "message_stop"}});
+                            } else {
+                                json response = api_compat::chat_response_to_responses(chat_response);
+                                for (const auto& item : response["output"]) {
+                                    const std::string type = item.value("type", "");
+                                    if (type == "message" && item.contains("content") && !item["content"].empty()) {
+                                        const json part = item["content"][0];
+                                        sse_event("response.output_text.done",
+                                                  {{"type", "response.output_text.done"},
+                                                   {"item_id", item["id"]},
+                                                   {"text", part.value("text", std::string())}});
+                                        sse_event("response.content_part.done",
+                                                  {{"type", "response.content_part.done"},
+                                                   {"item_id", item["id"]},
+                                                   {"part", part}});
+                                    }
+                                    sse_event("response.output_item.done",
+                                              {{"type", "response.output_item.done"}, {"item", item}});
+                                }
+                                sse_event("response.completed",
+                                          {{"type", "response.completed"}, {"response", response}});
+                            }
                         } catch (const std::exception& e) {
                             LOGE << "[Response] " << ctx->req_id << " error: " << e.what();
                             if (ctx->session) {
@@ -1598,7 +1999,9 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
                             }
                             sse({{"error", {{"message", e.what()}, {"type", "internal_error"}}}});
                         }
-                        sink.write("data: [DONE]\n\n", 15);
+                        if (ctx->format == api_compat::ResponseFormat::OpenAIChat) {
+                            sink.write("data: [DONE]\n\n", 15);
+                        }
                         sink.done();
                         ctx->lock.unlock();
                         return false;
@@ -1747,6 +2150,11 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
         response["usage"] = {{"prompt_tokens", result.stats.prompt_tokens},
                              {"completion_tokens", result.stats.generated_tokens},
                              {"total_tokens", result.stats.total_tokens}};
+        if (compat_format == api_compat::ResponseFormat::OpenAIResponses) {
+            response = api_compat::chat_response_to_responses(response);
+        } else if (compat_format == api_compat::ResponseFormat::Anthropic) {
+            response = api_compat::chat_response_to_anthropic(response);
+        }
         res.set_content(response.dump(), "application/json");
     }
 }

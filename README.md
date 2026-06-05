@@ -31,7 +31,7 @@
 - **Paged KV cache** — Fixed-size block pool with static VRAM budget, O(1) block allocation
 - **Paged attention** — NVIDIA path can dispatch to FlashInfer for decode/prefill with legacy CUDA kernels kept as fallback
 - **Prefix caching** — Cross-request KV block sharing via chain-hashed content matching and reference counting
-- **HTTP API** — OpenAI-compatible `/v1/chat/completions` with SSE streaming and embedded web chat UI
+- **HTTP API** — OpenAI-compatible `/v1/chat/completions`, OpenAI Responses `/v1/responses`, Anthropic Messages `/v1/messages`, SSE streaming, and embedded web chat UI
 - **Stateful sessions** — Server-side KV cache reuse across multi-turn conversations
 - **Optimized operators** — cuBLAS/cuBLASLt for GPU linear, oneDNN for CPU linear, pre-allocated decode scratch buffers
 - **Direct model forward** — No graph execution overhead; single shared forward loop

@@ -193,6 +193,38 @@ curl http://localhost:8080/v1/chat/completions \
     -d '{"messages":[{"role":"user","content":"Hello"}],"session_id":"abc123"}'
 ```
 
+### `POST /v1/responses`
+
+OpenAI Responses-compatible endpoint. `/responses` is also accepted.
+
+```bash
+curl http://localhost:8080/v1/responses \
+    -H "Content-Type: application/json" \
+    -d '{"model":"qwen","input":"Hello","max_output_tokens":64}'
+```
+
+### `POST /v1/messages`
+
+Anthropic Messages-compatible endpoint for Claude Code style clients.
+
+```bash
+curl http://localhost:8080/v1/messages \
+    -H "Content-Type: application/json" \
+    -H "X-Api-Key: dummy" \
+    -H "Anthropic-Version: 2023-06-01" \
+    -d '{"model":"qwen","max_tokens":64,"messages":[{"role":"user","content":"Hello"}]}'
+```
+
+### `POST /v1/messages/count_tokens`
+
+Anthropic-compatible token counting.
+
+```bash
+curl http://localhost:8080/v1/messages/count_tokens \
+    -H "Content-Type: application/json" \
+    -d '{"model":"qwen","messages":[{"role":"user","content":"Hello world"}]}'
+```
+
 ### `GET /v1/models`
 
 List loaded models.
