@@ -40,13 +40,6 @@ namespace {
 
 constexpr int kWarpSize = 32;
 
-__device__ __forceinline__ float to_float_bf16(uint16_t v) {
-    uint32_t u = static_cast<uint32_t>(v) << 16;
-    float f;
-    __builtin_memcpy(&f, &u, sizeof(float));
-    return f;
-}
-
 __device__ __forceinline__ float to_float(__nv_bfloat16 v) {
     return __bfloat162float(v);
 }
