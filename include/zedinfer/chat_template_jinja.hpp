@@ -1,7 +1,7 @@
 #pragma once
 
 #include <memory>
-#include <nlohmann/json_fwd.hpp>
+#include <nlohmann/json.hpp>
 #include <string>
 #include <variant>
 #include <vector>
@@ -30,6 +30,10 @@ using ContentPart = std::variant<TextPart, ImagePart>;
 struct ChatMessageMM {
     std::string role;
     std::variant<std::string, std::vector<ContentPart>> content;
+    nlohmann::ordered_json tool_calls;
+    std::string reasoning_content;
+    std::string name;
+    std::string tool_call_id;
 };
 
 // minja-backed chat template loader/renderer for Qwen3.5 and other models

@@ -128,6 +128,9 @@ json convert_responses_to_chat(const json& body) {
                 }
                 item.erase("type");
                 item.erase("status");
+                if (item.at("role") == "developer") {
+                    item["role"] = "system";
+                }
                 item["content"] = content;
                 messages.push_back(item);
             } else if (is_string(item, "role") && item.at("role") == "assistant" && is_string(item, "type")
@@ -248,6 +251,19 @@ json convert_responses_to_chat(const json& body) {
     if (body.contains("max_output_tokens")) {
         chat_body.erase("max_output_tokens");
         chat_body["max_tokens"] = body.at("max_output_tokens");
+    }
+    if (body.contains("tool_choice") && body.at("tool_choice").is_object()) {
+        const std::string type = json_value(body.at("tool_choice"), "type", std::string());
+        if (type == "auto") {
+            chat_body["tool_choice"] = "auto";
+        } else if (type == "none") {
+            chat_body["tool_choice"] = "none";
+        } else if (type == "any" || type == "required" || type == "tool") {
+            chat_body["tool_choice"] = "required";
+        } else if (type == "function" && is_string(body.at("tool_choice"), "name")) {
+            chat_body["tool_choice"]
+                = {{"type", "function"}, {"function", {{"name", body.at("tool_choice").at("name")}}}};
+        }
     }
 
     return chat_body;

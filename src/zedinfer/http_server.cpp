@@ -8,6 +8,7 @@
 #include <nlohmann/json.hpp>
 #include <plog/Log.h>
 
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -65,9 +66,30 @@ private:
 //
 // Unknown part types are ignored. A message with no recognizable parts becomes
 // an empty string content.
+static std::string normalized_chat_role(const json& msg) {
+    std::string role = msg.value("role", "");
+    return role == "developer" ? "system" : role;
+}
+
+static nlohmann::ordered_json to_ordered_json(const json& value) {
+    return nlohmann::ordered_json::parse(value.dump());
+}
+
 static ChatMessageMM parse_openai_message(const json& msg, bool& had_images) {
     ChatMessageMM out;
-    out.role = msg.value("role", "");
+    out.role = normalized_chat_role(msg);
+    if (msg.contains("reasoning_content") && msg["reasoning_content"].is_string()) {
+        out.reasoning_content = msg["reasoning_content"].get<std::string>();
+    }
+    if (msg.contains("name") && msg["name"].is_string()) {
+        out.name = msg["name"].get<std::string>();
+    }
+    if (msg.contains("tool_call_id") && msg["tool_call_id"].is_string()) {
+        out.tool_call_id = msg["tool_call_id"].get<std::string>();
+    }
+    if (msg.contains("tool_calls") && msg["tool_calls"].is_array()) {
+        out.tool_calls = to_ordered_json(msg["tool_calls"]);
+    }
     if (!msg.contains("content")) {
         out.content = std::string();
         return out;
@@ -151,6 +173,11 @@ struct ToolCallParseResult {
     bool has_tool_calls = false;
 };
 
+struct ParsedToolCall {
+    std::string name;
+    json arguments;
+};
+
 static std::string trim_ascii_ws(std::string s) {
     auto issp = [](char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; };
     while (!s.empty() && issp(s.front())) { s.erase(s.begin()); }
@@ -215,66 +242,120 @@ static bool parse_xml_tool_call_inner(const std::string& inner, std::string& nam
     return true;
 }
 
+static bool parse_json_tool_call_object(const json& value, ParsedToolCall& call) {
+    if (!value.is_object() || !value.contains("name") || !value["name"].is_string()) {
+        return false;
+    }
+    call.name = value["name"].get<std::string>();
+    call.arguments = value.contains("arguments") ? value["arguments"]
+                                                 : (value.contains("parameters") ? value["parameters"] : json::object());
+    return !call.name.empty();
+}
+
+static std::vector<ParsedToolCall> parse_tool_call_payload(const std::string& inner) {
+    std::vector<ParsedToolCall> calls;
+    try {
+        const json value = json::parse(inner);
+        if (value.is_object()) {
+            ParsedToolCall call;
+            if (parse_json_tool_call_object(value, call)) {
+                calls.push_back(std::move(call));
+            }
+        } else if (value.is_array()) {
+            for (const auto& item : value) {
+                ParsedToolCall call;
+                if (parse_json_tool_call_object(item, call)) {
+                    calls.push_back(std::move(call));
+                }
+            }
+        }
+        if (!calls.empty()) {
+            return calls;
+        }
+    } catch (const std::exception&) {
+        // Not JSON; try Qwen3-Coder XML style below.
+    }
+
+    ParsedToolCall call;
+    if (parse_xml_tool_call_inner(inner, call.name, call.arguments)) {
+        calls.push_back(std::move(call));
+    }
+    return calls;
+}
+
+static json make_openai_tool_call(int& counter, const ParsedToolCall& parsed) {
+    json call;
+    call["id"] = std::string("call_") + std::to_string(counter++);
+    call["type"] = "function";
+    json fn;
+    fn["name"] = parsed.name;
+    fn["arguments"] = parsed.arguments.is_string() ? parsed.arguments.get<std::string>() : parsed.arguments.dump();
+    call["function"] = std::move(fn);
+    return call;
+}
+
+struct ToolCallTag {
+    const char* open;
+    const char* close;
+    size_t open_len;
+    size_t close_len;
+};
+
+static constexpr ToolCallTag kToolCallTags[] = {{"<tool_call>", "</tool_call>", 11, 12},
+                                                {"<function_call>", "</function_call>", 15, 16}};
+
+static size_t max_tool_call_marker_len() {
+    size_t max_len = 0;
+    for (const auto& tag : kToolCallTags) {
+        max_len = std::max(max_len, std::max(tag.open_len, tag.close_len));
+    }
+    return max_len;
+}
+
+static const ToolCallTag* find_next_tool_call_tag(const std::string& text, size_t pos, size_t& open_pos) {
+    const ToolCallTag* found = nullptr;
+    open_pos = std::string::npos;
+    for (const auto& tag : kToolCallTags) {
+        const size_t p = text.find(tag.open, pos);
+        if (p != std::string::npos && (open_pos == std::string::npos || p < open_pos)) {
+            open_pos = p;
+            found = &tag;
+        }
+    }
+    return found;
+}
+
 static ToolCallParseResult parse_qwen3_tool_calls(const std::string& text) {
     ToolCallParseResult out;
     out.tool_calls = json::array();
-    static constexpr const char* OPEN = "<tool_call>";
-    static constexpr const char* CLOSE = "</tool_call>";
-    static constexpr size_t OPEN_LEN = 11;
-    static constexpr size_t CLOSE_LEN = 12;
     size_t pos = 0;
     int counter = 0;
     while (pos < text.size()) {
-        size_t open = text.find(OPEN, pos);
-        if (open == std::string::npos) {
+        size_t open = std::string::npos;
+        const ToolCallTag* tag = find_next_tool_call_tag(text, pos, open);
+        if (tag == nullptr) {
             out.content.append(text, pos, text.size() - pos);
             break;
         }
         out.content.append(text, pos, open - pos);
-        size_t close = text.find(CLOSE, open + OPEN_LEN);
+        size_t close = text.find(tag->close, open + tag->open_len);
         if (close == std::string::npos) {
             // Unterminated <tool_call>: keep the rest as plain text (the model
             // got cut off mid-emission).
             out.content.append(text, open, text.size() - open);
             break;
         }
-        std::string inner = trim_ascii_ws(text.substr(open + OPEN_LEN, close - (open + OPEN_LEN)));
-        bool consumed = false;
-        std::string fn_name;
-        json fn_args;
-        // Try Hermes/JSON style: {"name": "...", "arguments": {...}}
-        try {
-            auto j = json::parse(inner);
-            if (j.is_object() && j.contains("name") && j["name"].is_string()) {
-                fn_name = j["name"].get<std::string>();
-                fn_args = j.contains("arguments") ? j["arguments"]
-                                                  : (j.contains("parameters") ? j["parameters"] : json::object());
-                consumed = true;
+        std::string inner = trim_ascii_ws(text.substr(open + tag->open_len, close - (open + tag->open_len)));
+        std::vector<ParsedToolCall> parsed_calls = parse_tool_call_payload(inner);
+        if (!parsed_calls.empty()) {
+            for (const auto& parsed : parsed_calls) {
+                out.tool_calls.push_back(make_openai_tool_call(counter, parsed));
             }
-        } catch (const std::exception&) {
-            // Not JSON; try Qwen3-Coder XML style below.
-        }
-        // Try Qwen3-Coder XML style.
-        if (!consumed) {
-            if (parse_xml_tool_call_inner(inner, fn_name, fn_args)) {
-                consumed = true;
-            }
-        }
-        if (consumed) {
-            json call;
-            call["id"] = std::string("call_") + std::to_string(counter++);
-            call["type"] = "function";
-            json fn;
-            fn["name"] = fn_name;
-            // OpenAI requires arguments as a JSON-encoded STRING, not an object.
-            fn["arguments"] = fn_args.is_string() ? fn_args.get<std::string>() : fn_args.dump();
-            call["function"] = std::move(fn);
-            out.tool_calls.push_back(std::move(call));
             out.has_tool_calls = true;
         } else {
-            out.content.append(text, open, close + CLOSE_LEN - open);
+            out.content.append(text, open, close + tag->close_len - open);
         }
-        pos = close + CLOSE_LEN;
+        pos = close + tag->close_len;
     }
     return out;
 }
@@ -900,7 +981,7 @@ void HttpServer::handle_anthropic_count_tokens(const httplib::Request& req, http
             has_tools = true;
         } catch (const std::exception&) {}
     }
-    if (has_tools) {
+    if (has_tools && !jinja_tpl) {
         inject_tool_prompt_message(body);
     }
 
@@ -916,7 +997,7 @@ void HttpServer::handle_anthropic_count_tokens(const httplib::Request& req, http
         std::vector<std::pair<std::string, std::string>> messages;
         messages.reserve(body["messages"].size());
         for (const auto& msg : body["messages"]) {
-            messages.emplace_back(msg.value("role", ""), flatten_message_content(msg));
+            messages.emplace_back(normalized_chat_role(msg), flatten_message_content(msg));
         }
         prompt = engine_->chat_template().apply(messages);
     }
@@ -1073,7 +1154,7 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
             LOGW << "[HttpServer] Failed to re-parse request body for ordered tools: " << e.what();
         }
     }
-    if (has_tools) {
+    if (has_tools && !jinja_tpl) {
         inject_tool_prompt_message(body);
     }
 
@@ -1099,7 +1180,7 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
                     }
                 }
             }
-            messages.emplace_back(msg.value("role", ""), flatten_message_content(msg));
+            messages.emplace_back(normalized_chat_role(msg), flatten_message_content(msg));
         }
         return engine_->chat_template().apply(messages);
     };
@@ -1393,6 +1474,8 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
             bool in_tool_call = false;
             std::string tool_buf;
             std::string tool_carry;
+            std::string tool_open_marker;
+            std::string tool_close_marker;
             int tool_id_counter = 0;
             bool has_emitted_tool_call = false;
             api_compat::ResponseFormat format = api_compat::ResponseFormat::OpenAIChat;
@@ -1664,19 +1747,22 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
                     // inside accumulates in ctx->tool_buf and on closing tag is
                     // parsed (JSON-then-XML) and emitted via emit_tool_call_delta.
                     auto route_tool = [&ctx, &route_reasoning, &emit_tool_call_delta](std::string chunk, bool force) {
-                        static constexpr const char* TOPEN = "<tool_call>";
-                        static constexpr const char* TCLOSE = "</tool_call>";
-                        static constexpr size_t TOPEN_LEN = 11;
-                        static constexpr size_t TCLOSE_LEN = 12;
                         chunk = ctx->tool_carry + chunk;
                         ctx->tool_carry.clear();
                         if (!force) {
-                            const size_t maxK = std::max(TOPEN_LEN, TCLOSE_LEN) - 1;
+                            size_t maxK = max_tool_call_marker_len();
+                            maxK = maxK > 0 ? maxK - 1 : 0;
                             size_t safe_end = chunk.size();
                             for (size_t k = std::min(chunk.size(), maxK); k > 0; --k) {
                                 std::string suffix = chunk.substr(chunk.size() - k);
-                                bool match = (std::string(TOPEN).compare(0, k, suffix) == 0)
-                                          || (std::string(TCLOSE).compare(0, k, suffix) == 0);
+                                bool match = false;
+                                for (const auto& tag : kToolCallTags) {
+                                    if (std::string(tag.open).compare(0, k, suffix) == 0
+                                        || std::string(tag.close).compare(0, k, suffix) == 0) {
+                                        match = true;
+                                        break;
+                                    }
+                                }
                                 if (match) {
                                     safe_end = chunk.size() - k;
                                     break;
@@ -1688,52 +1774,56 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
                         size_t pos = 0;
                         while (pos < chunk.size()) {
                             if (ctx->in_tool_call) {
-                                size_t end = chunk.find(TCLOSE, pos);
+                                const std::string close_marker
+                                    = ctx->tool_close_marker.empty() ? std::string("</tool_call>")
+                                                                     : ctx->tool_close_marker;
+                                size_t end = chunk.find(close_marker, pos);
                                 if (end == std::string::npos) {
                                     ctx->tool_buf.append(chunk, pos, chunk.size() - pos);
                                     pos = chunk.size();
                                 } else {
                                     ctx->tool_buf.append(chunk, pos, end - pos);
-                                    pos = end + TCLOSE_LEN;
+                                    pos = end + close_marker.size();
                                     ctx->in_tool_call = false;
                                     std::string trimmed = trim_ascii_ws(ctx->tool_buf);
+                                    std::string open_marker = ctx->tool_open_marker.empty() ? std::string("<tool_call>")
+                                                                                           : ctx->tool_open_marker;
                                     ctx->tool_buf.clear();
-                                    std::string fn_name;
-                                    json fn_args;
-                                    bool ok = false;
-                                    try {
-                                        auto j = json::parse(trimmed);
-                                        if (j.is_object() && j.contains("name") && j["name"].is_string()) {
-                                            fn_name = j["name"].get<std::string>();
-                                            fn_args = j.contains("arguments")
-                                                        ? j["arguments"]
-                                                        : (j.contains("parameters") ? j["parameters"] : json::object());
-                                            ok = true;
+                                    ctx->tool_open_marker.clear();
+                                    ctx->tool_close_marker.clear();
+                                    std::vector<ParsedToolCall> parsed_calls = parse_tool_call_payload(trimmed);
+                                    if (!parsed_calls.empty()) {
+                                        for (const auto& parsed : parsed_calls) {
+                                            emit_tool_call_delta(parsed.name, parsed.arguments);
                                         }
-                                    } catch (const std::exception&) {
-                                        // not JSON; try XML below.
-                                    }
-                                    if (!ok && parse_xml_tool_call_inner(trimmed, fn_name, fn_args)) {
-                                        ok = true;
-                                    }
-                                    if (ok) {
-                                        emit_tool_call_delta(fn_name, fn_args);
+                                    } else {
+                                        route_reasoning(open_marker + trimmed + close_marker, force);
                                     }
                                 }
                             } else {
-                                size_t open = chunk.find(TOPEN, pos);
-                                if (open == std::string::npos) {
+                                size_t open = std::string::npos;
+                                const ToolCallTag* tag = find_next_tool_call_tag(chunk, pos, open);
+                                if (tag == nullptr) {
                                     route_reasoning(chunk.substr(pos), force);
                                     pos = chunk.size();
                                 } else {
                                     if (open > pos) {
                                         route_reasoning(chunk.substr(pos, open - pos), false);
                                     }
-                                    pos = open + TOPEN_LEN;
+                                    pos = open + tag->open_len;
                                     ctx->in_tool_call = true;
                                     ctx->tool_buf.clear();
+                                    ctx->tool_open_marker = tag->open;
+                                    ctx->tool_close_marker = tag->close;
                                 }
                             }
+                        }
+                        if (force && ctx->in_tool_call) {
+                            route_reasoning(ctx->tool_open_marker + ctx->tool_buf, true);
+                            ctx->in_tool_call = false;
+                            ctx->tool_buf.clear();
+                            ctx->tool_open_marker.clear();
+                            ctx->tool_close_marker.clear();
                         }
                     };
                     // Stop-sequence filter. Runs first in the flush pipeline so a

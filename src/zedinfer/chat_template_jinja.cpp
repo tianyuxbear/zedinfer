@@ -30,19 +30,47 @@ std::string read_file(const std::string& path) {
     return contents;
 }
 
-// Convert a ChatMessageMM into the ordered_json shape expected by minja.
-// std::string content -> {"role": ..., "content": "<text>"}
-// vector<ContentPart>  -> {"role": ..., "content": [{"type": "text", "text": ...} | {"type": "image", "image": ...}]}
-nlohmann::ordered_json to_json_message(const ChatMessageMM& msg) {
+bool has_image_part(const std::vector<ContentPart>& parts) {
+    for (const auto& part : parts) {
+        if (std::holds_alternative<ImagePart>(part)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::string join_text_parts(const std::vector<ContentPart>& parts) {
+    std::string text;
+    for (const auto& part : parts) {
+        if (!std::holds_alternative<TextPart>(part)) {
+            continue;
+        }
+        if (!text.empty()) {
+            text += "\n";
+        }
+        text += std::get<TextPart>(part).text;
+    }
+    return text;
+}
+
+// Convert a ChatMessageMM into the ordered_json shape expected by minja. Text-only
+// typed content is folded to a string for templates like Qwen3 that only render
+// string content; image-bearing content stays typed so multimodal templates can
+// still see the image payload.
+nlohmann::ordered_json to_json_message(const ChatMessageMM& msg, bool requires_typed_content) {
     nlohmann::ordered_json out;
     out["role"] = msg.role;
 
     std::visit(
-        [&out](const auto& payload) {
+        [&out, requires_typed_content](const auto& payload) {
             using T = std::decay_t<decltype(payload)>;
             if constexpr (std::is_same_v<T, std::string>) {
                 out["content"] = payload;
             } else {
+                if (!requires_typed_content && !has_image_part(payload)) {
+                    out["content"] = join_text_parts(payload);
+                    return;
+                }
                 // Multimodal: render each part as a typed object. The Qwen3.5
                 // render_content macro checks `'image' in item or item.type == 'image'`
                 // and `'text' in item`, so both shapes work.
@@ -67,6 +95,19 @@ nlohmann::ordered_json to_json_message(const ChatMessageMM& msg) {
             }
         },
         msg.content);
+
+    if (!msg.reasoning_content.empty()) {
+        out["reasoning_content"] = msg.reasoning_content;
+    }
+    if (!msg.name.empty()) {
+        out["name"] = msg.name;
+    }
+    if (!msg.tool_call_id.empty()) {
+        out["tool_call_id"] = msg.tool_call_id;
+    }
+    if (msg.tool_calls.is_array() && !msg.tool_calls.empty()) {
+        out["tool_calls"] = msg.tool_calls;
+    }
 
     return out;
 }
@@ -120,7 +161,8 @@ std::string ChatTemplateJinja::render(const std::vector<ChatMessageMM>& messages
 
     nlohmann::ordered_json msgs_json = nlohmann::ordered_json::array();
     msgs_json.get_ptr<nlohmann::ordered_json::array_t*>()->reserve(messages.size());
-    for (const auto& m : messages) { msgs_json.push_back(to_json_message(m)); }
+    const bool requires_typed_content = impl_->tpl->original_caps().requires_typed_content;
+    for (const auto& m : messages) { msgs_json.push_back(to_json_message(m, requires_typed_content)); }
 
     minja::chat_template_inputs inputs;
     inputs.messages = std::move(msgs_json);

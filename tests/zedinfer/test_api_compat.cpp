@@ -26,6 +26,23 @@ TEST(ApiCompat, ConvertsResponsesStringInput) {
     EXPECT_EQ(chat["max_tokens"], 7);
 }
 
+TEST(ApiCompat, MapsResponsesDeveloperInputToSystem) {
+    json body = {{"input",
+                  json::array({{{"type", "message"},
+                                {"role", "developer"},
+                                {"content", json::array({{{"type", "input_text"}, {"text", "Use tools when needed."}}})}},
+                               {{"type", "message"},
+                                {"role", "user"},
+                                {"content", json::array({{{"type", "input_text"}, {"text", "List files."}}})}}})}};
+
+    json chat = convert_responses_to_chat(body);
+
+    ASSERT_EQ(chat["messages"].size(), 2);
+    EXPECT_EQ(chat["messages"][0]["role"], "system");
+    EXPECT_EQ(chat["messages"][0]["content"][0]["text"], "Use tools when needed.");
+    EXPECT_EQ(chat["messages"][1]["role"], "user");
+}
+
 TEST(ApiCompat, ConvertsResponsesToolItems) {
     json body = {{"input",
                   json::array({{{"type", "function_call"},
@@ -41,6 +58,47 @@ TEST(ApiCompat, ConvertsResponsesToolItems) {
     EXPECT_EQ(chat["messages"][0]["tool_calls"][0]["function"]["name"], "get_weather");
     EXPECT_EQ(chat["messages"][1]["role"], "tool");
     EXPECT_EQ(chat["messages"][1]["tool_call_id"], "call_1");
+}
+
+TEST(ApiCompat, ConvertsCodexResponsesFunctionToolsOnly) {
+    json function_tool = {{"type", "function"},
+                          {"name", "exec_command"},
+                          {"description", "Run a command"},
+                          {"strict", false},
+                          {"parameters",
+                           {{"type", "object"},
+                            {"properties", {{"cmd", {{"type", "string"}}}}},
+                            {"required", json::array({"cmd"})}}}};
+    json namespace_tool = {{"type", "namespace"}, {"name", "multi_agent_v1"}, {"tools", json::array()}};
+    json web_search_tool = {{"type", "web_search"}, {"external_web_access", true}};
+
+    json body = {{"input",
+                  json::array({{{"type", "message"},
+                                {"role", "developer"},
+                                {"content", json::array({{{"type", "input_text"}, {"text", "Use tools when needed."}}})}},
+                               {{"type", "message"}, {"role", "user"}, {"content", "Current directory files?"}}})},
+                 {"tools", json::array({function_tool, namespace_tool, web_search_tool})},
+                 {"tool_choice", {{"type", "auto"}}}};
+
+    json chat = convert_responses_to_chat(body);
+
+    ASSERT_EQ(chat["messages"].size(), 2);
+    EXPECT_EQ(chat["messages"][0]["role"], "system");
+    EXPECT_EQ(chat["messages"][1]["content"][0]["text"], "Current directory files?");
+    ASSERT_TRUE(chat.contains("tools"));
+    ASSERT_EQ(chat["tools"].size(), 1);
+    EXPECT_EQ(chat["tools"][0]["type"], "function");
+    EXPECT_EQ(chat["tools"][0]["function"]["name"], "exec_command");
+    EXPECT_FALSE(chat["tools"][0]["function"]["strict"]);
+    EXPECT_EQ(chat["tool_choice"], "auto");
+}
+
+TEST(ApiCompat, ConvertsResponsesRequiredToolChoice) {
+    json body = {{"input", "Run a command"}, {"tool_choice", {{"type", "tool"}, {"name", "exec_command"}}}};
+
+    json chat = convert_responses_to_chat(body);
+
+    EXPECT_EQ(chat["tool_choice"], "required");
 }
 
 TEST(ApiCompat, ConvertsResponsesReasoningItem) {
