@@ -32,11 +32,13 @@ TEST(ChatTemplateJinja, FoldsTypedTextAndPreservesToolHistory) {
         "{%- if message.role == 'user' %}user:{{ message.content }}\n"
         "{%- elif message.role == 'assistant' %}assistant:{{ message.content }}"
         "{%- if message.tool_calls %}"
-        "{%- for call in message.tool_calls %}<tool_call>{{ call.function.name }}:{{ call.function.arguments }}</tool_call>{%- endfor %}"
+        "{%- for call in message.tool_calls %}<tool_call>{{ call.function.name }}:{{ call.function.arguments "
+        "}}</tool_call>{%- endfor %}"
         "{%- endif %}\n"
         "{%- elif message.role == 'tool' %}tool:{{ message.tool_call_id }}={{ message.content }}\n"
         "{%- endif %}"
-        "{%- endfor %}");
+        "{%- endfor %}"
+        "{%- if add_generation_prompt %}<|im_start|>assistant\n{%- endif %}");
 
     zedinfer::ChatMessageMM user;
     user.role = "user";
@@ -46,18 +48,19 @@ TEST(ChatTemplateJinja, FoldsTypedTextAndPreservesToolHistory) {
     assistant.role = "assistant";
     assistant.content = std::string();
     assistant.tool_calls = nlohmann::ordered_json::array(
-        {{{"id", "call_0"},
+        {{{"id", "call_unique"},
           {"type", "function"},
           {"function", {{"name", "exec_command"}, {"arguments", "{\"cmd\":\"ls\"}"}}}}});
 
     zedinfer::ChatMessageMM tool;
     tool.role = "tool";
-    tool.tool_call_id = "call_0";
+    tool.tool_call_id = "call_unique";
     tool.content = std::vector<zedinfer::ContentPart>{zedinfer::TextPart{"main.cpp\nREADME.md"}};
 
-    std::string rendered = tpl.render({user, assistant, tool}, /*add_generation_prompt=*/false);
+    std::string rendered = tpl.render({user, assistant, tool}, /*add_generation_prompt=*/true);
 
     EXPECT_NE(rendered.find("user:List files."), std::string::npos);
     EXPECT_NE(rendered.find("<tool_call>exec_command:{\"cmd\":\"ls\"}</tool_call>"), std::string::npos);
-    EXPECT_NE(rendered.find("tool:call_0=main.cpp\nREADME.md"), std::string::npos);
+    EXPECT_NE(rendered.find("tool:call_unique=main.cpp\nREADME.md"), std::string::npos);
+    EXPECT_NE(rendered.find("<|im_start|>assistant"), std::string::npos);
 }

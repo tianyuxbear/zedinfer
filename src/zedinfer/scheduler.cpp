@@ -276,8 +276,8 @@ ScheduledBatch Scheduler::schedule() {
         }
 
         if (!can_admit(*req)) {
-            std::string error_msg = "Cannot admit request " + std::to_string(req->request_id) + ": prompt="
-                                  + std::to_string(req->input_ids.size()) + " tokens, available="
+            std::string error_msg = "Cannot admit request " + std::to_string(req->request_id)
+                                  + ": prompt=" + std::to_string(req->input_ids.size()) + " tokens, available="
                                   + std::to_string(block_allocator_ ? block_allocator_->available_blocks() : -1);
             if (!req->admission_warned) {
                 LOGW << "[Scheduler] " << error_msg;

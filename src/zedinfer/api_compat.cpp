@@ -4,6 +4,8 @@
 #include <cstring>
 #include <sstream>
 #include <stdexcept>
+#include <unordered_map>
+#include <unordered_set>
 
 namespace zedinfer::api_compat {
 
@@ -76,6 +78,22 @@ json parse_arguments_or_empty(const json& fn) {
     } catch (const std::exception&) { return json::object(); }
 }
 
+std::string reserve_unique_tool_call_id(const std::string& raw_id, std::unordered_map<std::string, std::string>& latest,
+                                        std::unordered_set<std::string>& used) {
+    const std::string base = raw_id.empty() ? std::string("call") : raw_id;
+    std::string id = base;
+    int suffix = 2;
+    while (used.find(id) != used.end()) { id = base + "_" + std::to_string(suffix++); }
+    used.insert(id);
+    latest[raw_id] = id;
+    return id;
+}
+
+std::string latest_tool_call_id(const std::string& raw_id, const std::unordered_map<std::string, std::string>& latest) {
+    auto it = latest.find(raw_id);
+    return it == latest.end() ? raw_id : it->second;
+}
+
 } // namespace
 
 json convert_responses_to_chat(const json& body) {
@@ -123,7 +141,8 @@ json convert_responses_to_chat(const json& body) {
                     } else if (type == "input_file") {
                         throw std::invalid_argument("'input_file' is not supported");
                     } else {
-                        throw std::invalid_argument("'type' must be one of 'input_text', 'input_image', or 'input_file'");
+                        throw std::invalid_argument(
+                            "'type' must be one of 'input_text', 'input_image', or 'input_file'");
                     }
                 }
                 item.erase("type");
@@ -179,7 +198,8 @@ json convert_responses_to_chat(const json& body) {
                     }
                     messages.back()["tool_calls"].push_back(tool_call);
                 } else {
-                    messages.push_back({{"role", "assistant"}, {"content", ""}, {"tool_calls", json::array({tool_call})}});
+                    messages.push_back(
+                        {{"role", "assistant"}, {"content", ""}, {"tool_calls", json::array({tool_call})}});
                 }
             } else if (is_string(item, "call_id") && item.contains("output") && is_string(item, "type")
                        && item.at("type") == "function_call_output") {
@@ -280,15 +300,15 @@ void normalize_anthropic_billing_header(std::string& system_text) {
     }
     const size_t value = cch + 4;
     if (value + 5 < system_text.size() && system_text[value + 5] == ';') {
-        for (size_t i = 0; i < 5; ++i) {
-            system_text[value + i] = 'f';
-        }
+        for (size_t i = 0; i < 5; ++i) { system_text[value + i] = 'f'; }
     }
 }
 
 json convert_anthropic_to_chat(const json& body) {
     json out;
     json messages = json::array();
+    std::unordered_map<std::string, std::string> latest_tool_call_ids;
+    std::unordered_set<std::string> used_tool_call_ids;
 
     json system = body.contains("system") ? body.at("system") : json();
     if (!system.is_null()) {
@@ -346,11 +366,13 @@ json convert_anthropic_to_chat(const json& body) {
                            << json_value(source, "data", std::string());
                         converted.push_back({{"type", "image_url"}, {"image_url", {{"url", ss.str()}}}});
                     } else if (stype == "url") {
-                        converted.push_back(
-                            {{"type", "image_url"}, {"image_url", {{"url", json_value(source, "url", std::string())}}}});
+                        converted.push_back({{"type", "image_url"},
+                                             {"image_url", {{"url", json_value(source, "url", std::string())}}}});
                     }
                 } else if (type == "tool_use") {
-                    tool_calls.push_back({{"id", json_value(block, "id", std::string())},
+                    const std::string tool_id = reserve_unique_tool_call_id(json_value(block, "id", std::string()),
+                                                                            latest_tool_call_ids, used_tool_call_ids);
+                    tool_calls.push_back({{"id", tool_id},
                                           {"type", "function"},
                                           {"function",
                                            {{"name", json_value(block, "name", std::string())},
@@ -367,9 +389,11 @@ json convert_anthropic_to_chat(const json& body) {
                             }
                         }
                     }
-                    tool_results.push_back({{"role", "tool"},
-                                            {"tool_call_id", json_value(block, "tool_use_id", std::string())},
-                                            {"content", result_text}});
+                    tool_results.push_back(
+                        {{"role", "tool"},
+                         {"tool_call_id",
+                          latest_tool_call_id(json_value(block, "tool_use_id", std::string()), latest_tool_call_ids)},
+                         {"content", result_text}});
                 }
             }
 
@@ -384,9 +408,7 @@ json convert_anthropic_to_chat(const json& body) {
                 }
                 messages.push_back(m);
             }
-            for (const auto& tool_result : tool_results) {
-                messages.push_back(tool_result);
-            }
+            for (const auto& tool_result : tool_results) { messages.push_back(tool_result); }
         }
     }
 
@@ -394,11 +416,12 @@ json convert_anthropic_to_chat(const json& body) {
     if (body.contains("tools") && body.at("tools").is_array()) {
         json tools = json::array();
         for (const auto& tool : body.at("tools")) {
-            tools.push_back({{"type", "function"},
-                             {"function",
-                              {{"name", json_value(tool, "name", std::string())},
-                               {"description", json_value(tool, "description", std::string())},
-                               {"parameters", tool.contains("input_schema") ? tool.at("input_schema") : json::object()}}}});
+            tools.push_back(
+                {{"type", "function"},
+                 {"function",
+                  {{"name", json_value(tool, "name", std::string())},
+                   {"description", json_value(tool, "description", std::string())},
+                   {"parameters", tool.contains("input_schema") ? tool.at("input_schema") : json::object()}}}});
         }
         out["tools"] = tools;
     }
@@ -441,7 +464,8 @@ std::string build_tool_prompt(const json& tools) {
     std::ostringstream ss;
     ss << "You have access to external tools for filesystem, shell, search, code editing, and other agent tasks. "
           "Use a tool whenever the user asks about current files, directories, command output, repository state, "
-          "or wants changes made. Do not claim you cannot inspect the environment when a suitable tool is available.\n\n"
+          "or wants changes made. Do not claim you cannot inspect the environment when a suitable tool is "
+          "available.\n\n"
           "When calling a tool, output only one or more tool blocks in this exact format:\n"
           "<tool_call>\n"
           "{\"name\":\"tool_name\",\"arguments\":{}}\n"
@@ -472,7 +496,7 @@ std::string build_tool_prompt(const json& tools) {
         ss << "\n";
 
         json parameters = fn.contains("parameters") ? fn.at("parameters")
-                                                     : (fn.contains("input_schema") ? fn.at("input_schema") : json());
+                                                    : (fn.contains("input_schema") ? fn.at("input_schema") : json());
         if (!parameters.is_null()) {
             ss << "  Arguments JSON schema: " << parameters.dump() << "\n";
         }
@@ -489,13 +513,13 @@ json chat_response_to_responses(const json& chat_response) {
     json output = json::array();
 
     if (is_string(msg, "reasoning_content") && !msg.at("reasoning_content").get<std::string>().empty()) {
-        output.push_back({{"id", "rs_" + suffix},
-                          {"summary", json::array()},
-                          {"type", "reasoning"},
-                          {"content",
-                           json::array({{{"type", "reasoning_text"}, {"text", msg.at("reasoning_content")}}})},
-                          {"encrypted_content", ""},
-                          {"status", "completed"}});
+        output.push_back(
+            {{"id", "rs_" + suffix},
+             {"summary", json::array()},
+             {"type", "reasoning"},
+             {"content", json::array({{{"type", "reasoning_text"}, {"text", msg.at("reasoning_content")}}})},
+             {"encrypted_content", ""},
+             {"status", "completed"}});
     }
 
     const std::string text = message_content_text(msg);
@@ -504,11 +528,10 @@ json chat_response_to_responses(const json& chat_response) {
                           {"type", "message"},
                           {"role", "assistant"},
                           {"status", "completed"},
-                          {"content",
-                           json::array({{{"type", "output_text"},
-                                         {"annotations", json::array()},
-                                         {"logprobs", json::array()},
-                                         {"text", text}}})}});
+                          {"content", json::array({{{"type", "output_text"},
+                                                    {"annotations", json::array()},
+                                                    {"logprobs", json::array()},
+                                                    {"text", text}}})}});
     }
     if (is_array(msg, "tool_calls")) {
         for (const auto& call : msg.at("tool_calls")) {
