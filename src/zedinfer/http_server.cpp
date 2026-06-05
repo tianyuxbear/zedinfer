@@ -457,11 +457,15 @@ void HttpServer::cache_static_files() {
 // Session Management
 // ============================================================================
 
-InferenceSession* HttpServer::get_or_create_session(const std::string& session_id) {
+InferenceSession* HttpServer::acquire_session(const std::string& session_id) {
     std::lock_guard<std::mutex> lock(sessions_mutex_);
 
     auto it = sessions_.find(session_id);
     if (it != sessions_.end()) {
+        bool expected = false;
+        if (!it->second->busy.compare_exchange_strong(expected, true)) {
+            return nullptr;
+        }
         it->second->last_access = std::chrono::steady_clock::now();
         return it->second->session.get();
     }
@@ -476,21 +480,12 @@ InferenceSession* HttpServer::get_or_create_session(const std::string& session_i
     auto entry = std::make_unique<SessionEntry>();
     entry->session = std::move(session);
     entry->last_access = std::chrono::steady_clock::now();
+    entry->busy = true;
 
     LOGI << "[HttpServer] Created session " << session_id << " (total: " << sessions_.size() + 1 << ")";
 
     sessions_[session_id] = std::move(entry);
     return ptr;
-}
-
-bool HttpServer::try_lock_session(const std::string& session_id) {
-    std::lock_guard<std::mutex> lock(sessions_mutex_);
-    auto it = sessions_.find(session_id);
-    if (it == sessions_.end()) {
-        return true; // will be created fresh
-    }
-    bool expected = false;
-    return it->second->busy.compare_exchange_strong(expected, true);
 }
 
 void HttpServer::unlock_session(const std::string& session_id) {
@@ -843,8 +838,10 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
 
     // 4. Session concurrency check + lock
     SessionLock session_lock;
+    InferenceSession* session = nullptr;
     if (!session_id.empty()) {
-        if (!try_lock_session(session_id)) {
+        session = acquire_session(session_id);
+        if (session == nullptr) {
             send_error(res, 409, "Session is busy with another request", "conflict_error", "session_busy");
             return;
         }
@@ -936,7 +933,6 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
     };
 
     std::vector<int> input_ids;
-    InferenceSession* session = nullptr;
     bool use_session = false;
 
     // Track whether the rendered prompt ends inside an open <think> block so
@@ -953,8 +949,6 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
     };
 
     if (!session_id.empty()) {
-        session = get_or_create_session(session_id);
-
         // Check if session KV cache is still valid (not expired/recreated)
         if (session->is_valid() && session->past_len() > 0) {
             // Session alive with history — only prefill new message

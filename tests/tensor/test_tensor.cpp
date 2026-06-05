@@ -169,6 +169,19 @@ TEST_F(TensorTest, PermutePreservesData) {
     EXPECT_TRUE(compareFloatVectors(result, expected));
 }
 
+TEST_F(TensorTest, PermuteAfterSlicePreservesOffset) {
+    auto tensor = Tensor::create({3, 4}, ZEDINFER_DTYPE_F32);
+    std::vector<float> data(12);
+    std::iota(data.begin(), data.end(), 0.0f);
+    fillTensorData(tensor, data);
+
+    auto transposed_rows = tensor->slice(0, 1, 3)->permute({1, 0})->contiguous();
+
+    auto result = readTensorData<float>(transposed_rows);
+    std::vector<float> expected = {4.0f, 8.0f, 5.0f, 9.0f, 6.0f, 10.0f, 7.0f, 11.0f};
+    EXPECT_TRUE(compareFloatVectors(result, expected));
+}
+
 // ============================================================================
 // slice tests
 // ============================================================================
@@ -215,6 +228,19 @@ TEST_F(TensorTest, SliceChaining) {
 
     EXPECT_EQ(sliced3->shape(), std::vector<size_t>({3, 3, 5}));
     EXPECT_EQ(sliced3->numel(), 45);
+}
+
+TEST_F(TensorTest, SliceChainingPreservesOffset) {
+    auto tensor = Tensor::create({5, 6}, ZEDINFER_DTYPE_F32);
+    std::vector<float> data(30);
+    std::iota(data.begin(), data.end(), 0.0f);
+    fillTensorData(tensor, data);
+
+    auto row_two = tensor->slice(0, 1, 5)->slice(0, 1, 2)->view({6});
+
+    auto result = readTensorData<float>(row_two);
+    std::vector<float> expected = {12.0f, 13.0f, 14.0f, 15.0f, 16.0f, 17.0f};
+    EXPECT_TRUE(compareFloatVectors(result, expected));
 }
 
 // ============================================================================

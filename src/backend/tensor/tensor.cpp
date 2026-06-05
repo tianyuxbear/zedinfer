@@ -255,7 +255,7 @@ tensor_t Tensor::permute(const std::vector<size_t>& order) const {
 
     // Create new tensor metadata sharing the same storage and offset
     TensorMeta new_meta{_meta.dtype, new_shape, new_strides};
-    return std::shared_ptr<Tensor>(new Tensor(new_meta, _storage));
+    return std::shared_ptr<Tensor>(new Tensor(new_meta, _storage, _offset));
 }
 
 /**

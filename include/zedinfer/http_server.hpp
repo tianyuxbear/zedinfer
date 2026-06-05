@@ -101,8 +101,9 @@ private:
         std::string session_id_;
     };
 
-    InferenceSession* get_or_create_session(const std::string& session_id);
-    bool try_lock_session(const std::string& session_id);
+    // Atomically get/create and mark a session busy. Returns nullptr when an
+    // existing session is already serving another request.
+    InferenceSession* acquire_session(const std::string& session_id);
     void unlock_session(const std::string& session_id);
     void delete_session(const std::string& session_id);
     void cleanup_idle_sessions();
