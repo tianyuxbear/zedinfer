@@ -456,6 +456,20 @@ body {
     align-items: center;
     gap: 8px;
 }
+.message-images {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-top: 10px;
+}
+.message-image {
+    width: min(180px, 100%);
+    max-height: 180px;
+    object-fit: cover;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg-soft);
+}
 .toast-stack {
     position: fixed;
     top: 20px;
@@ -630,6 +644,48 @@ body {
     border-color: var(--input-focus);
     box-shadow: 0 0 0 2px rgba(16,163,127,0.15);
 }
+.image-preview-row {
+    max-width: var(--max-content);
+    margin: 0 auto 8px;
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+.image-preview-row[hidden] {
+    display: none;
+}
+.image-chip {
+    width: 72px;
+    height: 72px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg-soft);
+    overflow: hidden;
+    position: relative;
+}
+.image-chip img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+}
+.image-remove {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    width: 22px;
+    height: 22px;
+    border: 1px solid rgba(0, 0, 0, 0.12);
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.92);
+    color: var(--text-secondary);
+    cursor: pointer;
+    line-height: 20px;
+    font-size: 16px;
+}
+.image-remove:hover {
+    color: #dc2626;
+}
 .input-box textarea {
     flex: 1;
     border: none;
@@ -645,6 +701,36 @@ body {
     max-height: 200px;
 }
 .input-box textarea::placeholder { color: var(--text-light); }
+.input-box .attach-btn {
+    width: 36px; height: 36px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.15s, border-color 0.15s, color 0.15s;
+    flex-shrink: 0;
+    margin-right: 8px;
+}
+.input-box .attach-btn:hover {
+    background: var(--bg-hover);
+    border-color: var(--input-border);
+}
+.input-box .attach-btn[hidden] {
+    display: none;
+}
+.input-box .attach-btn svg {
+    width: 18px;
+    height: 18px;
+    stroke: currentColor;
+    fill: none;
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
 .input-box .send-btn {
     width: 36px; height: 36px;
     background: var(--accent);
@@ -706,6 +792,11 @@ body {
     outline: none; font-family: var(--font-mono);
 }
 .setting-row input[type="number"]:focus { border-color: var(--input-focus); }
+.setting-row input[type="checkbox"] {
+    width: 16px;
+    height: 16px;
+    accent-color: var(--accent);
+}
 
 /* History list */
 .history-list { list-style: none; }
@@ -815,6 +906,18 @@ body {
                 <label>Max tokens</label>
                 <input type="number" id="max-tokens" value="1024" min="64" max="8192" step="64">
             </div>
+            <div class="setting-row">
+                <label>Temperature</label>
+                <input type="number" id="temperature" value="1" min="0" max="2" step="0.1">
+            </div>
+            <div class="setting-row">
+                <label>Top P</label>
+                <input type="number" id="top-p" value="1" min="0" max="1" step="0.05">
+            </div>
+            <div class="setting-row">
+                <label>Thinking</label>
+                <input type="checkbox" id="enable-thinking">
+            </div>
         </div>
         <div class="sidebar-section">
             <div class="info-item" style="margin-top:8px">
@@ -841,7 +944,14 @@ body {
     </div>
 
     <div class="input-wrapper">
+        <div class="image-preview-row" id="image-preview-row" hidden></div>
         <div class="input-box">
+            <button class="attach-btn" id="attach-btn" type="button" title="Attach image" aria-label="Attach image" hidden>
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M21.4 11.6 12 21a6 6 0 0 1-8.5-8.5l9.8-9.8a4 4 0 1 1 5.7 5.7l-9.8 9.8a2 2 0 0 1-2.8-2.8l9.4-9.4"/>
+                </svg>
+            </button>
+            <input type="file" id="image-input" accept="image/*" multiple hidden>
             <textarea id="input" placeholder="Message ZedInfer..." rows="1" autofocus></textarea>
             <button class="send-btn" id="send-btn" onclick="sendMessage()">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
@@ -879,6 +989,7 @@ const UI_STORAGE = 'zedinfer_ui_state';
 const SPIN_MS = 900;
 const THINK_OPEN = '<think>';
 const THINK_CLOSE = '</think>';
+const MAX_IMAGE_BYTES = 12 * 1024 * 1024;
 const WELCOME_HTML = `<div class="welcome" id="welcome">
     <div class="welcome-logo"><img src="/images/logo-light.svg" alt="ZedInfer"></div>
     <h2>ZedInfer Chat</h2>
@@ -893,8 +1004,14 @@ const sendBtn = document.getElementById('send-btn');
 const stopBtn = document.getElementById('stop-btn');
 const modelNameEl = document.getElementById('model-name');
 const maxTokensEl = document.getElementById('max-tokens');
+const temperatureEl = document.getElementById('temperature');
+const topPEl = document.getElementById('top-p');
+const enableThinkingEl = document.getElementById('enable-thinking');
 const historyListEl = document.getElementById('history-list');
 const toastStackEl = document.getElementById('toast-stack');
+const attachBtn = document.getElementById('attach-btn');
+const imageInputEl = document.getElementById('image-input');
+const imagePreviewRowEl = document.getElementById('image-preview-row');
 const confirmModalEl = document.getElementById('confirm-modal');
 const confirmModalBackdropEl = document.getElementById('confirm-modal-backdrop');
 const confirmModalTitleEl = document.getElementById('confirm-modal-title');
@@ -912,6 +1029,8 @@ let generating = false;
 let abortCtrl = null;
 let editorState = null;
 let confirmModalState = null;
+let pendingImages = [];
+let modelSupportsImages = false;
 const thoughtOpenState = new Map();
 
 function genId() {
@@ -923,6 +1042,12 @@ function escapeHtml(text) {
         .replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;');
+}
+
+function escapeAttribute(text) {
+    return escapeHtml(text)
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
 }
 
 function getCurrentConvId() {
@@ -954,6 +1079,40 @@ function saveUiState(patch) {
 function getMaxTokens() {
     const value = parseInt(maxTokensEl.value, 10);
     return Number.isFinite(value) && value > 0 ? value : 1024;
+}
+
+function clampNumber(rawValue, fallback, min, max) {
+    const value = Number(rawValue);
+    if (!Number.isFinite(value)) return fallback;
+    return Math.min(max, Math.max(min, value));
+}
+
+function getTemperature() {
+    return clampNumber(temperatureEl.value, 1, 0, 2);
+}
+
+function getTopP() {
+    return clampNumber(topPEl.value, 1, 0, 1);
+}
+
+function getEnableThinking() {
+    return Boolean(enableThinkingEl.checked);
+}
+
+function normalizeImages(images) {
+    if (!Array.isArray(images)) return [];
+    return images
+        .filter(image => image && typeof image.dataUrl === 'string' && image.dataUrl.startsWith('data:image/'))
+        .map(image => ({
+            id: image.id || genId(),
+            name: String(image.name || 'image'),
+            type: String(image.type || 'image'),
+            dataUrl: image.dataUrl,
+        }));
+}
+
+function messageHasImages(message) {
+    return normalizeImages(message?.images).length > 0;
 }
 
 function deleteServerSession(sessionId) {
@@ -1014,6 +1173,122 @@ function showError(message, error) {
         title: 'Error',
         duration: 4200,
     });
+}
+
+function fileToImageAttachment(file) {
+    return new Promise((resolve, reject) => {
+        if (!file.type.startsWith('image/')) {
+            reject(new Error(`${file.name} is not an image.`));
+            return;
+        }
+        if (file.size > MAX_IMAGE_BYTES) {
+            reject(new Error(`${file.name} exceeds the 12 MiB image limit.`));
+            return;
+        }
+
+        const reader = new FileReader();
+        reader.onload = () => {
+            resolve({
+                id: genId(),
+                name: file.name,
+                type: file.type,
+                dataUrl: String(reader.result || ''),
+            });
+        };
+        reader.onerror = () => reject(reader.error || new Error(`Failed to read ${file.name}`));
+        reader.readAsDataURL(file);
+    });
+}
+
+function renderPendingImages() {
+    if (!imagePreviewRowEl) return;
+    imagePreviewRowEl.innerHTML = '';
+    imagePreviewRowEl.hidden = pendingImages.length === 0;
+
+    for (const image of pendingImages) {
+        const chip = document.createElement('div');
+        chip.className = 'image-chip';
+        chip.title = image.name;
+
+        const img = document.createElement('img');
+        img.src = image.dataUrl;
+        img.alt = image.name;
+
+        const remove = document.createElement('button');
+        remove.className = 'image-remove';
+        remove.type = 'button';
+        remove.textContent = '\u00d7';
+        remove.title = 'Remove image';
+        remove.setAttribute('aria-label', 'Remove image');
+        remove.addEventListener('click', () => {
+            pendingImages = pendingImages.filter(item => item.id !== image.id);
+            renderPendingImages();
+        });
+
+        chip.appendChild(img);
+        chip.appendChild(remove);
+        imagePreviewRowEl.appendChild(chip);
+    }
+}
+
+function clearPendingImages() {
+    pendingImages = [];
+    renderPendingImages();
+}
+
+async function addPendingImageFiles(fileList) {
+    if (!modelSupportsImages) return;
+    const files = Array.from(fileList || []).filter(file => file.type.startsWith('image/'));
+    if (!files.length) return;
+
+    try {
+        const attachments = [];
+        for (const file of files) {
+            attachments.push(await fileToImageAttachment(file));
+        }
+        pendingImages = [...pendingImages, ...attachments];
+        renderPendingImages();
+    } catch (error) {
+        showError('Failed to attach image', error);
+    }
+}
+
+function modelHasImageCapability(model) {
+    if (!model || typeof model !== 'object') return false;
+
+    const truthyFields = [
+        model.has_vision,
+        model.vision,
+        model.multimodal,
+        model.supports_images,
+        model.supports_vision,
+        model.capabilities?.vision,
+        model.capabilities?.image,
+        model.capabilities?.images,
+        model.capabilities?.multimodal,
+    ];
+    if (truthyFields.some(Boolean)) return true;
+
+    const modalityFields = [
+        model.modalities,
+        model.input_modalities,
+        model.supported_modalities,
+        model.supported_input_modalities,
+    ];
+    return modalityFields.some(value =>
+        Array.isArray(value) && value.some(item => {
+            const modality = String(item || '').toLowerCase();
+            return modality === 'image' || modality === 'vision';
+        })
+    );
+}
+
+function setModelSupportsImages(value) {
+    modelSupportsImages = Boolean(value);
+    attachBtn.hidden = !modelSupportsImages;
+    if (!modelSupportsImages) {
+        clearPendingImages();
+    }
 }
 
 function closeConfirmModal(result) {
@@ -1238,6 +1513,7 @@ async function createMessageBranch(message, parentId) {
         type: message.type || 'text',
         role: message.role,
         content: message.content || '',
+        images: normalizeImages(message.images),
         timestamp: message.timestamp || Date.now(),
         parent: parentId || null,
         children: [],
@@ -1286,8 +1562,11 @@ async function deleteConversationCascade(convId) {
 }
 
 function deriveTitleFromMessageList(list) {
-    const firstUser = list.find(message => message.role === 'user' && String(message.content || '').trim());
-    return (firstUser?.content || 'Untitled').trim().slice(0, 60) || 'Untitled';
+    const firstUser = list.find(message =>
+        message.role === 'user' && (String(message.content || '').trim() || messageHasImages(message))
+    );
+    const title = String(firstUser?.content || '').trim();
+    return (title || (firstUser ? 'Image' : 'Untitled')).slice(0, 60) || 'Untitled';
 }
 
 function filterByLeafNodeId(sourceMessages, leafNodeId, includeRoot = false) {
@@ -1379,10 +1658,25 @@ function getMessageSiblings(sourceMessages, messageId) {
     };
 }
 
+function buildApiContent(message) {
+    const images = normalizeImages(message.images);
+    const text = String(message.content || '');
+    if (!images.length) return text;
+
+    const parts = [];
+    if (text.trim()) {
+        parts.push({ type: 'text', text });
+    }
+    for (const image of images) {
+        parts.push({ type: 'image_url', image_url: { url: image.dataUrl } });
+    }
+    return parts;
+}
+
 function buildApiMessages(pathMessages) {
     return pathMessages
         .filter(message => message.type !== 'root')
-        .map(message => ({ role: message.role, content: message.content || '' }));
+        .map(message => ({ role: message.role, content: buildApiContent(message) }));
 }
 
 async function refreshConversations() {
@@ -1662,7 +1956,7 @@ function renderEditor(message) {
     textarea.addEventListener('input', () => {
         if (!editorState || editorState.messageId !== message.id) return;
         editorState.content = textarea.value;
-        saveButton.disabled = !textarea.value.trim();
+        saveButton.disabled = !textarea.value.trim() && !messageHasImages(message);
         autoResizeTextarea(textarea);
     });
     textarea.addEventListener('keydown', event => {
@@ -1711,7 +2005,7 @@ function renderEditor(message) {
 
     const cancelButton = createToolButton('Cancel', cancelEdit);
     const saveButton = createToolButton('Save', () => saveEdit(message.id));
-    saveButton.disabled = !textarea.value.trim();
+    saveButton.disabled = !textarea.value.trim() && !messageHasImages(message);
 
     actions.appendChild(cancelButton);
     actions.appendChild(saveButton);
@@ -1757,7 +2051,7 @@ function renderMessageRow(message) {
         });
         highlightCodeBlocks(body);
     } else {
-        body.innerHTML = renderMarkdown(message.content || '');
+        body.innerHTML = renderUserContent(message);
         highlightCodeBlocks(body);
     }
 
@@ -2062,9 +2356,10 @@ function renderAssistantContent(content, options = {}) {
     const parsed = splitAssistantContent(content);
     const shouldOpen = options.keepThoughtOpen || (parsed.thinking && !options.streaming);
     const openAttr = shouldOpen ? ' open' : '';
+    const thinkingLabel = options.thinkingLabel || 'Thinking';
 
     if (!content && options.streaming) {
-        return `<div class="assistant-placeholder">${renderThinkingText('Thinking')}</div>`;
+        return `<div class="assistant-placeholder">${renderThinkingText(thinkingLabel)}</div>`;
     }
 
     let html = '';
@@ -2086,10 +2381,22 @@ function renderAssistantContent(content, options = {}) {
     if (parsed.answer) {
         html += renderMarkdown(parsed.answer);
     } else if ((options.streaming || parsed.thinking) && !parsed.hasThought) {
-        html += `<div class="assistant-placeholder">${renderThinkingText('Thinking')}</div>`;
+        html += `<div class="assistant-placeholder">${renderThinkingText(thinkingLabel)}</div>`;
     }
 
     return html;
+}
+
+function renderUserContent(message) {
+    let html = message.content ? renderMarkdown(message.content) : '';
+    const images = normalizeImages(message.images);
+    if (images.length) {
+        const imageHtml = images.map(image =>
+            `<img class="message-image" src="${escapeAttribute(image.dataUrl)}" alt="${escapeAttribute(image.name)}">`
+        ).join('');
+        html += `<div class="message-images">${imageHtml}</div>`;
+    }
+    return html || '<p></p>';
 }
 
 function syncMessageContentInState(messageId, content) {
@@ -2113,6 +2420,7 @@ function updateRenderedAssistantMessage(messageId, content, options = {}) {
     body.innerHTML = renderAssistantContent(content, {
         streaming: Boolean(options.streaming),
         keepThoughtOpen,
+        thinkingLabel: options.thinkingLabel,
     });
     highlightCodeBlocks(body);
     scrollToBottom();
@@ -2297,7 +2605,8 @@ async function saveEdit(messageId) {
 
     if (message.role === 'user') {
         const nextContent = editorState.content.trim();
-        if (!nextContent) return;
+        const nextImages = normalizeImages(message.images);
+        if (!nextContent && !nextImages.length) return;
 
         editorState = null;
         renderConversation();
@@ -2310,6 +2619,7 @@ async function saveEdit(messageId) {
                 role: 'user',
                 type: 'text',
                 content: nextContent,
+                images: nextImages,
                 timestamp: Date.now(),
             }, message.parent);
 
@@ -2395,22 +2705,29 @@ async function streamAssistantReply(options) {
     let streamedContent = '';
     let streamedReasoning = '';
     let streamedAnswer = '';
-    const enableThinking = false;
+    const enableThinking = getEnableThinking();
+    const thinkingLabel = enableThinking ? 'Thinking' : 'Generating';
+    const requestHasImages = options.contextMessages.some(messageHasImages);
 
     const composeStreamedContent = (final = false) => {
         if (!streamedReasoning) {
             return streamedAnswer;
         }
-        if (!streamedAnswer && final) {
-            return streamedReasoning;
+        if (!enableThinking) {
+            return [streamedReasoning, streamedAnswer].filter(Boolean).join('');
         }
-        const close = streamedAnswer ? `\n${THINK_CLOSE}\n\n${streamedAnswer}` : '';
-        return `${THINK_OPEN}\n${streamedReasoning}${close}`;
+        if (!streamedAnswer) {
+            return final ? `${THINK_OPEN}\n${streamedReasoning}\n${THINK_CLOSE}` : `${THINK_OPEN}\n${streamedReasoning}`;
+        }
+        return `${THINK_OPEN}\n${streamedReasoning}\n${THINK_CLOSE}\n\n${streamedAnswer}`;
     };
 
     const refreshAssistantMessage = (final = false) => {
         streamedContent = composeStreamedContent(final);
-        updateRenderedAssistantMessage(assistantMessage.id, streamedContent, { streaming: !final });
+        updateRenderedAssistantMessage(assistantMessage.id, streamedContent, {
+            streaming: !final,
+            thinkingLabel,
+        });
         return streamedContent;
     };
 
@@ -2424,19 +2741,30 @@ async function streamAssistantReply(options) {
         }, options.parentId);
 
         await loadConversation(currentConversation.id);
-        updateRenderedAssistantMessage(assistantMessage.id, '', { streaming: true });
+        updateRenderedAssistantMessage(assistantMessage.id, '', {
+            streaming: true,
+            thinkingLabel,
+        });
 
-        const sessionId = await ensureConversationSession(Boolean(options.reuseSession));
+        if (requestHasImages) {
+            await invalidateConversationSession(currentConversation.id);
+        }
+        const sessionId = requestHasImages ? '' : await ensureConversationSession(Boolean(options.reuseSession));
+        const requestBody = {
+            messages: buildApiMessages(options.contextMessages),
+            stream: true,
+            max_tokens: getMaxTokens(),
+            temperature: getTemperature(),
+            top_p: getTopP(),
+            enable_thinking: enableThinking,
+        };
+        if (sessionId) {
+            requestBody.session_id = sessionId;
+        }
         const response = await fetch('/v1/chat/completions', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                messages: buildApiMessages(options.contextMessages),
-                stream: true,
-                max_tokens: getMaxTokens(),
-                session_id: sessionId,
-                enable_thinking: enableThinking,
-            }),
+            body: JSON.stringify(requestBody),
             signal: (abortCtrl = new AbortController()).signal,
         });
 
@@ -2495,7 +2823,10 @@ async function streamAssistantReply(options) {
                 content: streamedContent,
                 timestamp: Date.now(),
             });
-            updateRenderedAssistantMessage(assistantMessage.id, streamedContent, { streaming: false });
+            updateRenderedAssistantMessage(assistantMessage.id, streamedContent, {
+                streaming: false,
+                thinkingLabel,
+            });
         } else {
             await deleteLeafMessage(currentConversation.id, assistantMessage.id);
         }
@@ -2508,7 +2839,10 @@ async function streamAssistantReply(options) {
                         content: streamedContent,
                         timestamp: Date.now(),
                     });
-                    updateRenderedAssistantMessage(assistantMessage.id, streamedContent, { streaming: false });
+                    updateRenderedAssistantMessage(assistantMessage.id, streamedContent, {
+                        streaming: false,
+                        thinkingLabel,
+                    });
                 } else {
                     await deleteLeafMessage(currentConversation.id, assistantMessage.id);
                 }
@@ -2538,12 +2872,14 @@ function stopGeneration() {
 
 async function sendMessage() {
     const content = inputEl.value.trim();
-    if (!content || generating) return;
+    const images = normalizeImages(pendingImages);
+    if ((!content && !images.length) || generating) return;
 
     editorState = null;
     setGenerating(true);
     inputEl.value = '';
     inputEl.style.height = 'auto';
+    clearPendingImages();
 
     try {
         const conversation = await ensureActiveConversation();
@@ -2555,6 +2891,7 @@ async function sendMessage() {
             role: 'user',
             type: 'text',
             content,
+            images,
             timestamp: Date.now(),
         }, parentId);
 
@@ -2715,10 +3052,43 @@ inputEl.addEventListener('keydown', function(event) {
     }
 });
 
+inputEl.addEventListener('paste', event => {
+    if (!modelSupportsImages) return;
+    const files = Array.from(event.clipboardData?.files || []).filter(file => file.type.startsWith('image/'));
+    if (!files.length) return;
+    event.preventDefault();
+    addPendingImageFiles(files);
+});
+
 maxTokensEl.addEventListener('change', () => {
     const value = getMaxTokens();
     maxTokensEl.value = String(value);
     saveUiState({ maxTokens: value });
+});
+
+temperatureEl.addEventListener('change', () => {
+    const value = getTemperature();
+    temperatureEl.value = String(value);
+    saveUiState({ temperature: value });
+});
+
+topPEl.addEventListener('change', () => {
+    const value = getTopP();
+    topPEl.value = String(value);
+    saveUiState({ topP: value });
+});
+
+enableThinkingEl.addEventListener('change', () => {
+    saveUiState({ enableThinking: getEnableThinking() });
+});
+
+attachBtn.addEventListener('click', () => {
+    imageInputEl.click();
+});
+
+imageInputEl.addEventListener('change', async function() {
+    await addPendingImageFiles(this.files);
+    this.value = '';
 });
 
 confirmModalCancelEl.addEventListener('click', () => {
@@ -2744,11 +3114,14 @@ fetch('/v1/models')
     .then(response => response.json())
     .then(data => {
         if (data.data?.[0]) {
-            modelNameEl.textContent = data.data[0].id;
+            const model = data.data[0];
+            modelNameEl.textContent = model.id;
+            setModelSupportsImages(modelHasImageCapability(model));
         }
     })
     .catch(() => {
         modelNameEl.textContent = 'unknown';
+        setModelSupportsImages(false);
     });
 
 async function init() {
@@ -2756,6 +3129,13 @@ async function init() {
     if (uiState.maxTokens) {
         maxTokensEl.value = String(uiState.maxTokens);
     }
+    if (uiState.temperature !== undefined) {
+        temperatureEl.value = String(uiState.temperature);
+    }
+    if (uiState.topP !== undefined) {
+        topPEl.value = String(uiState.topP);
+    }
+    enableThinkingEl.checked = Boolean(uiState.enableThinking);
 
     try {
         await openDatabase();

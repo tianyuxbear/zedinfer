@@ -798,7 +798,15 @@ void HttpServer::handle_models(const httplib::Request&, httplib::Response& res) 
 
     json response;
     response["object"] = "list";
-    response["data"] = json::array({{{"id", display_model_name_}, {"object", "model"}, {"created", epoch}}});
+    const bool has_vision = engine_->has_vision();
+    json model = {
+        {"id", display_model_name_},
+        {"object", "model"},
+        {"created", epoch},
+        {"capabilities", {{"vision", has_vision}, {"multimodal", has_vision}}},
+        {"input_modalities", has_vision ? json::array({"text", "image"}) : json::array({"text"})},
+    };
+    response["data"] = json::array({model});
     res.set_content(response.dump(), "application/json");
 }
 
