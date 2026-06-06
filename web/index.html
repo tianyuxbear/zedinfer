@@ -2393,6 +2393,26 @@ async function streamAssistantReply(options) {
     setGenerating(true);
     let assistantMessage = null;
     let streamedContent = '';
+    let streamedReasoning = '';
+    let streamedAnswer = '';
+    const enableThinking = false;
+
+    const composeStreamedContent = (final = false) => {
+        if (!streamedReasoning) {
+            return streamedAnswer;
+        }
+        if (!streamedAnswer && final) {
+            return streamedReasoning;
+        }
+        const close = streamedAnswer ? `\n${THINK_CLOSE}\n\n${streamedAnswer}` : '';
+        return `${THINK_OPEN}\n${streamedReasoning}${close}`;
+    };
+
+    const refreshAssistantMessage = (final = false) => {
+        streamedContent = composeStreamedContent(final);
+        updateRenderedAssistantMessage(assistantMessage.id, streamedContent, { streaming: !final });
+        return streamedContent;
+    };
 
     try {
         assistantMessage = await createMessageBranch({
@@ -2415,6 +2435,7 @@ async function streamAssistantReply(options) {
                 stream: true,
                 max_tokens: getMaxTokens(),
                 session_id: sessionId,
+                enable_thinking: enableThinking,
             }),
             signal: (abortCtrl = new AbortController()).signal,
         });
@@ -2449,10 +2470,17 @@ async function streamAssistantReply(options) {
                     if (data.error) {
                         throw new Error(data.error.message || 'Generation error');
                     }
-                    const chunk = data.choices?.[0]?.delta?.content;
-                    if (!chunk) continue;
-                    streamedContent += chunk;
-                    updateRenderedAssistantMessage(assistantMessage.id, streamedContent, { streaming: true });
+                    const delta = data.choices?.[0]?.delta || {};
+                    const contentChunk = delta.content || '';
+                    const reasoningChunk = delta.reasoning_content || '';
+                    if (!contentChunk && !reasoningChunk) continue;
+                    if (enableThinking) {
+                        streamedReasoning += reasoningChunk;
+                    } else {
+                        streamedAnswer += reasoningChunk;
+                    }
+                    streamedAnswer += contentChunk;
+                    refreshAssistantMessage(false);
                 } catch (error) {
                     if (error?.message && !error.message.includes('JSON')) {
                         throw error;
@@ -2461,6 +2489,7 @@ async function streamAssistantReply(options) {
             }
         }
 
+        streamedContent = composeStreamedContent(true);
         if (streamedContent) {
             await updateMessageRecord(assistantMessage.id, {
                 content: streamedContent,
@@ -2473,6 +2502,7 @@ async function streamAssistantReply(options) {
     } catch (error) {
         if (error?.name === 'AbortError') {
             if (assistantMessage) {
+                streamedContent = composeStreamedContent(true);
                 if (streamedContent) {
                     await updateMessageRecord(assistantMessage.id, {
                         content: streamedContent,
