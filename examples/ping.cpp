@@ -55,7 +55,7 @@ int main(int argc, char* argv[]) {
 
     program.add_argument("--max-think-tokens")
         .help("Force </think> after this many tokens inside an open <think> block (0 = disabled)")
-        .default_value(128)
+        .default_value(0)
         .scan<'i', int>();
 
     program.add_argument("--stream")
@@ -89,6 +89,11 @@ int main(int argc, char* argv[]) {
 
     auto model_path = program.get<std::string>("model_path");
     bool use_nvidia = program.get<bool>("--nvidia");
+    int max_think_tokens = program.get<int>("--max-think-tokens");
+    if (max_think_tokens < 0) {
+        std::cerr << "--max-think-tokens must be >= 0" << std::endl;
+        return 1;
+    }
 
     zedinferDeviceType_t device_type = use_nvidia ? ZEDINFER_DEVICE_NVIDIA : ZEDINFER_DEVICE_CPU;
     device::Device device(device_type, 0);
@@ -128,7 +133,7 @@ int main(int argc, char* argv[]) {
     gen_config.gen_mode = GenerationMode::PING;
     gen_config.max_new_tokens = program.get<int>("--max-new-tokens");
     gen_config.enable_thinking = program.get<bool>("--thinking");
-    gen_config.max_think_tokens = program.get<int>("--max-think-tokens");
+    gen_config.max_think_tokens = max_think_tokens;
     gen_config.verbose = true;
     gen_config.print_stats = true;
     if (program.get<bool>("--stream")) {

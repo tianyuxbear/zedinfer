@@ -50,6 +50,11 @@ int main(int argc, char* argv[]) {
         .default_value(false)
         .implicit_value(true);
 
+    program.add_argument("--max-think-tokens")
+        .help("Accepted for CLI parity; token-level profiler does not render chat prompts")
+        .default_value(0)
+        .scan<'i', int>();
+
     try {
         program.parse_args(argc, argv);
     } catch (const std::exception& err) {
@@ -68,6 +73,11 @@ int main(int argc, char* argv[]) {
     auto rounds = program.get<int>("--rounds");
     bool use_nvidia = program.get<bool>("--nvidia");
     bool enable_thinking = program.get<bool>("--enable-thinking");
+    int max_think_tokens = program.get<int>("--max-think-tokens");
+    if (max_think_tokens < 0) {
+        std::cerr << "--max-think-tokens must be >= 0" << std::endl;
+        return 1;
+    }
 
     zedinferDeviceType_t device_type = use_nvidia ? ZEDINFER_DEVICE_NVIDIA : ZEDINFER_DEVICE_CPU;
     device::Device device(device_type, 0);
@@ -77,8 +87,9 @@ int main(int argc, char* argv[]) {
     sched_config.mtp_enabled = program.get<bool>("--mtp");
 
     LOGI << "Initializing engine with device: " << (use_nvidia ? "NVIDIA" : "CPU");
-    if (enable_thinking) {
-        LOGW << "--enable-thinking has no effect in bench; profiler uses synthetic token ids directly";
+    if (enable_thinking || max_think_tokens > 0) {
+        LOGW << "--enable-thinking/--max-think-tokens have no effect in bench; profiler uses synthetic token ids "
+                "directly";
     }
     auto start = std::chrono::high_resolution_clock::now();
 

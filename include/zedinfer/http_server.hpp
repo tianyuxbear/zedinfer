@@ -37,6 +37,9 @@ struct ServerConfig {
     // Default used when a chat-completions request omits the non-OpenAI
     // enable_thinking field. Explicit request fields still take precedence.
     bool default_enable_thinking = false;
+    // Server-wide opt-in budget for forcing </think> on reasoning models.
+    // 0 disables forced thinking closure.
+    int default_max_think_tokens = 0;
 };
 
 class HttpServer {

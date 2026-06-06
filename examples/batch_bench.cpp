@@ -52,6 +52,11 @@ int main(int argc, char* argv[]) {
         .default_value(false)
         .implicit_value(true);
 
+    program.add_argument("--max-think-tokens")
+        .help("Force </think> after this many tokens inside an open <think> block (0 = disabled)")
+        .default_value(0)
+        .scan<'i', int>();
+
     try {
         program.parse_args(argc, argv);
     } catch (const std::exception& err) {
@@ -70,6 +75,11 @@ int main(int argc, char* argv[]) {
     int rounds = program.get<int>("--rounds");
     bool use_nvidia = program.get<bool>("--nvidia");
     bool enable_thinking = program.get<bool>("--enable-thinking");
+    int max_think_tokens = program.get<int>("--max-think-tokens");
+    if (max_think_tokens < 0) {
+        std::cerr << "--max-think-tokens must be >= 0" << std::endl;
+        return 1;
+    }
 
     zedinferDeviceType_t device_type = use_nvidia ? ZEDINFER_DEVICE_NVIDIA : ZEDINFER_DEVICE_CPU;
     device::Device device(device_type, 0);
@@ -119,6 +129,7 @@ int main(int argc, char* argv[]) {
 
             req->config.max_new_tokens = decode_len;
             req->config.enable_thinking = enable_thinking;
+            req->config.max_think_tokens = max_think_tokens;
             req->config.verbose = false;
             req->arrival_time = std::chrono::steady_clock::now();
 

@@ -222,6 +222,11 @@ int main(int argc, char* argv[]) {
         .default_value(false)
         .implicit_value(true);
 
+    program.add_argument("--max-think-tokens")
+        .help("Accepted for CLI parity; perplexity uses raw tokenized dataset text")
+        .default_value(0)
+        .scan<'i', int>();
+
     try {
         program.parse_args(argc, argv);
     } catch (const std::exception& err) {
@@ -239,9 +244,10 @@ int main(int argc, char* argv[]) {
     const auto csv_out = program.get<std::string>("--csv-out");
     const bool use_nvidia = program.get<bool>("--nvidia");
     const bool enable_thinking = program.get<bool>("--enable-thinking");
+    const int max_think_tokens = program.get<int>("--max-think-tokens");
 
-    if (max_samples_i < 0 || max_length_i < 0 || context_window_i < 0) {
-        std::cerr << "max-samples, max-length and context-window must be >= 0" << std::endl;
+    if (max_samples_i < 0 || max_length_i < 0 || context_window_i < 0 || max_think_tokens < 0) {
+        std::cerr << "max-samples, max-length, context-window and max-think-tokens must be >= 0" << std::endl;
         return 1;
     }
 
@@ -268,8 +274,9 @@ int main(int argc, char* argv[]) {
 
     SchedulerConfig sched_config;
     sched_config.gpu_memory_utilization = program.get<float>("--gpu-memory-utilization");
-    if (enable_thinking) {
-        LOGW << "--enable-thinking has no effect in ppl; perplexity uses raw tokenized dataset text";
+    if (enable_thinking || max_think_tokens > 0) {
+        LOGW
+            << "--enable-thinking/--max-think-tokens have no effect in ppl; perplexity uses raw tokenized dataset text";
     }
 
     LOGI << "Loaded samples: " << samples.size();

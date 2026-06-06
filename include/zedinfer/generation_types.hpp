@@ -39,11 +39,12 @@ struct GenerationConfig {
     bool enable_thinking = false;
 
     // Maximum tokens allowed inside an open <think>...</think> block before
-    // the scheduler force-emits </think> to escape long-generation drift seen
-    // on GPTQ-Int4 reasoning models. 0 disables the budget (model is free to
-    // emit </think> whenever it wants). Only meaningful when enable_thinking
-    // is true and the model emits explicit <think>/</think> tokens.
-    int max_think_tokens = 128;
+    // the scheduler force-emits </think>. 0 disables the budget (model is
+    // free to emit </think> whenever it wants). Only meaningful when
+    // enable_thinking is true and the model emits explicit <think>/</think>
+    // tokens. Default is disabled; callers can opt in via CLI when they want
+    // a bounded reasoning block.
+    int max_think_tokens = 0;
 
     // Streaming output
     bool stream = false;

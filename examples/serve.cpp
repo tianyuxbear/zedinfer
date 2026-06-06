@@ -63,6 +63,11 @@ int main(int argc, char* argv[]) {
         .default_value(false)
         .implicit_value(true);
 
+    program.add_argument("--max-think-tokens")
+        .help("Force </think> after this many tokens inside an open <think> block (0 = disabled)")
+        .default_value(0)
+        .scan<'i', int>();
+
     program.add_argument("--served-model-name")
         .help("Model id surfaced in /v1/models and chat completion responses. "
               "Defaults to the model path. Useful for impersonating an OpenAI model id.")
@@ -88,6 +93,11 @@ int main(int argc, char* argv[]) {
     auto host = program.get<std::string>("--host");
     int port = program.get<int>("--port");
     bool use_nvidia = program.get<bool>("--nvidia");
+    int max_think_tokens = program.get<int>("--max-think-tokens");
+    if (max_think_tokens < 0) {
+        std::cerr << "--max-think-tokens must be >= 0" << std::endl;
+        return 1;
+    }
 
     zedinferDeviceType_t device_type = use_nvidia ? ZEDINFER_DEVICE_NVIDIA : ZEDINFER_DEVICE_CPU;
     device::Device device(device_type, 0);
@@ -113,6 +123,7 @@ int main(int argc, char* argv[]) {
     server_config.served_model_name = program.get<std::string>("--served-model-name");
     server_config.api_key = program.get<std::string>("--api-key");
     server_config.default_enable_thinking = program.get<bool>("--enable-thinking");
+    server_config.default_max_think_tokens = max_think_tokens;
 
     HttpServer server(server_config, engine);
     g_server = &server;
@@ -131,6 +142,12 @@ int main(int argc, char* argv[]) {
         printf("  Auth: Bearer (api-key required)\n");
     }
     printf("  Thinking default: %s\n", server_config.default_enable_thinking ? "enabled" : "disabled");
+    printf("  Thinking max tokens: ");
+    if (server_config.default_max_think_tokens > 0) {
+        printf("%d\n", server_config.default_max_think_tokens);
+    } else {
+        printf("unlimited\n");
+    }
     printf("  Listening: http://%s:%d\n", host.c_str(), port);
     printf("  Web UI: http://%s:%d/\n", host.c_str(), port);
     printf("  API: http://%s:%d/v1/chat/completions\n", host.c_str(), port);

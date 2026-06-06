@@ -1359,6 +1359,7 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
     inference_req->input_ids = std::move(input_ids);
     inference_req->config.max_new_tokens = max_tokens;
     inference_req->config.enable_thinking = enable_thinking;
+    inference_req->config.max_think_tokens = config_.default_max_think_tokens;
     inference_req->arrival_time = std::chrono::steady_clock::now();
     inference_req->cancelled = cancel_flag;
     // Attach vision-pre-baked input_embeds when present; the serving loop

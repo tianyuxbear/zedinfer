@@ -264,22 +264,22 @@ EOS reached, bounded length), not just close-to-EOS as the previous workaround.
 
 ### What was added
 
-- **`GenerationConfig::enable_thinking`** (default `true`, matches HF):
+- **`GenerationConfig::enable_thinking`** (currently default `false`):
   selects the assistant-prompt variant at request time. `false` uses the
   closed-think branch (`<|im_start|>assistant\n<think>\n\n</think>\n\n`), which
   is the only mode that gives reliably clean output on GPTQ-Int4 weights.
-- **`GenerationConfig::max_think_tokens`** (default `128`): scheduler-level
-  budget. When the request is inside an unclosed `<think>` block and exceeds
-  this budget, the scheduler force-emits id 248069 (`</think>`) in place of
-  the next sampled token. The next step force-emits id 271 (`\n\n`) to recreate
-  the trained `</think>\n\n` separator pattern, anchoring the post-thinking
-  state so the model exits the truncated-thinking attractor and transitions to
-  the answer instead of continuing the partial reasoning.
+- **`GenerationConfig::max_think_tokens`** (currently default `0`, disabled):
+  opt-in scheduler-level budget. When the request is inside an unclosed
+  `<think>` block and exceeds a positive budget, the scheduler force-emits id
+  248069 (`</think>`) in place of the next sampled token. The next step
+  force-emits id 271 (`\n\n`) to recreate the trained `</think>\n\n`
+  separator pattern.
 - **`ChatTemplate::generation_prompt_no_think`** + **`output_prefix_no_think`**:
   paired closed-think variants. `Session::chat` / `prepare_prompt` pick
   open- vs closed-think based on `config_.enable_thinking`.
-- **`ping --no-thinking`** and **`ping --max-think-tokens N`** expose the
-  controls on the CLI.
+- **`ping --thinking`** and **`ping --max-think-tokens N`** expose the
+  controls on the CLI. Other CLI tools use the same `--max-think-tokens`
+  spelling; `0` means unlimited.
 
 Engine resolves the three token ids once at init (`tokenizer.get_special_token_id`
 for `<think>` / `</think>`, `tokenizer.encode("\n\n")` for the separator) and
@@ -317,13 +317,13 @@ a thinking-state corruption).
   — `set_think_token_ids`, in-thinking init from prompt, force-emit budget.
 - `src/zedinfer/serving_loop.cpp` — wires engine ids into scheduler.
 - `src/zedinfer/session.cpp` — picks open/closed prompt by `enable_thinking`.
-- `examples/ping.cpp` — `--no-thinking`, `--max-think-tokens`.
+- `examples/ping.cpp` — thinking toggle, `--max-think-tokens`.
 
 ## Update 2026-05-25: revert repetition_penalty default to 1.0
 
 ### Symptom
 
-`What is 2+2?` with `--no-thinking` (closed-think) was non-deterministically
+`What is 2+2?` with closed-think was non-deterministically
 producing wrong answers on Qwen3.5-35B-A3B-GPTQ-Int4:
 
 ```
@@ -357,9 +357,10 @@ i.e., rep_penalty wasn't actually fixing the long-thinking drift either.
 ### Fix
 
 `src/zedinfer/engine.cpp` — change the implicit default from `1.1f` → `1.0f`,
-matching HF transformers and vLLM. Reasoning-loop drift is now handled by the
-scheduler-side `max_think_tokens` force-emit (added 2026-05-24 above), which
-operates only inside `<think>` blocks and doesn't perturb the rest of sampling.
+matching HF transformers and vLLM. Reasoning-loop drift can be handled by the
+opt-in scheduler-side `max_think_tokens` force-emit (added 2026-05-24 above),
+which operates only inside `<think>` blocks and doesn't perturb the rest of
+sampling.
 
 ### Verification
 
@@ -435,7 +436,9 @@ installed `transformers` does not recognize `qwen3_5_moe`).
   `enable_thinking=true`, but is no longer the default and the comment
   warns about the fragility.
 - The `max_think_tokens` budget + `</think>\n\n` force-emit (added
-  2026-05-24) stays in place as a safety net for the opt-in case.
+  2026-05-24) remains available as an explicit CLI opt-in. It is no longer a
+  default safety net because forced closure can misclassify continued reasoning
+  as final answer text.
 
 ### Files touched (this update)
 
@@ -600,8 +603,7 @@ One-line change in `forward_full_attn_layer` in
 `src/frontend/models/hybrid_transformer_forward.cpp`. With it, zedinfer
 matches HF eager byte-for-byte on the first 30+ tokens under greedy
 decoding on the bf16 reference weights, and produces clean coherent
-output on the GPTQ-Int4 model for both `--thinking` and `--no-thinking`
-modes.
+output on the GPTQ-Int4 model for both `--thinking` and closed-think modes.
 
 ### Why the unit test didn't catch it
 

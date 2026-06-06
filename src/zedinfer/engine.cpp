@@ -87,9 +87,9 @@ std::shared_ptr<sampler::Sampler> create_sampler_from_generation_config(const st
         // first-token sample is unaffected (output_ids is empty), but step 2+
         // pulls the nucleus off the correct continuation, so a "What is 2+2?"
         // prompt would non-deterministically answer "2 and 3 is 5" or
-        // "2+4=10" instead of "2+2=4". The thinking-loop drift is now
-        // addressed by Scheduler::max_think_tokens force-emit, which doesn't
-        // perturb non-thinking sampling.
+        // "2+4=10" instead of "2+2=4". If a deployment needs a bounded
+        // reasoning block, it can opt into Scheduler::max_think_tokens
+        // force-emit via CLI without perturbing non-thinking sampling.
         params.repetition_penalty = j.value("repetition_penalty", 1.0f);
         // Debug override: ZEDINFER_REPETITION_PENALTY=<float> bypasses the
         // generation_config value entirely. Useful when validating whether
