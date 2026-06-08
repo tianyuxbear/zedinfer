@@ -196,7 +196,6 @@ int main(int argc, char* argv[]) {
             std::cerr << "[ping] vision encode failed: " << e.what() << "\n";
             return 4;
         }
-        const int n_image_tokens = static_cast<int>(encoded_image.num_tokens());
 
         // 3. Render the Jinja prompt with one (image, text) content pair.
         std::vector<ChatMessageMM> mm_messages(1);
@@ -207,27 +206,16 @@ int main(int argc, char* argv[]) {
         mm_messages[0].content = std::move(parts);
         std::string rendered = jinja->render(mm_messages, /*add_generation_prompt=*/true, gen_config.enable_thinking);
 
-        // 4. Expand the single <|image_pad|> placeholder to N copies so the
-        //    tokenized input_ids matches the vision tower output row count.
-        const std::string pad = "<|image_pad|>";
-        std::string expanded;
-        expanded.reserve(rendered.size() + n_image_tokens * pad.size());
-        size_t pos = rendered.find(pad);
-        if (pos == std::string::npos) {
-            std::cerr << "[ping] rendered prompt has no <|image_pad|> placeholder; chat template mismatch?\n";
-            return 4;
-        }
-        expanded.append(rendered, 0, pos);
-        for (int k = 0; k < n_image_tokens; ++k) { expanded.append(pad); }
-        expanded.append(rendered, pos + pad.size(), rendered.size() - pos - pad.size());
-
-        std::vector<int> input_ids = engine->tokenizer().encode(expanded);
         const std::vector<tensor_t> image_chunks{encoded_image.embeds};
         const std::vector<ImageTokenGrid> image_grids{
             ImageTokenGrid{encoded_image.grid_t, encoded_image.grid_h, encoded_image.grid_w}};
         MultimodalPositionIds positions;
         tensor_t input_embeds;
+        std::vector<int> input_ids;
         try {
+            const auto placeholder_input_ids = engine->tokenizer().encode(rendered);
+            input_ids = expand_multimodal_input_ids(placeholder_input_ids, engine->image_pad_token_id(),
+                                                    {encoded_image.num_tokens()});
             positions = build_multimodal_position_ids(input_ids, engine->image_pad_token_id(), image_grids);
             input_embeds = engine->build_multimodal_input_embeds(input_ids, image_chunks);
         } catch (const std::exception& e) {

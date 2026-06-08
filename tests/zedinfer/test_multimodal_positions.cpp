@@ -7,7 +7,36 @@
 #include <vector>
 
 using zedinfer::build_multimodal_position_ids;
+using zedinfer::expand_multimodal_input_ids;
 using zedinfer::ImageTokenGrid;
+
+TEST(MultimodalPositionsTest, ExpandsImagePadPlaceholdersAtTokenLevel) {
+    constexpr int image_token = 99;
+    const std::vector<int> input_ids = {1, image_token, 2};
+
+    const auto got = expand_multimodal_input_ids(input_ids, image_token, {4});
+
+    const std::vector<int> expected = {1, image_token, image_token, image_token, image_token, 2};
+    EXPECT_EQ(got, expected);
+}
+
+TEST(MultimodalPositionsTest, ExpandsMultipleImagesInEncounterOrder) {
+    constexpr int image_token = 99;
+    const std::vector<int> input_ids = {1, image_token, 2, image_token, 3};
+
+    const auto got = expand_multimodal_input_ids(input_ids, image_token, {2, 3});
+
+    const std::vector<int> expected = {1, image_token, image_token, 2, image_token, image_token, image_token, 3};
+    EXPECT_EQ(got, expected);
+}
+
+TEST(MultimodalPositionsTest, RejectsImagePlaceholderMismatchDuringExpansion) {
+    constexpr int image_token = 99;
+
+    EXPECT_THROW((void)expand_multimodal_input_ids({1, image_token}, image_token, {2, 2}), std::runtime_error);
+    EXPECT_THROW((void)expand_multimodal_input_ids({1, image_token, image_token}, image_token, {2}),
+                 std::runtime_error);
+}
 
 TEST(MultimodalPositionsTest, BuildsImageGridAndResumesTextAfterGridMax) {
     constexpr int image_token = 99;

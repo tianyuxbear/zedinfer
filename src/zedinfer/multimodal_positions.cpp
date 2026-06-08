@@ -34,6 +34,40 @@ size_t ImageTokenGrid::num_tokens() const {
     return static_cast<size_t>(t) * static_cast<size_t>(h) * static_cast<size_t>(w);
 }
 
+std::vector<int> expand_multimodal_input_ids(const std::vector<int>& input_ids, int image_token_id,
+                                             const std::vector<size_t>& image_token_counts) {
+    if (image_token_id < 0) {
+        throw std::runtime_error("expand_multimodal_input_ids: invalid image token id");
+    }
+
+    size_t extra_tokens = 0;
+    for (size_t count : image_token_counts) {
+        if (count == 0) {
+            throw std::runtime_error("expand_multimodal_input_ids: image token count must be positive");
+        }
+        extra_tokens += count - 1;
+    }
+
+    std::vector<int> expanded;
+    expanded.reserve(input_ids.size() + extra_tokens);
+    size_t image_idx = 0;
+    for (int id : input_ids) {
+        if (id != image_token_id) {
+            expanded.push_back(id);
+            continue;
+        }
+        if (image_idx >= image_token_counts.size()) {
+            throw std::runtime_error("expand_multimodal_input_ids: more <|image_pad|> placeholders than images");
+        }
+        const size_t count = image_token_counts[image_idx++];
+        expanded.insert(expanded.end(), count, image_token_id);
+    }
+    if (image_idx != image_token_counts.size()) {
+        throw std::runtime_error("expand_multimodal_input_ids: fewer <|image_pad|> placeholders than images");
+    }
+    return expanded;
+}
+
 MultimodalPositionIds build_multimodal_position_ids(const std::vector<int>& input_ids, int image_token_id,
                                                     const std::vector<ImageTokenGrid>& image_grids) {
     if (image_token_id < 0) {

@@ -23,4 +23,7 @@ struct MultimodalPositionIds {
 MultimodalPositionIds build_multimodal_position_ids(const std::vector<int>& input_ids, int image_token_id,
                                                     const std::vector<ImageTokenGrid>& image_grids);
 
+std::vector<int> expand_multimodal_input_ids(const std::vector<int>& input_ids, int image_token_id,
+                                             const std::vector<size_t>& image_token_counts);
+
 } // namespace zedinfer

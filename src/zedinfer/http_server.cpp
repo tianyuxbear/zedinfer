@@ -1317,9 +1317,11 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
         }
 
         if (!encoded_images.empty()) {
-            // 2. Re-render the prompt and expand each <|image_pad|> to num_image_tokens copies.
+            // 2. Re-render and tokenize the prompt with one <|image_pad|>
+            //    placeholder per image, then expand at token-id level. String
+            //    repetition is not safe here: long runs of special-token text
+            //    can be merged unexpectedly by the tokenizer.
             const int pad_id = engine_->image_pad_token_id();
-            const std::string pad_str = "<|image_pad|>";
             std::string prompt;
             try {
                 prompt = build_prompt_from_messages();
@@ -1328,35 +1330,22 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
                            "prompt_render_failed");
                 return;
             }
-            std::string expanded;
-            expanded.reserve(prompt.size() + encoded_images.size() * 4096);
-            size_t pos = 0, img_idx = 0;
-            while (pos < prompt.size() && img_idx < encoded_images.size()) {
-                const size_t hit = prompt.find(pad_str, pos);
-                if (hit == std::string::npos) {
-                    break;
-                }
-                expanded.append(prompt, pos, hit - pos);
-                const int n_tok = static_cast<int>(encoded_images[img_idx].num_tokens());
-                for (int k = 0; k < n_tok; ++k) { expanded.append(pad_str); }
-                pos = hit + pad_str.size();
-                ++img_idx;
-            }
-            expanded.append(prompt, pos, prompt.size() - pos);
-            if (img_idx != encoded_images.size()) {
-                send_error(res, 400,
-                           "Image count does not match rendered <|image_pad|> placeholders: encoded "
-                               + std::to_string(encoded_images.size()) + " image(s), rendered "
-                               + std::to_string(img_idx) + " placeholder(s)",
-                           "invalid_request_error", "image_placeholder_mismatch");
+
+            prompt_opens_think = detect_open_think(prompt);
+            std::vector<int> placeholder_input_ids;
+            if (!tokenize_prompt(prompt, placeholder_input_ids)) {
                 return;
             }
 
-            // 3. Re-tokenize the expanded prompt and reset prompt_opens_think
-            //    from the expanded form (image placeholder expansion happens
-            //    after the assistant <think> marker so this is identical).
-            prompt_opens_think = detect_open_think(expanded);
-            if (!tokenize_prompt(expanded, input_ids)) {
+            std::vector<size_t> image_token_counts;
+            image_token_counts.reserve(encoded_images.size());
+            for (const auto& encoded : encoded_images) { image_token_counts.push_back(encoded.num_tokens()); }
+            try {
+                input_ids = expand_multimodal_input_ids(placeholder_input_ids, pad_id, image_token_counts);
+            } catch (const std::exception& e) {
+                send_error(res, 400,
+                           std::string("Image count does not match rendered <|image_pad|> placeholders: ") + e.what(),
+                           "invalid_request_error", "image_placeholder_mismatch");
                 return;
             }
 
