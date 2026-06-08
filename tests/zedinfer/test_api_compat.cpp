@@ -1,10 +1,13 @@
 #include "zedinfer/api_compat.hpp"
+#include "zedinfer/generation_types.hpp"
 
 #include <gtest/gtest.h>
 
 #include <stdexcept>
 #include <string>
 
+using zedinfer::GenerationConfig;
+using zedinfer::resolve_max_new_tokens;
 using zedinfer::api_compat::build_tool_prompt;
 using zedinfer::api_compat::chat_response_to_anthropic;
 using zedinfer::api_compat::chat_response_to_responses;
@@ -13,6 +16,16 @@ using zedinfer::api_compat::convert_anthropic_to_chat;
 using zedinfer::api_compat::convert_responses_to_chat;
 using zedinfer::api_compat::normalize_anthropic_billing_header;
 using json = nlohmann::json;
+
+TEST(GenerationConfig, ResolvesUnlimitedMaxTokens) {
+    GenerationConfig config;
+    EXPECT_NO_THROW(config.validate());
+    EXPECT_EQ(resolve_max_new_tokens(0, 100, 256), 156);
+    EXPECT_EQ(resolve_max_new_tokens(32, 100, 256), 32);
+    EXPECT_EQ(resolve_max_new_tokens(512, 100, 256), 156);
+    EXPECT_THROW(resolve_max_new_tokens(-1, 100, 256), std::invalid_argument);
+    EXPECT_THROW(resolve_max_new_tokens(0, 256, 256), std::invalid_argument);
+}
 
 TEST(ApiCompat, ConvertsResponsesStringInput) {
     json body = {{"instructions", "Be terse."}, {"input", "Hello"}, {"max_output_tokens", 7}};

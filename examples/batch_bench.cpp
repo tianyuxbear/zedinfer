@@ -33,7 +33,7 @@ int main(int argc, char* argv[]) {
         .default_value(128)
         .scan<'i', int>();
 
-    program.add_argument("-d", "--decode-len")
+    program.add_argument("-d", "--decode-len", "--max-tokens")
         .help("Max tokens to generate per request")
         .default_value(128)
         .scan<'i', int>();
@@ -76,6 +76,10 @@ int main(int argc, char* argv[]) {
     bool use_nvidia = program.get<bool>("--nvidia");
     bool enable_thinking = program.get<bool>("--enable-thinking");
     int max_think_tokens = program.get<int>("--max-think-tokens");
+    if (decode_len <= 0) {
+        std::cerr << "--decode-len/--max-tokens must be > 0 for benchmark runs" << std::endl;
+        return 1;
+    }
     if (max_think_tokens < 0) {
         std::cerr << "--max-think-tokens must be >= 0" << std::endl;
         return 1;

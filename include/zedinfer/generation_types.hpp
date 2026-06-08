@@ -19,7 +19,9 @@ enum class GenerationMode {
  */
 struct GenerationConfig {
     // Generation limits
-    int max_new_tokens = 512;
+    // 0 means "unlimited" and is resolved to the remaining context window
+    // before a request reaches the scheduler.
+    int max_new_tokens = 0;
     GenerationMode gen_mode = GenerationMode::PING;
 
     // For reasoning models (Qwen3.5 family) with a closed-think variant in
@@ -86,6 +88,8 @@ struct GenerationConfig {
      */
     std::string info() const;
 };
+
+int resolve_max_new_tokens(int requested_max_new_tokens, int used_context_tokens, int max_seq_len);
 
 /**
  * Performance metrics for generation

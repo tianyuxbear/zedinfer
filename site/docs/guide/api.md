@@ -15,7 +15,6 @@ Chat completions with optional streaming and multi-turn sessions.
     "messages": [
         {"role": "user", "content": "Hello"}
     ],
-    "max_tokens": 512,
     "stream": false,
     "session_id": ""
 }
@@ -24,7 +23,7 @@ Chat completions with optional streaming and multi-turn sessions.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `messages` | array | -- | Chat messages (required). Uses the last `user` message for generation. |
-| `max_tokens` | int | `512` | Maximum tokens to generate |
+| `max_tokens` | int | server default | Maximum tokens to generate. Omitted uses the server default, which is unlimited unless `serve --max-tokens` sets a cap. `0` means unlimited for that request. |
 | `max_completion_tokens` | int | -- | OpenAI alias for `max_tokens` |
 | `stream` | bool | `false` | Enable SSE streaming |
 | `session_id` | string | `""` | Session ID for multi-turn conversation. Empty = stateless. |

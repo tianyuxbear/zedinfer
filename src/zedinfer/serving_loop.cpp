@@ -14,6 +14,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <exception>
 #include <plog/Log.h>
 
 namespace zedinfer {
@@ -118,12 +119,37 @@ std::unique_ptr<InferenceRequest> ServingLoop::build_request(const std::vector<i
     return req;
 }
 
+void ServingLoop::resolve_request_limits(InferenceRequest& request) const {
+    if (request.config.stream) {
+        if (!request.stream_callback && request.config.stream_callback) {
+            request.stream_callback = request.config.stream_callback;
+        }
+        if (!request.config.stream_callback && request.stream_callback) {
+            request.config.stream_callback = request.stream_callback;
+        }
+    }
+    request.config.validate();
+
+    int used_context_tokens = static_cast<int>(request.input_ids.size());
+    if (request.has_block_table()) {
+        used_context_tokens += request.block_table().seq_len;
+    }
+    request.config.max_new_tokens = resolve_max_new_tokens(request.config.max_new_tokens, used_context_tokens,
+                                                           engine_->exec_config().max_seq_len);
+}
+
 // ============================================================================
 // Batch Mode
 // ============================================================================
 
 std::future<GenerationResult> ServingLoop::submit_async(std::unique_ptr<InferenceRequest> request) {
     auto future = request->result_promise.get_future();
+    try {
+        resolve_request_limits(*request);
+    } catch (...) {
+        request->result_promise.set_exception(std::current_exception());
+        return future;
+    }
     // Scheduler::submit() notifies the serving thread's wait_for_work().
     scheduler_.submit(std::move(request));
     return future;

@@ -102,6 +102,7 @@ docker run --gpus all -p 8080:8080 \
 | `--max-batch-tokens` | `2048` | Max tokens per batch |
 | `--max-batch-requests` | `64` | Max concurrent requests |
 | `--gpu-memory-utilization` | `0.9` | Fraction of GPU memory for KV cache (0.0–1.0) |
+| `--max-tokens` | `0` | Default max response tokens when API requests omit `max_tokens` (`0` = unlimited) |
 
 ### Examples
 
@@ -143,7 +144,6 @@ OpenAI-compatible chat completions.
     "messages": [
         {"role": "user", "content": "Hello"}
     ],
-    "max_tokens": 512,
     "stream": false,
     "session_id": ""
 }
@@ -152,7 +152,7 @@ OpenAI-compatible chat completions.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `messages` | array | — | Chat messages (required). Uses last `user` message. |
-| `max_tokens` | int | `512` | Max tokens to generate |
+| `max_tokens` | int | server default | Max tokens to generate. Omitted uses the server default, which is unlimited unless `serve --max-tokens` sets a cap. `0` means unlimited for that request. |
 | `stream` | bool | `false` | Enable SSE streaming |
 | `session_id` | string | `""` | Session ID for multi-turn conversation. Empty = stateless. |
 
@@ -276,7 +276,7 @@ docker run --gpus all -v /path/to/models:/models \
 | `model_path` | — | Model directory (required) |
 | `--nvidia` | `false` | Use GPU |
 | `-p, --prefill-len` | `128` | Prefill token count |
-| `-d, --decode-len` | `128` | Decode token count |
+| `-d, --decode-len`, `--max-tokens` | `128` | Decode token count |
 | `-r, --rounds` | `3` | Benchmark rounds |
 | `--gpu-memory-utilization` | `0.9` | GPU memory fraction |
 
@@ -294,7 +294,7 @@ docker run --gpus all -v /path/to/models:/models \
 | `--nvidia` | `false` | Use GPU |
 | `-b, --batch-size` | `4` | Concurrent requests |
 | `-p, --prefill-len` | `128` | Prefill token count per request |
-| `-d, --decode-len` | `128` | Decode token count per request |
+| `-d, --decode-len`, `--max-tokens` | `128` | Decode token count per request |
 | `-r, --rounds` | `1` | Benchmark rounds |
 | `--gpu-memory-utilization` | `0.9` | GPU memory fraction |
 
@@ -312,7 +312,7 @@ Note: requires `-it` (interactive + tty) for terminal input.
 |----------|---------|-------------|
 | `model_path` | — | Model directory (required) |
 | `--nvidia` | `false` | Use GPU |
-| `--max-tokens` | `16384` | Max tokens per response |
+| `--max-tokens` | `0` | Max tokens per response (`0` = unlimited) |
 | `--gpu-memory-utilization` | `0.9` | GPU memory fraction |
 
 ### ping — Quick single-inference test
@@ -328,6 +328,7 @@ docker run --gpus all -v /path/to/models:/models \
 | `model_path` | — | Model directory (required) |
 | `--nvidia` | `false` | Use GPU |
 | `--prompt` | `"Who are you?"` | Prompt text |
+| `--max-new-tokens`, `--max-tokens` | `0` | Max tokens to generate (`0` = unlimited) |
 | `--gpu-memory-utilization` | `0.9` | GPU memory fraction |
 
 ---

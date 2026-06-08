@@ -41,9 +41,9 @@ int main(int argc, char* argv[]) {
         .help("Prompt text for single-turn generation")
         .default_value(std::string("Who are you?"));
 
-    program.add_argument("--max-new-tokens")
-        .help("Maximum number of new tokens to generate")
-        .default_value(512)
+    program.add_argument("--max-new-tokens", "--max-tokens")
+        .help("Maximum number of new tokens to generate (0 = unlimited)")
+        .default_value(0)
         .scan<'i', int>();
 
     program.add_argument("--thinking", "--enable-thinking")
@@ -89,9 +89,10 @@ int main(int argc, char* argv[]) {
 
     auto model_path = program.get<std::string>("model_path");
     bool use_nvidia = program.get<bool>("--nvidia");
+    int max_tokens = program.get<int>("--max-new-tokens");
     int max_think_tokens = program.get<int>("--max-think-tokens");
-    if (max_think_tokens < 0) {
-        std::cerr << "--max-think-tokens must be >= 0" << std::endl;
+    if (max_tokens < 0 || max_think_tokens < 0) {
+        std::cerr << "--max-new-tokens/--max-tokens and --max-think-tokens must be >= 0" << std::endl;
         return 1;
     }
 
@@ -131,7 +132,7 @@ int main(int argc, char* argv[]) {
 
     GenerationConfig gen_config;
     gen_config.gen_mode = GenerationMode::PING;
-    gen_config.max_new_tokens = program.get<int>("--max-new-tokens");
+    gen_config.max_new_tokens = max_tokens;
     gen_config.enable_thinking = program.get<bool>("--thinking");
     gen_config.max_think_tokens = max_think_tokens;
     gen_config.verbose = true;
@@ -221,6 +222,13 @@ int main(int argc, char* argv[]) {
 
         std::vector<int> input_ids = engine->tokenizer().encode(expanded);
         tensor_t input_embeds = engine->build_multimodal_input_embeds(input_ids, {image_embed});
+        try {
+            gen_config.max_new_tokens = resolve_max_new_tokens(
+                gen_config.max_new_tokens, static_cast<int>(input_ids.size()), engine->exec_config().max_seq_len);
+        } catch (const std::exception& e) {
+            std::cerr << "[ping] " << e.what() << "\n";
+            return 4;
+        }
 
         // 5. Submit the request directly to the serving loop.
         auto cancel_flag = std::make_shared<std::atomic<bool>>(false);

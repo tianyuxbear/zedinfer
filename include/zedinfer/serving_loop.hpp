@@ -73,6 +73,7 @@ private:
     std::atomic<bool> running_{false};
 
     std::unique_ptr<InferenceRequest> build_request(const std::vector<int>& input_ids, const GenerationConfig& config);
+    void resolve_request_limits(InferenceRequest& request) const;
 
     // Fail all requests in a batch with an error (used when forward pass throws)
     void fail_batch(ScheduledBatch& batch, const std::string& error_msg);

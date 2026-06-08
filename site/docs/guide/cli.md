@@ -23,6 +23,7 @@ docker run --gpus all -p 8080:8080 --name zedinfer \
 | `--max-batch-tokens` | `2048` | Max tokens per batch |
 | `--max-batch-requests` | `64` | Max concurrent requests |
 | `--gpu-memory-utilization` | `0.9` | GPU memory fraction for KV cache |
+| `--max-tokens` | `0` | Default max response tokens when API requests omit `max_tokens` (`0` = unlimited) |
 
 ---
 
@@ -39,7 +40,7 @@ docker run --gpus all -v /path/to/models:/models \
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `-p, --prefill-len` | `128` | Prefill token count |
-| `-d, --decode-len` | `128` | Decode token count |
+| `-d, --decode-len`, `--max-tokens` | `128` | Decode token count |
 | `-r, --rounds` | `3` | Benchmark rounds |
 
 ---
@@ -58,7 +59,7 @@ docker run --gpus all -v /path/to/models:/models \
 |----------|---------|-------------|
 | `-b, --batch-size` | `4` | Concurrent requests |
 | `-p, --prefill-len` | `128` | Prefill tokens per request |
-| `-d, --decode-len` | `128` | Decode tokens per request |
+| `-d, --decode-len`, `--max-tokens` | `128` | Decode tokens per request |
 | `-r, --rounds` | `1` | Benchmark rounds |
 
 ---
@@ -75,7 +76,7 @@ docker run --gpus all -it -v /path/to/models:/models \
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `--max-tokens` | `16384` | Max tokens per response |
+| `--max-tokens` | `0` | Max tokens per response (`0` = unlimited) |
 
 In-session commands: `exit`/`quit`/`q` to exit, `reset`/`clear` to reset conversation.
 
@@ -97,6 +98,7 @@ docker run --gpus all -v /path/to/models:/models \
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `--prompt` | `"Who are you?"` | Prompt text |
+| `--max-new-tokens`, `--max-tokens` | `0` | Max tokens to generate (`0` = unlimited) |
 
 ---
 

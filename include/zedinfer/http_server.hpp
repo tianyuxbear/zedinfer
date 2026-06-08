@@ -40,6 +40,9 @@ struct ServerConfig {
     // Server-wide opt-in budget for forcing </think> on reasoning models.
     // 0 disables forced thinking closure.
     int default_max_think_tokens = 0;
+    // Default generation cap for requests that omit max_tokens.
+    // 0 means generate until EOS or the remaining context window is exhausted.
+    int default_max_tokens = 0;
 };
 
 class HttpServer {

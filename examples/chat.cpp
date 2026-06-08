@@ -43,7 +43,10 @@ int main(int argc, char* argv[]) {
         .default_value(0.9f)
         .scan<'g', float>();
 
-    program.add_argument("--max-tokens").help("Maximum tokens per response").default_value(16384).scan<'i', int>();
+    program.add_argument("--max-tokens")
+        .help("Maximum tokens per response (0 = unlimited)")
+        .default_value(0)
+        .scan<'i', int>();
 
     program.add_argument("--mtp")
         .help("Enable Qwen3.5 MTP speculative decoding (off by default). "
@@ -76,8 +79,8 @@ int main(int argc, char* argv[]) {
     bool use_nvidia = program.get<bool>("--nvidia");
     int max_tokens = program.get<int>("--max-tokens");
     int max_think_tokens = program.get<int>("--max-think-tokens");
-    if (max_think_tokens < 0) {
-        std::cerr << "--max-think-tokens must be >= 0" << std::endl;
+    if (max_tokens < 0 || max_think_tokens < 0) {
+        std::cerr << "--max-tokens and --max-think-tokens must be >= 0" << std::endl;
         return 1;
     }
 

@@ -598,7 +598,7 @@ InferenceSession* HttpServer::acquire_session(const std::string& session_id, boo
     cleanup_idle_sessions();
 
     GenerationConfig config;
-    config.max_new_tokens = 1024;
+    config.max_new_tokens = config_.default_max_tokens;
     config.enable_thinking = enable_thinking;
     auto session = engine_->create_session(config);
     auto* ptr = session.get();
@@ -1058,7 +1058,19 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
 
     // 2. Extract parameters
     bool stream = body.value("stream", false);
-    int max_tokens = body.value("max_tokens", 512);
+    int requested_max_tokens = config_.default_max_tokens;
+    if (body.contains("max_tokens") && !body["max_tokens"].is_null()) {
+        if (!body["max_tokens"].is_number_integer()) {
+            send_error(res, 400, "'max_tokens' must be an integer", "invalid_request_error", "invalid_request");
+            return;
+        }
+        requested_max_tokens = body["max_tokens"].get<int>();
+    }
+    if (requested_max_tokens < 0) {
+        send_error(res, 400, "'max_tokens' must be non-negative (0 means unlimited)", "invalid_request_error",
+                   "invalid_request");
+        return;
+    }
     std::string session_id = body.value("session_id", std::string(""));
     // Non-OpenAI extension: opt into Qwen3.5 thinking-mode prompt rendering.
     // If omitted, use the server CLI default so clients that cannot send the
@@ -1357,15 +1369,26 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
                 "image data ignored.";
     }
 
-    // 6. Validate length
+    // 6. Validate length and resolve default/unlimited max_tokens.
     int max_seq_len = engine_->exec_config().max_seq_len;
-    if (static_cast<int>(input_ids.size()) > max_seq_len) {
+    const int prompt_token_count = static_cast<int>(input_ids.size());
+    const int prefix_token_count = (use_session && session != nullptr) ? session->block_table().seq_len : 0;
+    const int used_context_tokens = prefix_token_count + prompt_token_count;
+    if (used_context_tokens > max_seq_len) {
         send_error(res, 400,
-                   "Prompt too long: " + std::to_string(input_ids.size()) + " tokens (max "
+                   "Prompt too long: " + std::to_string(used_context_tokens) + " tokens (max "
                        + std::to_string(max_seq_len) + ")",
                    "invalid_request_error", "prompt_too_long");
         return;
     }
+    int max_tokens = 0;
+    try {
+        max_tokens = resolve_max_new_tokens(requested_max_tokens, used_context_tokens, max_seq_len);
+    } catch (const std::exception& e) {
+        send_error(res, 400, e.what(), "invalid_request_error", "prompt_too_long");
+        return;
+    }
+
     // 7. Log request with content
     std::string request_id = generate_request_id();
     std::string msg_preview = last_user_message.substr(0, 100);
@@ -1379,7 +1402,6 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
     // 8. Build inference request
     auto cancel_flag = std::make_shared<std::atomic<bool>>(false);
 
-    const int prompt_token_count = static_cast<int>(input_ids.size());
     auto inference_req = std::make_unique<InferenceRequest>();
     inference_req->input_ids = std::move(input_ids);
     inference_req->config.max_new_tokens = max_tokens;

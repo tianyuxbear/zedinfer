@@ -490,7 +490,9 @@ json convert_anthropic_to_chat(const json& body) {
     if (body.contains("stop_sequences")) {
         out["stop"] = body.at("stop_sequences");
     }
-    out["max_tokens"] = body.contains("max_tokens") ? body.at("max_tokens") : json(4096);
+    if (body.contains("max_tokens")) {
+        out["max_tokens"] = body.at("max_tokens");
+    }
     for (const auto& key : {"temperature", "top_p", "top_k", "stream", "session_id"}) {
         if (body.contains(key)) {
             out[key] = body.at(key);
