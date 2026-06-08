@@ -1607,6 +1607,16 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
                                     {"created", ctx->epoch},
                                     {"model", ctx->model}};
                     };
+                    auto responses_failed = [&ctx, &sse_event](const std::string& message, const std::string& code) {
+                        json response = {{"id", ctx->resp_id},
+                                         {"object", "response"},
+                                         {"created_at", ctx->epoch},
+                                         {"status", "failed"},
+                                         {"model", ctx->model},
+                                         {"output", json::array()},
+                                         {"error", {{"code", code}, {"message", message}}}};
+                        sse_event("response.failed", {{"type", "response.failed"}, {"response", response}});
+                    };
                     // Emit one delta payload — `is_reasoning` selects between
                     // delta.content (normal text) and delta.reasoning_content
                     // (text inside <think>...</think>). full_output keeps the
@@ -2015,8 +2025,12 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
                         if (ctx->session) {
                             ctx->session->abort_turn();
                         }
-                        sse({{"error", {{"message", "Request timed out"}, {"type", "timeout_error"}}}});
-                        sink.write("data: [DONE]\n\n", 15);
+                        if (ctx->format == api_compat::ResponseFormat::OpenAIResponses) {
+                            responses_failed("Request timed out", "timeout_error");
+                        } else {
+                            sse({{"error", {{"message", "Request timed out"}, {"type", "timeout_error"}}}});
+                            sink.write("data: [DONE]\n\n", 15);
+                        }
                         sink.done();
                         ctx->lock.unlock();
                         return false;
@@ -2144,7 +2158,11 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
                             if (ctx->session) {
                                 ctx->session->abort_turn();
                             }
-                            sse({{"error", {{"message", e.what()}, {"type", "internal_error"}}}});
+                            if (ctx->format == api_compat::ResponseFormat::OpenAIResponses) {
+                                responses_failed(e.what(), "internal_error");
+                            } else {
+                                sse({{"error", {{"message", e.what()}, {"type", "internal_error"}}}});
+                            }
                         }
                         if (ctx->format == api_compat::ResponseFormat::OpenAIChat) {
                             sink.write("data: [DONE]\n\n", 15);
@@ -2162,7 +2180,20 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
                     }
                     LOGW << "[Response] " << ctx->req_id << " stream aborted: " << e.what();
                     try {
-                        sink.write("data: [DONE]\n\n", 15);
+                        if (ctx->format == api_compat::ResponseFormat::OpenAIResponses) {
+                            json response = {{"id", ctx->resp_id},
+                                             {"object", "response"},
+                                             {"created_at", ctx->epoch},
+                                             {"status", "failed"},
+                                             {"model", ctx->model},
+                                             {"output", json::array()},
+                                             {"error", {{"code", "internal_error"}, {"message", e.what()}}}};
+                            json event = {{"type", "response.failed"}, {"response", response}};
+                            std::string d = "event: response.failed\ndata: " + event.dump() + "\n\n";
+                            sink.write(d.data(), d.size());
+                        } else {
+                            sink.write("data: [DONE]\n\n", 15);
+                        }
                     } catch (...) {}
                     sink.done();
                     ctx->lock.unlock();

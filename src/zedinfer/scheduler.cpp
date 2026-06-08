@@ -110,18 +110,20 @@ bool Scheduler::can_admit(const InferenceRequest& req) const {
     int bs = block_allocator_->block_size();
     int num_layers = block_allocator_->num_layers();
     int prompt_len = static_cast<int>(req.input_ids.size());
+    int generation_reserve = std::min(req.config.max_new_tokens, 256);
 
     // Multi-turn with existing blocks: only count ADDITIONAL blocks needed
     if (req.has_block_table() && req.block_table().num_layers > 0) {
+        int remaining_prompt = std::max(0, prompt_len - req.prefill_progress);
         int current_blocks = static_cast<int>(req.block_table().pages[0].size());
-        int total_after = req.block_table().seq_len + prompt_len + std::min(req.config.max_new_tokens, 256);
+        int total_after = req.block_table().seq_len + remaining_prompt + generation_reserve;
         int needed_per_layer = (total_after + bs - 1) / bs;
         int additional = std::max(0, needed_per_layer - current_blocks);
         return block_allocator_->available_blocks() >= additional * num_layers;
     }
 
     // New request: estimate full allocation
-    int est_tokens = prompt_len + std::min(req.config.max_new_tokens, 256);
+    int est_tokens = prompt_len + generation_reserve;
     int blocks_per_layer = (est_tokens + bs - 1) / bs;
     int blocks_needed = blocks_per_layer * num_layers;
     return block_allocator_->available_blocks() >= blocks_needed;
@@ -226,8 +228,8 @@ void Scheduler::allocate_blocks_for_request(InferenceRequest* req) {
 
         if (!req->has_block_table() || req->block_table().num_layers == 0) {
             // No prefix match — allocate from scratch
-            int est = std::min(static_cast<int>(req->input_ids.size()) + 256,
-                               static_cast<int>(req->input_ids.size()) + req->config.max_new_tokens);
+            int generation_reserve = std::min(req->config.max_new_tokens, 256);
+            int est = static_cast<int>(req->input_ids.size()) + generation_reserve;
             auto allocated = block_allocator_->allocate_sequence(est);
             if (req->has_block_table()) {
                 req->block_table() = std::move(allocated);
@@ -236,13 +238,17 @@ void Scheduler::allocate_blocks_for_request(InferenceRequest* req) {
             }
         } else {
             // Prefix matched — extend for remaining tokens
-            int total = static_cast<int>(req->input_ids.size()) + 256;
+            int generation_reserve = std::min(req->config.max_new_tokens, 256);
+            int remaining_prompt = std::max(0, static_cast<int>(req->input_ids.size()) - req->prefill_progress);
+            int total = req->block_table().seq_len + remaining_prompt + generation_reserve;
             block_allocator_->ensure_blocks(req->block_table(), total);
         }
     } else {
         // Multi-turn: extend blocks for new tokens
         auto& bt = req->block_table();
-        int total = bt.seq_len + static_cast<int>(req->input_ids.size()) + 256;
+        int generation_reserve = std::min(req->config.max_new_tokens, 256);
+        int remaining_prompt = std::max(0, static_cast<int>(req->input_ids.size()) - req->prefill_progress);
+        int total = bt.seq_len + remaining_prompt + generation_reserve;
         block_allocator_->ensure_blocks(bt, total);
     }
 }
