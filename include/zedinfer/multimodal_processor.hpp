@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace zedinfer {
@@ -51,6 +52,8 @@ public:
     int num_image_tokens_for(int h, int w) const;
 
 private:
+    std::pair<int, int> target_size_for(int h, int w) const;
+
     model::VisionConfig cfg_;
 };
 

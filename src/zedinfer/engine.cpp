@@ -125,6 +125,91 @@ std::shared_ptr<sampler::Sampler> create_sampler_from_generation_config(const st
     }
 }
 
+bool read_json_i32(const nlohmann::json& j, const char* key, int& out) {
+    if (!j.contains(key) || !j[key].is_number()) {
+        return false;
+    }
+    const int64_t value = j[key].get<int64_t>();
+    if (value < std::numeric_limits<int>::min() || value > std::numeric_limits<int>::max()) {
+        throw std::runtime_error(std::string("preprocessor_config value out of int range: ") + key);
+    }
+    out = static_cast<int>(value);
+    return true;
+}
+
+int pixels_for_image_tokens(int tokens, const model::VisionConfig& cfg) {
+    const int patch = std::max(1, cfg.patch_size);
+    const int merge = std::max(1, cfg.spatial_merge_size);
+    const int64_t patch_area = static_cast<int64_t>(patch) * patch * merge * merge;
+    const int64_t pixels = static_cast<int64_t>(tokens) * patch_area;
+    return static_cast<int>(std::min<int64_t>(pixels, std::numeric_limits<int>::max()));
+}
+
+void apply_vision_preprocessor_config(const std::string& model_path, model::VisionConfig& cfg) {
+    namespace fs = std::filesystem;
+    int min_pixels = cfg.min_pixels;
+    int max_pixels = cfg.max_pixels;
+    bool min_from_file = false;
+    bool max_from_file = false;
+
+    const fs::path preproc_path = fs::path(model_path) / "preprocessor_config.json";
+    if (fs::exists(preproc_path)) {
+        try {
+            std::ifstream file(preproc_path);
+            nlohmann::json j;
+            file >> j;
+            min_from_file = read_json_i32(j, "min_pixels", min_pixels);
+            max_from_file = read_json_i32(j, "max_pixels", max_pixels);
+            if (j.contains("size") && j["size"].is_object()) {
+                const auto& size = j["size"];
+                if (!min_from_file) {
+                    min_from_file = read_json_i32(size, "shortest_edge", min_pixels);
+                }
+                if (!max_from_file) {
+                    max_from_file = read_json_i32(size, "longest_edge", max_pixels);
+                }
+            }
+        } catch (const std::exception& e) {
+            LOGW << "[Engine] preprocessor_config.json vision limits load failed: " << e.what();
+        }
+    }
+
+    int runtime_max_tokens = 1024;
+    if (const char* env_max = std::getenv("ZEDINFER_IMAGE_MAX_TOKENS"); env_max != nullptr && *env_max != '\0') {
+        try {
+            runtime_max_tokens = std::max(1, std::stoi(env_max));
+            LOGI << "[Engine] ZEDINFER_IMAGE_MAX_TOKENS=" << runtime_max_tokens;
+        } catch (const std::exception& e) {
+            LOGW << "[Engine] ZEDINFER_IMAGE_MAX_TOKENS parse failed: " << e.what()
+                 << "; using default 1024 image tokens";
+        }
+    }
+
+    const int default_min_pixels = pixels_for_image_tokens(8, cfg);
+    const int runtime_max_pixels = pixels_for_image_tokens(runtime_max_tokens, cfg);
+    if (min_pixels <= 0) {
+        min_pixels = default_min_pixels;
+    }
+    if (max_pixels <= 0) {
+        max_pixels = runtime_max_pixels;
+    }
+    if (max_pixels > runtime_max_pixels) {
+        LOGW << "[Engine] Capping vision max_pixels from " << max_pixels << " to " << runtime_max_pixels << " ("
+             << runtime_max_tokens << " image tokens) to avoid vision prefill OOM";
+        max_pixels = runtime_max_pixels;
+    }
+    if (min_pixels > max_pixels) {
+        LOGW << "[Engine] Clamping vision min_pixels from " << min_pixels << " to max_pixels=" << max_pixels;
+        min_pixels = max_pixels;
+    }
+
+    cfg.min_pixels = min_pixels;
+    cfg.max_pixels = max_pixels;
+    LOGI << "[Engine] Vision preprocessing limits: min_pixels=" << cfg.min_pixels
+         << (min_from_file ? " (preprocessor_config)" : " (default)") << ", max_pixels=" << cfg.max_pixels
+         << (max_from_file ? " (preprocessor_config/capped)" : " (default)");
+}
+
 double read_tensor_scalar(const std::byte* data, zedinferDataType_t dtype, size_t index) {
     switch (dtype) {
         case ZEDINFER_DTYPE_F16:
@@ -390,8 +475,9 @@ std::shared_ptr<InferenceEngine> InferenceEngine::create(const std::string& mode
     // (stb_image decode + resize + patchify) happens per request.
     if (auto* q35 = dynamic_cast<model::Qwen3_5Model*>(engine->model_.get())) {
         if (q35->vision_tower() != nullptr) {
-            engine->mm_processor_
-                = std::make_unique<MultiModalProcessor>(static_cast<const model::Qwen3_5Config&>(q35->config()).vision);
+            auto vision_cfg = static_cast<const model::Qwen3_5Config&>(q35->config()).vision;
+            apply_vision_preprocessor_config(model_path, vision_cfg);
+            engine->mm_processor_ = std::make_unique<MultiModalProcessor>(vision_cfg);
             engine->image_pad_token_id_ = engine->tokenizer_->get_special_token_id("<|image_pad|>");
             LOGI.printf("[Engine] Vision pipeline enabled; <|image_pad|>=%d", engine->image_pad_token_id_);
         }

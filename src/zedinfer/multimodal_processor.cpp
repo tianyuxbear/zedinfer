@@ -58,6 +58,18 @@ std::vector<uint8_t> base64_decode(std::string_view s) {
     return out;
 }
 
+int round_by_factor(int value, int factor) {
+    return static_cast<int>(std::round(static_cast<double>(value) / factor)) * factor;
+}
+
+int ceil_by_factor(double value, int factor) {
+    return static_cast<int>(std::ceil(value / factor)) * factor;
+}
+
+int floor_by_factor(double value, int factor) {
+    return static_cast<int>(std::floor(value / factor)) * factor;
+}
+
 } // namespace
 
 ImagePayload MultiModalProcessor::decode_data_uri(std::string_view data_uri) {
@@ -85,12 +97,41 @@ ImagePayload MultiModalProcessor::decode_data_uri(std::string_view data_uri) {
 
 MultiModalProcessor::MultiModalProcessor(const model::VisionConfig& cfg) : cfg_(cfg) {}
 
-int MultiModalProcessor::num_image_tokens_for(int h, int w) const {
+std::pair<int, int> MultiModalProcessor::target_size_for(int h, int w) const {
+    if (h <= 0 || w <= 0) {
+        throw std::runtime_error("MultiModalProcessor::target_size_for: invalid image size");
+    }
+
     const int align = cfg_.patch_size * cfg_.spatial_merge_size;
-    const int ah = ((h + align - 1) / align) * align;
-    const int aw = ((w + align - 1) / align) * align;
-    const int patches_h = ah / cfg_.patch_size;
-    const int patches_w = aw / cfg_.patch_size;
+    if (align <= 0) {
+        throw std::runtime_error("MultiModalProcessor::target_size_for: invalid patch/merge alignment");
+    }
+
+    int target_h = std::max(align, round_by_factor(h, align));
+    int target_w = std::max(align, round_by_factor(w, align));
+
+    const double original_pixels = static_cast<double>(h) * static_cast<double>(w);
+    const int max_pixels = cfg_.max_pixels;
+    if (max_pixels > 0 && static_cast<long long>(target_h) * target_w > max_pixels) {
+        const double beta = std::sqrt(original_pixels / static_cast<double>(max_pixels));
+        target_h = std::max(align, floor_by_factor(static_cast<double>(h) / beta, align));
+        target_w = std::max(align, floor_by_factor(static_cast<double>(w) / beta, align));
+    }
+
+    const int min_pixels = cfg_.min_pixels;
+    if (min_pixels > 0 && static_cast<long long>(target_h) * target_w < min_pixels) {
+        const double beta = std::sqrt(static_cast<double>(min_pixels) / original_pixels);
+        target_h = std::max(align, ceil_by_factor(static_cast<double>(h) * beta, align));
+        target_w = std::max(align, ceil_by_factor(static_cast<double>(w) * beta, align));
+    }
+
+    return {target_h, target_w};
+}
+
+int MultiModalProcessor::num_image_tokens_for(int h, int w) const {
+    const auto [target_h, target_w] = target_size_for(h, w);
+    const int patches_h = target_h / cfg_.patch_size;
+    const int patches_w = target_w / cfg_.patch_size;
     const int merged_h = patches_h / cfg_.spatial_merge_size;
     const int merged_w = patches_w / cfg_.spatial_merge_size;
     return merged_h * merged_w; // T = 1 for static images
@@ -101,19 +142,11 @@ ProcessedImage MultiModalProcessor::process(const ImagePayload& img, const Execu
         throw std::runtime_error("MultiModalProcessor::process: empty / invalid image payload");
     }
 
-    // 1. Resize. Two-step: first downscale to satisfy cfg_.max_pixels (keeps
-    // aspect ratio), then align both dims to patch_size * spatial_merge_size.
-    const int align = cfg_.patch_size * cfg_.spatial_merge_size;
-    int target_h = img.height;
-    int target_w = img.width;
-    const int max_pixels = cfg_.max_pixels;
-    if (max_pixels > 0 && static_cast<long long>(target_h) * target_w > max_pixels) {
-        const double scale = std::sqrt(static_cast<double>(max_pixels) / (static_cast<double>(target_h) * target_w));
-        target_h = std::max(align, static_cast<int>(std::floor(target_h * scale)));
-        target_w = std::max(align, static_cast<int>(std::floor(target_w * scale)));
-    }
-    const int new_h = std::max(align, ((target_h + align - 1) / align) * align);
-    const int new_w = std::max(align, ((target_w + align - 1) / align) * align);
+    // 1. Smart resize. This mirrors Qwen-VL preprocessing: preserve aspect
+    // ratio, align to patch_size * spatial_merge_size, and keep the area within
+    // min/max pixel limits. The max limit is especially important because the
+    // current vision attention is O(N^2) in pre-merge patch tokens.
+    const auto [new_h, new_w] = target_size_for(img.height, img.width);
 
     // Use Catmull-Rom (cubic interpolating spline) — closest commonly-available
     // approximation to PIL's BICUBIC used by HF's Qwen3VL image preprocessor.
