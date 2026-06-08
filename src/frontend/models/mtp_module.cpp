@@ -64,6 +64,10 @@ struct MTPScratch {
 
     // mtp_moe_one_token
     tensor_t moe_router_logits; // [1, num_experts]
+    tensor_t moe_topk_ids_dev;  // [top_k] I32
+    tensor_t moe_topk_w_dev;    // [top_k] F32
+    tensor_t moe_topk_ids_host; // [top_k] I32, pinned host
+    tensor_t moe_topk_w_host;   // [top_k] F32, pinned host
     tensor_t moe_out;           // [1, H]
     tensor_t moe_gate_buf;      // [1, moe_inter]
     tensor_t moe_up_buf;        // [1, moe_inter]
@@ -150,7 +154,12 @@ static MTPScratch& ensure_mtp_scratch(const Qwen3_5Config& cfg, const ExecutorCo
     s.att_out = mkf({1, H});
 
     if (is_moe) {
+        const size_t top_k = static_cast<size_t>(static_cast<const Qwen3_5MoEConfig&>(cfg).num_experts_per_tok);
         s.moe_router_logits = mkf({1, num_e});
+        s.moe_topk_ids_dev = mk({top_k}, ZEDINFER_DTYPE_I32);
+        s.moe_topk_w_dev = mk({top_k}, ZEDINFER_DTYPE_F32);
+        s.moe_topk_ids_host = Tensor::create({top_k}, ZEDINFER_DTYPE_I32, ZEDINFER_DEVICE_CPU, 0);
+        s.moe_topk_w_host = Tensor::create({top_k}, ZEDINFER_DTYPE_F32, ZEDINFER_DEVICE_CPU, 0);
         s.moe_out = mkf({1, H});
         s.moe_gate_buf = mkf({1, moe_int});
         s.moe_up_buf = mkf({1, moe_int});
@@ -494,32 +503,51 @@ tensor_t mtp_moe_one_token(tensor_t h_post, tensor_t router_w, tensor_t shared_g
     const size_t num_e = s.num_experts;
     const size_t top_k = static_cast<size_t>(cfg.num_experts_per_tok);
 
-    auto* api = device::getRuntimeAPI(s.device_type);
-
     // 1. Router: router_logits = h_post @ router_w.T
     auto& router_logits = s.moe_router_logits;
     ops::linear(router_logits, h_post, router_w);
 
-    // 2. D2H + bf16->fp32 + global softmax + top-k + renorm.
-    //    num_e is small (256 for Qwen3.5), so do it on host.
-    //    Qwen3_5MoeTopKRouter ALWAYS renormalizes (modeling_qwen3_5_moe.py:788),
-    //    so pass true here too. Thread_local pinned vector avoids per-call heap
-    //    alloc — the D2H sync itself is unavoidable (CPU top-k consumer).
-    static thread_local std::vector<uint16_t> rl_bf16_buf;
-    static thread_local std::vector<float> rl_f32_buf;
-    if (rl_bf16_buf.size() < num_e) {
-        rl_bf16_buf.resize(num_e);
+    const std::int32_t* topk_ids = nullptr;
+    const float* topk_weights = nullptr;
+    ops::moe::TopKResult topk_cpu_fallback;
+
+#ifdef ENABLE_NVIDIA_API
+    if (router_logits->deviceType() == ZEDINFER_DEVICE_NVIDIA && top_k <= 16) {
+        // 2. GPU router softmax+top-k. Keep only the selected ids/weights on host
+        // for the existing per-expert dispatch loop below; do not D2H full router
+        // logits on every MTP step.
+        (void)num_e;
+        ops::moe::topk_softmax_gpu(s.moe_topk_ids_dev, s.moe_topk_w_dev, router_logits, top_k,
+                                   /*norm_topk_prob=*/true);
+        auto* api = core::context().runtime().api();
+        api->memcpy_sync(s.moe_topk_ids_host->data(), s.moe_topk_ids_dev->data(), top_k * sizeof(std::int32_t),
+                         ZEDINFER_MEMCPY_D2H);
+        api->memcpy_sync(s.moe_topk_w_host->data(), s.moe_topk_w_dev->data(), top_k * sizeof(float),
+                         ZEDINFER_MEMCPY_D2H);
+        topk_ids = reinterpret_cast<const std::int32_t*>(s.moe_topk_ids_host->data());
+        topk_weights = reinterpret_cast<const float*>(s.moe_topk_w_host->data());
+    } else
+#endif
+    {
+        static thread_local std::vector<uint16_t> rl_bf16_buf;
+        static thread_local std::vector<float> rl_f32_buf;
+        if (rl_bf16_buf.size() < num_e) {
+            rl_bf16_buf.resize(num_e);
+        }
+        if (rl_f32_buf.size() < num_e) {
+            rl_f32_buf.resize(num_e);
+        }
+        auto* api = device::getRuntimeAPI(s.device_type);
+        api->memcpy_sync(rl_bf16_buf.data(), router_logits->data(), num_e * sizeof(uint16_t), ZEDINFER_MEMCPY_D2H);
+        for (size_t i = 0; i < num_e; ++i) {
+            uint32_t u = static_cast<uint32_t>(rl_bf16_buf[i]) << 16;
+            std::memcpy(&rl_f32_buf[i], &u, sizeof(float));
+        }
+        topk_cpu_fallback = ops::moe::topk_softmax(rl_f32_buf.data(), /*N=*/1, num_e, top_k,
+                                                   /*norm_topk_prob=*/true);
+        topk_ids = topk_cpu_fallback.expert_ids.data();
+        topk_weights = topk_cpu_fallback.expert_weights.data();
     }
-    if (rl_f32_buf.size() < num_e) {
-        rl_f32_buf.resize(num_e);
-    }
-    api->memcpy_sync(rl_bf16_buf.data(), router_logits->data(), num_e * sizeof(uint16_t), ZEDINFER_MEMCPY_D2H);
-    for (size_t i = 0; i < num_e; ++i) {
-        uint32_t u = static_cast<uint32_t>(rl_bf16_buf[i]) << 16;
-        std::memcpy(&rl_f32_buf[i], &u, sizeof(float));
-    }
-    auto topk = ops::moe::topk_softmax(rl_f32_buf.data(), /*N=*/1, num_e, top_k,
-                                       /*norm_topk_prob=*/true);
 
     // 3. Output accumulator (bf16 on device).
     auto& out_bf16 = s.moe_out;
@@ -529,8 +557,8 @@ tensor_t mtp_moe_one_token(tensor_t h_post, tensor_t router_w, tensor_t shared_g
     //    delta = down(swiglu(gate(h), up(h))) and we accumulate
     //    out += topk_weights[k] * delta.
     for (size_t k = 0; k < top_k; ++k) {
-        const int e_id = topk.expert_ids[k];
-        const float w_k = topk.expert_weights[k];
+        const int e_id = topk_ids[k];
+        const float w_k = topk_weights[k];
         const auto& ffn = experts.at(/*layer=*/0, static_cast<size_t>(e_id));
         if (!ffn.gate_weight || !ffn.up_weight || !ffn.down_weight) {
             throw std::runtime_error("[MTPModule] expert " + std::to_string(e_id)

@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -305,7 +306,101 @@ int GeneralSampler::specRejectionSample(const std::vector<std::pair<float, int>>
 }
 
 int GeneralSampler::sample(tensor_t logits, const std::vector<int>* recent_tokens) {
+    tensor_t last_logits = getLastLogits(logits);
+    if (canSampleOnGPU(last_logits)) {
+        return sampleGPU(last_logits, recent_tokens);
+    }
     return sampleFromDist(truncatedDist(logits, recent_tokens));
+}
+
+bool GeneralSampler::canSampleOnGPU(tensor_t last_logits) const {
+    if (!last_logits || last_logits->deviceType() != ZEDINFER_DEVICE_NVIDIA || !last_logits->isContiguous()
+        || params_.top_k < 0) {
+        return false;
+    }
+    switch (last_logits->dtype()) {
+        case ZEDINFER_DTYPE_F32:
+        case ZEDINFER_DTYPE_F16:
+        case ZEDINFER_DTYPE_BF16:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool GeneralSampler::needsGPUSort(tensor_t last_logits) const {
+    const size_t vocab_size = last_logits->numel();
+    const bool has_top_k_filter = params_.top_k > 0 && static_cast<size_t>(params_.top_k) < vocab_size;
+    return (has_top_k_filter && params_.top_k > kGpuMaxTopK) || (!has_top_k_filter && params_.top_p < 1.0f);
+}
+
+void GeneralSampler::ensureGPUScratch(tensor_t last_logits, size_t recent_count) {
+    const auto device_type = last_logits->deviceType();
+    const int device_id = last_logits->deviceId();
+    const size_t vocab_size = last_logits->numel();
+
+    if (!gpu_sample_token_dev_ || gpu_sample_token_dev_->deviceType() != device_type
+        || gpu_sample_token_dev_->deviceId() != device_id) {
+        gpu_sample_token_dev_ = Tensor::create({1}, ZEDINFER_DTYPE_I64, device_type, device_id);
+        gpu_sample_token_host_ = Tensor::create({1}, ZEDINFER_DTYPE_I64, ZEDINFER_DEVICE_CPU, 0);
+    }
+
+    if (!gpu_work_logits_ || gpu_work_logits_->deviceType() != device_type || gpu_work_logits_->deviceId() != device_id
+        || gpu_work_logits_->numel() != vocab_size) {
+        gpu_work_logits_ = Tensor::create({vocab_size}, ZEDINFER_DTYPE_F32, device_type, device_id);
+    }
+
+    if (needsGPUSort(last_logits)) {
+        if (!gpu_work_ids_ || gpu_work_ids_->deviceType() != device_type || gpu_work_ids_->deviceId() != device_id
+            || gpu_work_ids_->numel() != vocab_size) {
+            gpu_work_ids_ = Tensor::create({vocab_size}, ZEDINFER_DTYPE_I32, device_type, device_id);
+            gpu_sorted_logits_ = Tensor::create({vocab_size}, ZEDINFER_DTYPE_F32, device_type, device_id);
+            gpu_sorted_ids_ = Tensor::create({vocab_size}, ZEDINFER_DTYPE_I32, device_type, device_id);
+        }
+
+        if (!gpu_sort_temp_ || gpu_sort_temp_->deviceType() != device_type || gpu_sort_temp_->deviceId() != device_id
+            || gpu_sort_temp_vocab_size_ != vocab_size) {
+            const size_t temp_bytes = ops::sample_sort_workspace_bytes(device_type, vocab_size);
+            gpu_sort_temp_ = Tensor::create({temp_bytes}, ZEDINFER_DTYPE_U8, device_type, device_id);
+            gpu_sort_temp_vocab_size_ = vocab_size;
+        }
+    }
+
+    if (recent_count > 0
+        && (!gpu_recent_tokens_ || gpu_recent_tokens_->deviceType() != device_type
+            || gpu_recent_tokens_->deviceId() != device_id || gpu_recent_tokens_->numel() < recent_count)) {
+        gpu_recent_tokens_ = Tensor::create({recent_count}, ZEDINFER_DTYPE_I32, device_type, device_id);
+    }
+}
+
+int GeneralSampler::sampleGPU(tensor_t last_logits, const std::vector<int>* recent_tokens) {
+    const size_t recent_count = recent_tokens ? recent_tokens->size() : 0;
+    ensureGPUScratch(last_logits, recent_count);
+    core::context().setDevice(last_logits->deviceType(), last_logits->deviceId());
+
+    tensor_t recent_dev;
+    if (recent_count > 0) {
+        gpu_recent_tokens_host_.resize(recent_count);
+        for (size_t i = 0; i < recent_count; ++i) {
+            gpu_recent_tokens_host_[i] = static_cast<int32_t>((*recent_tokens)[i]);
+        }
+        core::context().runtime().api()->memcpy_sync(gpu_recent_tokens_->data(), gpu_recent_tokens_host_.data(),
+                                                     recent_count * sizeof(int32_t), ZEDINFER_MEMCPY_H2D);
+        recent_dev = gpu_recent_tokens_->slice(0, 0, recent_count);
+    }
+
+    std::uniform_real_distribution<float> uni(0.0f, 1.0f);
+    float random = uni(rng_);
+    if (random >= 1.0f) {
+        random = std::nextafter(1.0f, 0.0f);
+    }
+
+    ops::sample_token(gpu_sample_token_dev_, last_logits, gpu_work_logits_, gpu_work_ids_, gpu_sorted_logits_,
+                      gpu_sorted_ids_, gpu_sort_temp_, recent_dev, params_.temperature, params_.top_k, params_.top_p,
+                      params_.repetition_penalty, random);
+    core::context().runtime().api()->memcpy_sync(gpu_sample_token_host_->data(), gpu_sample_token_dev_->data(),
+                                                 sizeof(int64_t), ZEDINFER_MEMCPY_D2H);
+    return static_cast<int>(*reinterpret_cast<const int64_t*>(gpu_sample_token_host_->data()));
 }
 
 void GeneralSampler::applyTemperature(float* logits, size_t size) {

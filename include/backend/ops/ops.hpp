@@ -8,6 +8,10 @@ namespace zedinfer::ops {
 
 void add(tensor_t c, tensor_t a, tensor_t b);
 void argmax(tensor_t max_idx, tensor_t max_val, tensor_t vals);
+size_t sample_sort_workspace_bytes(zedinferDeviceType_t device_type, size_t vocab_size);
+void sample_token(tensor_t out_token, tensor_t logits, tensor_t work_logits, tensor_t work_ids, tensor_t sorted_logits,
+                  tensor_t sorted_ids, tensor_t sort_temp, tensor_t recent_tokens, float temperature, int top_k,
+                  float top_p, float repetition_penalty, float random);
 void embedding(tensor_t out, tensor_t index, tensor_t weight);
 void linear(tensor_t out, tensor_t in, tensor_t weight, tensor_t bias = nullptr);
 void linear_quantized(tensor_t out, tensor_t in, tensor_t weight, tensor_t bias, tensor_t scale, tensor_t g_idx,

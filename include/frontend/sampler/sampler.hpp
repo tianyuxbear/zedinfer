@@ -3,9 +3,11 @@
 #include "backend/tensor/tensor.hpp"
 #include "zedinfer/activation.hpp"
 
+#include <cstdint>
 #include <memory>
 #include <random>
 #include <string>
+#include <vector>
 
 namespace zedinfer::sampler {
 
@@ -118,9 +120,25 @@ public:
     void setTopP(float top_p);
 
 private:
+    static constexpr int kGpuMaxTopK = 32;
+
     SamplerParams params_;
     std::mt19937 rng_;
+    tensor_t gpu_sample_token_dev_;
+    tensor_t gpu_sample_token_host_;
+    tensor_t gpu_work_logits_;
+    tensor_t gpu_work_ids_;
+    tensor_t gpu_sorted_logits_;
+    tensor_t gpu_sorted_ids_;
+    tensor_t gpu_sort_temp_;
+    size_t gpu_sort_temp_vocab_size_ = 0;
+    tensor_t gpu_recent_tokens_;
+    std::vector<int32_t> gpu_recent_tokens_host_;
 
+    bool canSampleOnGPU(tensor_t last_logits) const;
+    bool needsGPUSort(tensor_t last_logits) const;
+    int sampleGPU(tensor_t last_logits, const std::vector<int>* recent_tokens);
+    void ensureGPUScratch(tensor_t last_logits, size_t recent_count);
     void applyTemperature(float* logits, size_t size);
     void applyRepetitionPenalty(float* logits, size_t size, const std::vector<int>* recent_tokens);
     void applySoftmax(float* probs, const float* logits, size_t size);

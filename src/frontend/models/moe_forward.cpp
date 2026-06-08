@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <functional>
 #include <plog/Log.h>
 #include <vector>
@@ -147,6 +148,58 @@ struct RouterHostScratch {
 
 static thread_local RouterHostScratch s_router_host;
 
+struct RouterTopKScratch {
+    tensor_t ids_dev;
+    tensor_t weights_dev;
+    tensor_t ids_host;
+    tensor_t weights_host;
+    size_t capacity = 0;
+    zedinferDeviceType_t device_type = ZEDINFER_DEVICE_CPU;
+    int device_id = 0;
+};
+
+static thread_local RouterTopKScratch s_router_topk;
+
+static void ensure_router_topk_scratch(size_t total, zedinferDeviceType_t device_type, int device_id) {
+    if (s_router_topk.ids_dev && s_router_topk.capacity >= total && s_router_topk.device_type == device_type
+        && s_router_topk.device_id == device_id) {
+        return;
+    }
+    const size_t new_cap = std::max(total, s_router_topk.capacity * 2);
+    s_router_topk.ids_dev = Tensor::create({new_cap}, ZEDINFER_DTYPE_I32, device_type, device_id);
+    s_router_topk.weights_dev = Tensor::create({new_cap}, ZEDINFER_DTYPE_F32, device_type, device_id);
+    s_router_topk.ids_host = Tensor::create({new_cap}, ZEDINFER_DTYPE_I32, ZEDINFER_DEVICE_CPU, 0);
+    s_router_topk.weights_host = Tensor::create({new_cap}, ZEDINFER_DTYPE_F32, ZEDINFER_DEVICE_CPU, 0);
+    s_router_topk.capacity = new_cap;
+    s_router_topk.device_type = device_type;
+    s_router_topk.device_id = device_id;
+}
+
+#ifdef ENABLE_NVIDIA_API
+static ops::moe::TopKResult router_topk_gpu_to_host(tensor_t router_logits_buf, size_t N, size_t top_k,
+                                                    bool norm_topk_prob) {
+    const size_t total = N * top_k;
+    ensure_router_topk_scratch(total, router_logits_buf->deviceType(), router_logits_buf->deviceId());
+
+    auto ids_dev = s_router_topk.ids_dev->slice(0, 0, total);
+    auto weights_dev = s_router_topk.weights_dev->slice(0, 0, total);
+    ops::moe::topk_softmax_gpu(ids_dev, weights_dev, router_logits_buf, top_k, norm_topk_prob);
+
+    auto* api = core::context().runtime().api();
+    api->memcpy_sync(s_router_topk.ids_host->data(), ids_dev->data(), total * sizeof(std::int32_t),
+                     ZEDINFER_MEMCPY_D2H);
+    api->memcpy_sync(s_router_topk.weights_host->data(), weights_dev->data(), total * sizeof(float),
+                     ZEDINFER_MEMCPY_D2H);
+
+    ops::moe::TopKResult result;
+    result.expert_ids.resize(total);
+    result.expert_weights.resize(total);
+    std::memcpy(result.expert_ids.data(), s_router_topk.ids_host->data(), total * sizeof(std::int32_t));
+    std::memcpy(result.expert_weights.data(), s_router_topk.weights_host->data(), total * sizeof(float));
+    return result;
+}
+#endif
+
 // Grow the pinned D2H staging buffer if needed. Uses cudaMallocHost via the runtime's
 // host allocator so the buffer is DMA-pinned (matches the prior cudaMallocHost behavior
 // of Tensor::to(CPU)). Freed on growth via cudaFreeHost.
@@ -164,26 +217,6 @@ static void ensure_router_pinned(size_t bytes) {
     s_router_host.raw_capacity = new_cap;
 }
 
-// Compute router logits on device, then bring them to host as F32 for top-k selection.
-//
-// NOTE on the GPU topk_softmax kernel (Step 2.0, on this branch):
-//   We have a hand-written GPU kernel (ops::moe::topk_softmax_gpu in
-//   topk_softmax_nvidia.cu) that fuses softmax + top-K into one launch.
-//   Its softmax probabilities are bit-identical to the CPU path, but the
-//   tie-breaking order on rows where multiple experts share the same top-K
-//   probability differs from CPU std::partial_sort's heap-based ordering.
-//
-//   For non-spec generation this is harmless (the model produces equivalent
-//   tokens, just routed through experts in a slightly different order). But
-//   for MTP speculative decoding, the routing inconsistency between main
-//   forward (GPU topk) and MTP forward (CPU topk) feeds into mismatched K/V
-//   accumulation and the output degenerates ("that that that..." pathology).
-//
-//   The proper fix lives in Step 2.1+ (Marlin/CUTLASS grouped GEMM): once
-//   expert dispatch happens entirely on GPU, MTP will consume the same
-//   device-side expert_ids tensor and the two paths will agree by
-//   construction. Until then we keep the CPU topk_softmax path on the
-//   forward and treat the GPU kernel as future infrastructure.
 static ops::moe::TopKResult compute_router_topk(const ModelForwardConfig& model, tensor_t input, int layer_idx,
                                                 tensor_t router_logits_buf, size_t top_k) {
     const size_t N = input->shape()[0];
@@ -198,6 +231,12 @@ static ops::moe::TopKResult compute_router_topk(const ModelForwardConfig& model,
         std::string gate_prefix = "layers." + std::to_string(layer_idx) + ".mlp.gate";
         model.dispatch_linear(router_logits_buf, input, gate_prefix, nullptr);
     }
+
+#ifdef ENABLE_NVIDIA_API
+    if (router_logits_buf->deviceType() == ZEDINFER_DEVICE_NVIDIA && top_k <= 16) {
+        return router_topk_gpu_to_host(router_logits_buf, N, top_k, model.norm_topk_prob);
+    }
+#endif
 
     const size_t total_elems = N * num_experts;
     const zedinferDataType_t src_dtype = router_logits_buf->dtype();
