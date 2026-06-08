@@ -16,6 +16,7 @@ enum class ResponseFormat {
 
 json convert_responses_to_chat(const json& body);
 json convert_anthropic_to_chat(const json& body);
+void coalesce_system_messages(json& messages);
 
 json chat_response_to_responses(const json& chat_response);
 json chat_response_to_anthropic(const json& chat_response);

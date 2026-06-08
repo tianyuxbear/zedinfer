@@ -3,10 +3,12 @@
 #include <gtest/gtest.h>
 
 #include <stdexcept>
+#include <string>
 
 using zedinfer::api_compat::build_tool_prompt;
 using zedinfer::api_compat::chat_response_to_anthropic;
 using zedinfer::api_compat::chat_response_to_responses;
+using zedinfer::api_compat::coalesce_system_messages;
 using zedinfer::api_compat::convert_anthropic_to_chat;
 using zedinfer::api_compat::convert_responses_to_chat;
 using zedinfer::api_compat::normalize_anthropic_billing_header;
@@ -59,6 +61,47 @@ TEST(ApiCompat, ConvertsResponsesToolItems) {
     EXPECT_EQ(chat["messages"][0]["tool_calls"][0]["function"]["name"], "get_weather");
     EXPECT_EQ(chat["messages"][1]["role"], "tool");
     EXPECT_EQ(chat["messages"][1]["tool_call_id"], "call_1");
+}
+
+TEST(ApiCompat, RejectsMalformedResponsesToolOutput) {
+    json body = {{"input", json::array({{{"type", "function_call_output"},
+                                         {"call_id", "call_1"},
+                                         {"output", {{"type", "input_text"}, {"text", "sunny"}}}}})}};
+
+    try {
+        (void)convert_responses_to_chat(body);
+        FAIL() << "Expected invalid_argument";
+    } catch (const std::invalid_argument& e) {
+        EXPECT_EQ(std::string(e.what()), "Output of tool call should be a string or array");
+    }
+}
+
+TEST(ApiCompat, CoalescesSystemAndDeveloperMessages) {
+    json messages = json::array(
+        {{{"role", "system"}, {"content", "Prefer short answers."}},
+         {{"role", "developer"}, {"content", json::array({{{"type", "text"}, {"text", "Use tools when useful."}}})}},
+         {{"role", "user"}, {"content", "List files."}},
+         {{"role", "system"}, {"content", "Return plain text."}}});
+
+    coalesce_system_messages(messages);
+
+    ASSERT_EQ(messages.size(), 2);
+    EXPECT_EQ(messages[0]["role"], "system");
+    EXPECT_EQ(messages[0]["content"], "Prefer short answers.\n\nUse tools when useful.\n\nReturn plain text.");
+    EXPECT_EQ(messages[1]["role"], "user");
+    EXPECT_EQ(messages[1]["content"], "List files.");
+}
+
+TEST(ApiCompat, LeavesSingleLeadingSystemMessageUntouched) {
+    json messages = json::array(
+        {{{"role", "system"},
+          {"content", json::array({{{"type", "image_url"}, {"image_url", {{"url", "data:image/png;base64,AAAA"}}}}})}},
+         {{"role", "user"}, {"content", "Describe it."}}});
+    const json original = messages;
+
+    coalesce_system_messages(messages);
+
+    EXPECT_EQ(messages, original);
 }
 
 TEST(ApiCompat, ConvertsCodexResponsesFunctionToolsOnly) {

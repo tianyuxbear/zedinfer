@@ -94,6 +94,11 @@ std::string latest_tool_call_id(const std::string& raw_id, const std::unordered_
     return it == latest.end() ? raw_id : it->second;
 }
 
+std::string normalized_role(const json& msg) {
+    const std::string role = json_value(msg, "role", std::string());
+    return role == "developer" ? "system" : role;
+}
+
 } // namespace
 
 json convert_responses_to_chat(const json& body) {
@@ -215,6 +220,8 @@ json convert_responses_to_chat(const json& body) {
                         output["type"] = "text";
                     }
                     messages.push_back({{"role", "tool"}, {"tool_call_id", item.at("call_id")}, {"content", outputs}});
+                } else {
+                    throw std::invalid_argument("Output of tool call should be a string or array");
                 }
             } else if (is_array(item, "summary") && is_string(item, "type") && item.at("type") == "reasoning") {
                 if (!is_array(item, "content")) {
@@ -287,6 +294,53 @@ json convert_responses_to_chat(const json& body) {
     }
 
     return chat_body;
+}
+
+void coalesce_system_messages(json& messages) {
+    if (!messages.is_array()) {
+        return;
+    }
+
+    bool has_system = false;
+    bool has_developer = false;
+    size_t first_system_index = 0;
+    size_t system_count = 0;
+    for (size_t i = 0; i < messages.size(); ++i) {
+        const auto& msg = messages[i];
+        if (!msg.is_object() || normalized_role(msg) != "system") {
+            continue;
+        }
+        if (!has_system) {
+            first_system_index = i;
+            has_system = true;
+        }
+        has_developer = has_developer || json_value(msg, "role", std::string()) == "developer";
+        ++system_count;
+    }
+    if (!has_system || (system_count == 1 && first_system_index == 0 && !has_developer)) {
+        return;
+    }
+
+    std::string merged_system;
+    json kept = json::array();
+    for (const auto& msg : messages) {
+        if (!msg.is_object() || normalized_role(msg) != "system") {
+            kept.push_back(msg);
+            continue;
+        }
+
+        const std::string text = message_content_text(msg);
+        if (!text.empty()) {
+            if (!merged_system.empty()) {
+                merged_system += "\n\n";
+            }
+            merged_system += text;
+        }
+    }
+
+    json system_msg = {{"role", "system"}, {"content", merged_system}};
+    kept.insert(kept.begin(), system_msg);
+    messages = std::move(kept);
 }
 
 void normalize_anthropic_billing_header(std::string& system_text) {

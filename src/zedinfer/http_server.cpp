@@ -1122,11 +1122,11 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
     // JSON. This is the prompt-injection variant — NOT constrained decoding;
     // accuracy depends on the model honoring the directive (>95% on Qwen3.5).
     //
-    // We always PREPEND a fresh system message rather than mutating the
-    // caller's existing one — multiple system messages are well-defined under
-    // OpenAI's spec and every modern chat template handles them, and it keeps
-    // the injection independent of whatever shape (string / parts array /
-    // other) the caller's system content has.
+    // We prepend a fresh system message here, then coalesce all system/developer
+    // messages below before rendering. Some HF Jinja templates, including
+    // Qwen3.5's, reject multiple system messages even though OpenAI-compatible
+    // clients can produce them via Responses instructions + system/developer
+    // input items.
     if (body.contains("response_format") && body["response_format"].is_object()) {
         const auto& rf = body["response_format"];
         std::string ftype = rf.value("type", "");
@@ -1174,6 +1174,7 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
     if (has_tools && !jinja_tpl) {
         inject_tool_prompt_message(body);
     }
+    api_compat::coalesce_system_messages(body["messages"]);
 
     auto build_prompt_from_messages = [&]() -> std::string {
         if (jinja_tpl) {
@@ -1217,28 +1218,43 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
         size_t close = prompt.rfind(kReasoningCloseTag);
         return close == std::string::npos || close < open;
     };
-
-    if (!session_id.empty()) {
-        // Check if session KV cache is still valid (not expired/recreated)
-        if (session->is_valid() && session->past_len() > 0) {
-            // Session alive with history — only prefill new message
-            std::string session_prompt = session->prepare_prompt(last_user_message);
-            prompt_opens_think = detect_open_think(session_prompt);
-            input_ids = engine_->tokenizer().encode(session_prompt);
-            use_session = true;
-        } else {
-            // Session is fresh (new or recreated after expiry) — full prefill
-            std::string prompt = build_prompt_from_messages();
-            prompt_opens_think = detect_open_think(prompt);
-            input_ids = engine_->tokenizer().encode(prompt);
-            use_session = true;
-            LOGI << "[HttpServer] Session " << session_id << " fresh start, full prefill";
+    auto tokenize_prompt = [&](const std::string& prompt, std::vector<int>& ids) {
+        try {
+            ids = engine_->tokenizer().encode(prompt);
+            return true;
+        } catch (const std::exception& e) {
+            send_error(res, 400, std::string("Failed to tokenize prompt: ") + e.what(), "invalid_request_error",
+                       "prompt_tokenize_failed");
+            return false;
         }
-    } else {
-        // Stateless mode
-        std::string prompt = build_prompt_from_messages();
+    };
+
+    try {
+        std::string prompt;
+        if (!session_id.empty()) {
+            // Check if session KV cache is still valid (not expired/recreated)
+            if (session->is_valid() && session->past_len() > 0) {
+                // Session alive with history — only prefill new message
+                prompt = session->prepare_prompt(last_user_message);
+                use_session = true;
+            } else {
+                // Session is fresh (new or recreated after expiry) — full prefill
+                prompt = build_prompt_from_messages();
+                use_session = true;
+                LOGI << "[HttpServer] Session " << session_id << " fresh start, full prefill";
+            }
+        } else {
+            // Stateless mode
+            prompt = build_prompt_from_messages();
+        }
         prompt_opens_think = detect_open_think(prompt);
-        input_ids = engine_->tokenizer().encode(prompt);
+        if (!tokenize_prompt(prompt, input_ids)) {
+            return;
+        }
+    } catch (const std::exception& e) {
+        send_error(res, 400, std::string("Failed to render prompt: ") + e.what(), "invalid_request_error",
+                   "prompt_render_failed");
+        return;
     }
     // Vision pipeline. The Jinja chat template renders ONE <|image_pad|>
     // placeholder per image part; the vision tower outputs num_image_tokens
@@ -1289,7 +1305,14 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
             // 2. Re-render the prompt and expand each <|image_pad|> to num_image_tokens copies.
             const int pad_id = engine_->image_pad_token_id();
             const std::string pad_str = "<|image_pad|>";
-            std::string prompt = build_prompt_from_messages();
+            std::string prompt;
+            try {
+                prompt = build_prompt_from_messages();
+            } catch (const std::exception& e) {
+                send_error(res, 400, std::string("Failed to render prompt: ") + e.what(), "invalid_request_error",
+                           "prompt_render_failed");
+                return;
+            }
             std::string expanded;
             expanded.reserve(prompt.size() + image_chunks.size() * 4096);
             size_t pos = 0, img_idx = 0;
@@ -1314,7 +1337,9 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
             //    from the expanded form (image placeholder expansion happens
             //    after the assistant <think> marker so this is identical).
             prompt_opens_think = detect_open_think(expanded);
-            input_ids = engine_->tokenizer().encode(expanded);
+            if (!tokenize_prompt(expanded, input_ids)) {
+                return;
+            }
 
             try {
                 multimodal_input_embeds = engine_->build_multimodal_input_embeds(input_ids, image_chunks);
