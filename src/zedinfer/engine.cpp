@@ -748,15 +748,29 @@ int InferenceEngine::image_pad_token_id() const {
     return image_pad_token_id_;
 }
 
-tensor_t InferenceEngine::encode_image_data_uri(std::string_view data_uri) {
+EncodedImage InferenceEngine::encode_image_data_uri(std::string_view data_uri) {
     auto* q35 = dynamic_cast<model::Qwen3_5Model*>(model_.get());
     if (!q35 || !q35->vision_tower() || !mm_processor_) {
         throw std::runtime_error("[Engine] encode_image_data_uri called on a non-vision model");
     }
     ImagePayload payload = MultiModalProcessor::decode_data_uri(data_uri);
     ProcessedImage processed = mm_processor_->process(payload, exec_config_);
-    return q35->vision_tower()->forward(processed.patches, processed.pos_ids_thw, processed.grid_h, processed.grid_w,
-                                        exec_config_);
+    auto embeds = q35->vision_tower()->forward(processed.patches, processed.pos_ids_thw, processed.grid_h,
+                                               processed.grid_w, exec_config_);
+
+    const int sms = q35->vision_tower()->config().spatial_merge_size;
+    EncodedImage out;
+    out.embeds = embeds;
+    out.grid_t = processed.grid_t;
+    out.grid_h = processed.grid_h / sms;
+    out.grid_w = processed.grid_w / sms;
+    const size_t grid_tokens
+        = static_cast<size_t>(out.grid_t) * static_cast<size_t>(out.grid_h) * static_cast<size_t>(out.grid_w);
+    if (grid_tokens != embeds->dim(0)) {
+        throw std::runtime_error("[Engine] image grid tokens (" + std::to_string(grid_tokens)
+                                 + ") do not match vision embedding rows (" + std::to_string(embeds->dim(0)) + ")");
+    }
+    return out;
 }
 
 tensor_t InferenceEngine::build_multimodal_input_embeds(const std::vector<int>& input_ids,
@@ -782,6 +796,16 @@ tensor_t InferenceEngine::build_multimodal_input_embeds(const std::vector<int>& 
         return embeds;
     }
 
+    size_t image_rows = 0;
+    for (const auto& c : image_embeds_chunks) { image_rows += c->dim(0); }
+    const size_t image_pad_count
+        = static_cast<size_t>(std::count(input_ids.begin(), input_ids.end(), image_pad_token_id_));
+    if (image_pad_count != image_rows) {
+        throw std::runtime_error("[Engine] build_multimodal_input_embeds: input has " + std::to_string(image_pad_count)
+                                 + " <|image_pad|> token(s), but image embeds have " + std::to_string(image_rows)
+                                 + " row(s)");
+    }
+
     // 3. Concat all image embeds chunks (in encounter order) so we can scatter
     //    in a single op call. For the common single-image case this is just a
     //    pointer rebind; for multi-image we copy each chunk into the right
@@ -790,9 +814,7 @@ tensor_t InferenceEngine::build_multimodal_input_embeds(const std::vector<int>& 
     if (image_embeds_chunks.size() == 1) {
         image_embeds = image_embeds_chunks.front();
     } else {
-        size_t total_rows = 0;
-        for (const auto& c : image_embeds_chunks) { total_rows += c->dim(0); }
-        image_embeds = Tensor::create({total_rows, hidden_size}, exec_config_.data_type, exec_config_.device_type,
+        image_embeds = Tensor::create({image_rows, hidden_size}, exec_config_.data_type, exec_config_.device_type,
                                       exec_config_.device_id);
         auto* stream = core::context().runtime().stream();
         size_t off_bytes = 0;

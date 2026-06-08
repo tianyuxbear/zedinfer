@@ -148,6 +148,20 @@ struct InferenceRequest {
 
     tensor_t pos_ids_thw() const { return pos_ids_thw_; }
     void set_pos_ids_thw(tensor_t t) { pos_ids_thw_ = std::move(t); }
+    bool has_pos_ids_thw_host() const { return !pos_ids_thw_host_.empty(); }
+    const std::vector<int32_t>& pos_ids_thw_host() const { return pos_ids_thw_host_; }
+    size_t pos_ids_thw_token_count() const { return pos_ids_thw_token_count_; }
+    int32_t mrope_position_delta() const { return mrope_position_delta_; }
+    void set_pos_ids_thw_host(std::vector<int32_t> host, size_t token_count, int32_t delta) {
+        pos_ids_thw_host_ = std::move(host);
+        pos_ids_thw_token_count_ = token_count;
+        mrope_position_delta_ = delta;
+    }
+    void clear_pos_ids_thw_host() {
+        pos_ids_thw_host_.clear();
+        pos_ids_thw_token_count_ = 0;
+        mrope_position_delta_ = 0;
+    }
 
 private:
     kvcache::SequenceBlockTable* block_table_ptr_ = nullptr;
@@ -157,6 +171,9 @@ private:
     int ssm_slot_idx_ = -1;
     tensor_t input_embeds_;
     tensor_t pos_ids_thw_;
+    std::vector<int32_t> pos_ids_thw_host_;
+    size_t pos_ids_thw_token_count_ = 0;
+    int32_t mrope_position_delta_ = 0;
     bool has_input_embeds_ = false;
 
 public:

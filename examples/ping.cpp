@@ -4,6 +4,7 @@
 #include "zedinfer.h"
 #include "zedinfer/chat_template_jinja.hpp"
 #include "zedinfer/engine.hpp"
+#include "zedinfer/multimodal_positions.hpp"
 #include "zedinfer/multimodal_processor.hpp"
 #include "zedinfer/request.hpp"
 #include "zedinfer/scheduler.hpp"
@@ -171,7 +172,7 @@ int main(int argc, char* argv[]) {
         std::ostringstream oss;
         oss << f.rdbuf();
         std::string raw = oss.str();
-        // Minimal in-house base64 encoder — avoids dragging another dep.
+        // Minimal in-house base64 encoder - avoids dragging another dep.
         static const char b64alpha[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
         std::string b64;
         b64.reserve(((raw.size() + 2) / 3) * 4);
@@ -188,14 +189,14 @@ int main(int argc, char* argv[]) {
         std::string data_uri = "data:image/png;base64," + b64;
 
         // 2. Encode the image with the vision tower.
-        tensor_t image_embed;
+        EncodedImage encoded_image;
         try {
-            image_embed = engine->encode_image_data_uri(data_uri);
+            encoded_image = engine->encode_image_data_uri(data_uri);
         } catch (const std::exception& e) {
             std::cerr << "[ping] vision encode failed: " << e.what() << "\n";
             return 4;
         }
-        const int n_image_tokens = static_cast<int>(image_embed->dim(0));
+        const int n_image_tokens = static_cast<int>(encoded_image.num_tokens());
 
         // 3. Render the Jinja prompt with one (image, text) content pair.
         std::vector<ChatMessageMM> mm_messages(1);
@@ -221,7 +222,18 @@ int main(int argc, char* argv[]) {
         expanded.append(rendered, pos + pad.size(), rendered.size() - pos - pad.size());
 
         std::vector<int> input_ids = engine->tokenizer().encode(expanded);
-        tensor_t input_embeds = engine->build_multimodal_input_embeds(input_ids, {image_embed});
+        const std::vector<tensor_t> image_chunks{encoded_image.embeds};
+        const std::vector<ImageTokenGrid> image_grids{
+            ImageTokenGrid{encoded_image.grid_t, encoded_image.grid_h, encoded_image.grid_w}};
+        MultimodalPositionIds positions;
+        tensor_t input_embeds;
+        try {
+            positions = build_multimodal_position_ids(input_ids, engine->image_pad_token_id(), image_grids);
+            input_embeds = engine->build_multimodal_input_embeds(input_ids, image_chunks);
+        } catch (const std::exception& e) {
+            std::cerr << "[ping] multimodal prompt preparation failed: " << e.what() << "\n";
+            return 4;
+        }
         try {
             gen_config.max_new_tokens = resolve_max_new_tokens(
                 gen_config.max_new_tokens, static_cast<int>(input_ids.size()), engine->exec_config().max_seq_len);
@@ -240,6 +252,8 @@ int main(int argc, char* argv[]) {
             req->stream_callback = gen_config.stream_callback;
         }
         req->set_input_embeds(input_embeds);
+        req->set_pos_ids_thw_host(std::move(positions.pos_ids_thw), req->input_ids.size(),
+                                  positions.mrope_position_delta);
         req->arrival_time = std::chrono::steady_clock::now();
 
         // Drive the serving loop on this thread; the engine was created with

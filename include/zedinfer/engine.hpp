@@ -29,6 +29,15 @@ class InferenceSession;
 class ChatTemplateJinja;
 class MultiModalProcessor;
 
+struct EncodedImage {
+    tensor_t embeds;
+    int grid_t = 1;
+    int grid_h = 0;
+    int grid_w = 0;
+
+    size_t num_tokens() const { return embeds ? embeds->dim(0) : 0; }
+};
+
 struct PerplexityEvalConfig {
     size_t context_window = 0;
     size_t max_length = 0;
@@ -134,7 +143,7 @@ public:
     //                            [input_ids.size(), hidden_size].
     //   image_pad_token_id     : tokenizer id of <|image_pad|>, or -1.
     bool has_vision() const;
-    tensor_t encode_image_data_uri(std::string_view data_uri);
+    EncodedImage encode_image_data_uri(std::string_view data_uri);
     tensor_t build_multimodal_input_embeds(const std::vector<int>& input_ids,
                                            const std::vector<tensor_t>& image_embeds_chunks);
     int image_pad_token_id() const;

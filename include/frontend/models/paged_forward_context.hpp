@@ -29,6 +29,7 @@ public:
     PagedForwardContext(const BatchContext& batch, kvcache::BlockAllocator& allocator);
 
     int num_tokens() const { return total_tokens_; }
+    const std::vector<int64_t>& position_ids_host() const { return position_ids_; }
     void prepare_inputs(tensor_t& ids, tensor_t& pos_ids, const ExecutorConfig& exec_config);
     void prepare_inputs_into(tensor_t ids, tensor_t pos_ids);
     // Layer index semantics:

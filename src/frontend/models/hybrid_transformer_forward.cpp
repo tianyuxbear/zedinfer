@@ -21,6 +21,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -254,6 +255,81 @@ static tensor_t build_pos_ids_thw_text_only(PagedForwardContext& ctx, const Exec
     return thw;
 }
 
+static int32_t checked_pos_i32(int64_t value, const char* what) {
+    if (value < static_cast<int64_t>(std::numeric_limits<int32_t>::min())
+        || value > static_cast<int64_t>(std::numeric_limits<int32_t>::max())) {
+        throw std::runtime_error(std::string("hybrid_transformer_forward: position out of int32 range: ") + what);
+    }
+    return static_cast<int32_t>(value);
+}
+
+static tensor_t build_pos_ids_thw_from_request(PagedForwardContext& ctx, const InferenceRequest& req,
+                                               const ExecutorConfig& exec) {
+    const size_t N = static_cast<size_t>(ctx.num_tokens());
+    const size_t prompt_tokens = req.pos_ids_thw_token_count();
+    const auto& full = req.pos_ids_thw_host();
+    if (full.size() != 3 * prompt_tokens) {
+        throw std::runtime_error("hybrid_transformer_forward: malformed request pos_ids_thw_host");
+    }
+
+    const auto& positions = ctx.position_ids_host();
+    if (positions.size() != N) {
+        throw std::runtime_error("hybrid_transformer_forward: position_ids size mismatch");
+    }
+
+    std::vector<int32_t> host_thw(3 * N);
+    for (size_t i = 0; i < N; ++i) {
+        const int64_t p = positions[i];
+        if (p >= 0 && static_cast<size_t>(p) < prompt_tokens) {
+            const size_t src = static_cast<size_t>(p);
+            host_thw[0 * N + i] = full[0 * prompt_tokens + src];
+            host_thw[1 * N + i] = full[1 * prompt_tokens + src];
+            host_thw[2 * N + i] = full[2 * prompt_tokens + src];
+        } else {
+            const int32_t q = checked_pos_i32(p + req.mrope_position_delta(), "decode");
+            host_thw[0 * N + i] = q;
+            host_thw[1 * N + i] = q;
+            host_thw[2 * N + i] = q;
+        }
+    }
+
+    auto* api = device::getRuntimeAPI(exec.device_type);
+    auto thw = Tensor::create({3, N}, ZEDINFER_DTYPE_I32, exec.device_type, exec.device_id);
+    api->memcpy_sync(thw->data(), host_thw.data(), 3 * N * sizeof(int32_t),
+                     exec.device_type == ZEDINFER_DEVICE_CPU ? ZEDINFER_MEMCPY_H2H : ZEDINFER_MEMCPY_H2D);
+    return thw;
+}
+
+static tensor_t slice_input_embeds_for_context(tensor_t input_embeds, const PagedForwardContext& ctx) {
+    if (!input_embeds) {
+        return nullptr;
+    }
+    const size_t N = static_cast<size_t>(ctx.num_tokens());
+    if (input_embeds->dim(0) == N) {
+        return input_embeds;
+    }
+
+    const auto& positions = ctx.position_ids_host();
+    if (positions.size() != N || N == 0) {
+        throw std::runtime_error("hybrid_transformer_forward: cannot slice input_embeds without context positions");
+    }
+    const int64_t begin = positions.front();
+    if (begin < 0) {
+        throw std::runtime_error("hybrid_transformer_forward: negative input_embeds slice start");
+    }
+    for (size_t i = 0; i < N; ++i) {
+        if (positions[i] != begin + static_cast<int64_t>(i)) {
+            throw std::runtime_error("hybrid_transformer_forward: non-contiguous input_embeds slice requested");
+        }
+    }
+    const size_t start = static_cast<size_t>(begin);
+    const size_t end = start + N;
+    if (end > input_embeds->dim(0)) {
+        throw std::runtime_error("hybrid_transformer_forward: input_embeds slice exceeds prompt embeddings");
+    }
+    return input_embeds->slice(0, start, end);
+}
+
 static tensor_t forward_dense_mlp(const HybridForwardConfig& m, tensor_t h_post, size_t L, const ExecutorConfig& exec);
 
 static tensor_t forward_moe_mlp(const HybridForwardConfig& m, tensor_t h_post, size_t L, const ExecutorConfig& exec,
@@ -265,6 +341,7 @@ tensor_t hybrid_transformer_forward(const HybridForwardConfig& m, PagedForwardCo
     const auto& cfg = m.config;
     const size_t N = static_cast<size_t>(ctx.num_tokens());
     const size_t hidden_size = cfg.hidden_size;
+    input_embeds = slice_input_embeds_for_context(input_embeds, ctx);
 
     auto make = [&](std::vector<size_t> shape) {
         return Tensor::create(std::move(shape), exec.data_type, exec.device_type, exec.device_id);
@@ -319,7 +396,12 @@ tensor_t hybrid_transformer_forward(const HybridForwardConfig& m, PagedForwardCo
     // Build 3D positional ids once per forward. Vision pipelines will pass
     // req.pos_ids_thw() instead; text-only sequences get the (idx, idx, idx)
     // broadcast from build_pos_ids_thw_text_only.
-    tensor_t pos_ids_thw = req.pos_ids_thw();
+    tensor_t pos_ids_thw;
+    if (req.has_pos_ids_thw_host()) {
+        pos_ids_thw = build_pos_ids_thw_from_request(ctx, req, exec);
+    } else {
+        pos_ids_thw = req.pos_ids_thw();
+    }
     if (!pos_ids_thw) {
         pos_ids_thw = build_pos_ids_thw_text_only(ctx, exec);
     }

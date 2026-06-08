@@ -3,6 +3,7 @@
 #include "zedinfer/api_compat.hpp"
 #include "zedinfer/chat_template_jinja.hpp"
 #include "zedinfer/engine.hpp"
+#include "zedinfer/multimodal_positions.hpp"
 #include "zedinfer/request.hpp"
 
 #include <nlohmann/json.hpp>
@@ -1274,11 +1275,13 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
     // expand each single placeholder into num_image_tokens copies so the
     // tokenized input_ids have a matching count of <|image_pad|> positions.
     tensor_t multimodal_input_embeds;
+    std::vector<int32_t> multimodal_pos_ids_thw;
+    int32_t multimodal_mrope_delta = 0;
     if (any_image_part && engine_->has_vision()) {
         // 1. Encode every image to its embedding tensor — chunks come out in
         // encounter order across all messages.
-        std::vector<tensor_t> image_chunks;
-        image_chunks.reserve(4);
+        std::vector<EncodedImage> encoded_images;
+        encoded_images.reserve(4);
         for (const auto& msg : body["messages"]) {
             if (!msg.contains("content") || !msg["content"].is_array()) {
                 continue;
@@ -1303,7 +1306,7 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
                     continue;
                 }
                 try {
-                    image_chunks.push_back(engine_->encode_image_data_uri(uri));
+                    encoded_images.push_back(engine_->encode_image_data_uri(uri));
                 } catch (const std::exception& e) {
                     send_error(res, 400, std::string("Failed to decode / encode image: ") + e.what(),
                                "invalid_request_error", "invalid_image_data");
@@ -1313,7 +1316,7 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
             }
         }
 
-        if (!image_chunks.empty()) {
+        if (!encoded_images.empty()) {
             // 2. Re-render the prompt and expand each <|image_pad|> to num_image_tokens copies.
             const int pad_id = engine_->image_pad_token_id();
             const std::string pad_str = "<|image_pad|>";
@@ -1326,23 +1329,27 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
                 return;
             }
             std::string expanded;
-            expanded.reserve(prompt.size() + image_chunks.size() * 4096);
+            expanded.reserve(prompt.size() + encoded_images.size() * 4096);
             size_t pos = 0, img_idx = 0;
-            while (pos < prompt.size() && img_idx < image_chunks.size()) {
+            while (pos < prompt.size() && img_idx < encoded_images.size()) {
                 const size_t hit = prompt.find(pad_str, pos);
                 if (hit == std::string::npos) {
                     break;
                 }
                 expanded.append(prompt, pos, hit - pos);
-                const int n_tok = static_cast<int>(image_chunks[img_idx]->dim(0));
+                const int n_tok = static_cast<int>(encoded_images[img_idx].num_tokens());
                 for (int k = 0; k < n_tok; ++k) { expanded.append(pad_str); }
                 pos = hit + pad_str.size();
                 ++img_idx;
             }
             expanded.append(prompt, pos, prompt.size() - pos);
-            if (img_idx != image_chunks.size()) {
-                LOGW << "[HttpServer] Multimodal: encoded " << image_chunks.size()
-                     << " image(s) but the rendered prompt only carries " << img_idx << " <|image_pad|> placeholder(s)";
+            if (img_idx != encoded_images.size()) {
+                send_error(res, 400,
+                           "Image count does not match rendered <|image_pad|> placeholders: encoded "
+                               + std::to_string(encoded_images.size()) + " image(s), rendered "
+                               + std::to_string(img_idx) + " placeholder(s)",
+                           "invalid_request_error", "image_placeholder_mismatch");
+                return;
             }
 
             // 3. Re-tokenize the expanded prompt and reset prompt_opens_think
@@ -1350,6 +1357,25 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
             //    after the assistant <think> marker so this is identical).
             prompt_opens_think = detect_open_think(expanded);
             if (!tokenize_prompt(expanded, input_ids)) {
+                return;
+            }
+
+            std::vector<tensor_t> image_chunks;
+            std::vector<ImageTokenGrid> image_grids;
+            image_chunks.reserve(encoded_images.size());
+            image_grids.reserve(encoded_images.size());
+            for (const auto& encoded : encoded_images) {
+                image_chunks.push_back(encoded.embeds);
+                image_grids.push_back(ImageTokenGrid{encoded.grid_t, encoded.grid_h, encoded.grid_w});
+            }
+            try {
+                auto positions = build_multimodal_position_ids(input_ids, pad_id, image_grids);
+                multimodal_pos_ids_thw = std::move(positions.pos_ids_thw);
+                multimodal_mrope_delta = positions.mrope_position_delta;
+            } catch (const std::exception& e) {
+                send_error(res, 400, std::string("Failed to build multimodal position ids: ") + e.what(),
+                           "invalid_request_error", "multimodal_positions_failed");
+                LOGW << "[HttpServer] build_multimodal_position_ids failed: " << e.what();
                 return;
             }
 
@@ -1415,6 +1441,8 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
     // already scattered) as the layer-0 hidden state.
     if (multimodal_input_embeds) {
         inference_req->set_input_embeds(multimodal_input_embeds);
+        inference_req->set_pos_ids_thw_host(std::move(multimodal_pos_ids_thw), inference_req->input_ids.size(),
+                                            multimodal_mrope_delta);
     }
 
     // OpenAI-compatible sampling overrides. Setting has_sampling_override
