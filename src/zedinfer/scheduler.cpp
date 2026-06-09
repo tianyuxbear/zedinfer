@@ -197,8 +197,20 @@ void Scheduler::allocate_blocks_for_request(InferenceRequest* req) {
                 kvcache::SequenceBlockTable matched;
                 int cached = prefix_cache_->match_prefix(req->input_ids, block_allocator_->block_size(), matched);
 
-                // Hybrid models accept only exact full-prompt matches.
-                // Anything shorter would expose the SSM bleed bug.
+                // A full-prompt cache hit gives us KV state but not the logits
+                // for sampling the first generated token. We must leave at
+                // least one prompt token to prefill; otherwise the scheduled
+                // batch would contain a zero-length prefill chunk and the
+                // forward context would try to upload an empty token buffer.
+                if (cached >= static_cast<int>(req->input_ids.size())) {
+                    block_allocator_->release_sequence(matched);
+                    cached = 0;
+                }
+
+                // Hybrid models cannot safely use partial KV-only prefix hits:
+                // the SSM/conv state would be prefix-blind. Exact full-prompt
+                // hits are rejected above because we do not cache logits, so
+                // for now hybrid prefix reuse remains disabled in practice.
                 if (hybrid && cached > 0 && cached < static_cast<int>(req->input_ids.size())) {
                     block_allocator_->release_sequence(matched);
                     cached = 0;

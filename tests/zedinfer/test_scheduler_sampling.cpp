@@ -1,4 +1,5 @@
 #include "backend/kvcache/block_pool.hpp"
+#include "backend/kvcache/prefix_cache.hpp"
 #include "backend/tensor/tensor.hpp"
 #include "frontend/sampler/sampler.hpp"
 #include "frontend/tokenizer/base.hpp"
@@ -126,4 +127,41 @@ TEST(SchedulerSamplingTest, OversizedQueuedRequestFailsInsteadOfSpinning) {
     EXPECT_EQ(scheduler.pending_count(), 0);
     ASSERT_EQ(future.wait_for(std::chrono::seconds(0)), std::future_status::ready);
     EXPECT_THROW(future.get(), std::runtime_error);
+}
+
+TEST(SchedulerSamplingTest, FullPrefixCacheHitStillSchedulesNonEmptyPrefill) {
+    SchedulerConfig config;
+    config.max_batch_tokens = 16;
+    config.max_prefill_tokens = 16;
+    Scheduler scheduler(config);
+
+    kvcache::BlockConfig block_config;
+    block_config.block_size = 4;
+    block_config.num_kv_heads = 1;
+    block_config.head_dim = 1;
+    block_config.dtype = ZEDINFER_DTYPE_F32;
+    kvcache::BlockPool pool(block_config, 8, ZEDINFER_DEVICE_CPU, 0);
+    kvcache::BlockAllocator allocator(pool, 1);
+    kvcache::PrefixCache prefix_cache(pool, 1);
+
+    scheduler.set_block_allocator(&allocator);
+    scheduler.set_prefix_cache(&prefix_cache);
+
+    std::vector<int> prompt = {1, 2, 3, 4};
+    auto cached_table = allocator.allocate_sequence(static_cast<int>(prompt.size()));
+    prefix_cache.insert_blocks(prompt, allocator.block_size(), cached_table);
+    allocator.release_sequence(cached_table);
+
+    auto req = std::make_unique<InferenceRequest>();
+    req->input_ids = prompt;
+    req->config.max_new_tokens = 1;
+    scheduler.submit(std::move(req));
+
+    ScheduledBatch batch = scheduler.schedule();
+
+    ASSERT_EQ(batch.prefill_requests.size(), 1u);
+    ASSERT_EQ(batch.prefill_chunk_sizes.size(), 1u);
+    EXPECT_EQ(batch.prefill_chunk_starts[0], 0);
+    EXPECT_EQ(batch.prefill_chunk_sizes[0], static_cast<int>(prompt.size()));
+    EXPECT_EQ(batch.prefill_requests[0]->prefill_progress, static_cast<int>(prompt.size()));
 }

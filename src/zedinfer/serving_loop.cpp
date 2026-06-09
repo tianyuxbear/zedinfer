@@ -31,19 +31,17 @@ ServingLoop::ServingLoop(InferenceEngine& engine, SchedulerConfig sched_config)
     if (ssm_pool) {
         scheduler_.set_ssm_state_pool(ssm_pool);
     }
-    // PrefixCache is now safe to wire even for hybrid models: the scheduler
-    // pairs it with the SSMSnapshotCache below so that a prefix-cache hit is
-    // only honored when the SSM/conv state for the exact prompt is also
-    // restorable. Without that pairing, partial-prefix KV reuse would leave
-    // the linear-attention layers prefix-blind and the output would diverge
-    // from a cold-cache run.
+    // PrefixCache is safe to wire for hybrid models, but the scheduler keeps
+    // hybrid reuse conservative: partial KV-only hits are SSM/conv prefix-blind,
+    // and exact full-prompt hits need cached logits before they can skip
+    // prefill entirely.
     if (engine_->prefix_cache()) {
         scheduler_.set_prefix_cache(engine_->prefix_cache());
     }
     if (engine_->ssm_snapshot_cache()) {
         scheduler_.set_ssm_snapshot_cache(engine_->ssm_snapshot_cache());
         LOGI << "[ServingLoop] Hybrid model: SSM snapshot cache enabled; "
-                "prefix cache reuse limited to exact full-prompt matches.";
+                "KV-only prefix hits disabled until logits-aware reuse is available.";
     }
     // Pass <think> / </think> ids (Qwen3.5 family) so the scheduler can drive
     // the per-request thinking-budget force-emit. Returns -1 for models without
@@ -431,9 +429,14 @@ void ServingLoop::fail_batch(ScheduledBatch& batch, const std::string& error_msg
             return;
         }
         req->phase = RequestPhase::COMPLETE;
-        // Free owned blocks
+        // Release owned blocks. Use release_sequence (not free_sequence) so
+        // shared prefix-cache pages keep correct refcounts.
         if (engine_->block_allocator() && req->owns_block_table() && req->block_table().num_layers > 0) {
-            engine_->block_allocator()->free_sequence(req->block_table());
+            engine_->block_allocator()->release_sequence(req->block_table());
+        }
+        if (auto* ssm_pool = engine_->ssm_state_pool(); ssm_pool != nullptr && req->ssm_slot_idx() >= 0) {
+            ssm_pool->release_slot(req->ssm_slot_idx());
+            req->set_ssm_slot_idx(-1);
         }
         try {
             req->result_promise.set_exception(std::make_exception_ptr(std::runtime_error(error_msg)));

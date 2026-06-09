@@ -77,11 +77,10 @@ public:
     void set_prefix_cache(kvcache::PrefixCache* cache);
 
     // Set SSM snapshot cache (optional, paired with prefix_cache on hybrid
-    // models). When both are set, the scheduler honors PrefixCache hits only
-    // for the exact full prompt AND when the SSM snapshot is restored — this
-    // keeps the linear-attention state coherent with the cached KV. Without
-    // this cache wired, prefix matching on hybrid models is silently ignored
-    // (partial hits would be prefix-blind for SSM layers).
+    // models). KV-only partial hits are ignored because SSM/conv state would
+    // be prefix-blind. Full-prompt hits are also rejected until logits-aware
+    // prefix caching exists, because cached KV/SSM state alone cannot produce
+    // the first sampled token.
     void set_ssm_snapshot_cache(kvcache::SSMSnapshotCache* cache);
 
     // Wire an SSM state pool for hybrid models (Qwen3.5). When set, can_admit
