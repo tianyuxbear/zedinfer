@@ -163,6 +163,17 @@ private:
     std::vector<std::unique_ptr<InferenceRequest>> active_requests_; // decode phase
 
     uint64_t next_request_id_ = 1;
+    // Round-robin cursor for hybrid single-request-per-step scheduling. Rotates
+    // which admitted request advances each step so concurrent hybrid requests
+    // interleave instead of running strictly FIFO. Unused on non-hybrid models.
+    uint64_t rr_cursor_ = 0;
+
+    // Hybrid (Qwen3.5-family) models carry per-sequence SSM/conv recurrent state
+    // and have no fused multi-sequence forward yet, so each forward processes a
+    // single request. This assembles a one-request batch (one decode OR one
+    // prefill chunk), round-robin across admitted requests. Selected by
+    // schedule() when an SSM state pool is wired.
+    ScheduledBatch schedule_hybrid_single();
 
     bool can_admit(const InferenceRequest& req) const;
     void allocate_blocks_for_request(InferenceRequest* req);

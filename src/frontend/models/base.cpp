@@ -121,6 +121,30 @@ size_t parse_env_mib(const char* name, size_t default_bytes) {
     return static_cast<size_t>(mib) * kMiB;
 }
 
+// Number of concurrent sequences a hybrid (Qwen3.5-family) model is sized for.
+// This is the SSMStatePool slot count: each in-flight request owns one slot of
+// per-sequence GatedDeltaNet + causal-conv recurrent state (~tens of MB on the
+// 35B model), so the value trades VRAM for concurrency. The scheduler admits at
+// most this many hybrid requests at once and interleaves them one forward per
+// step. Default keeps a few slots so concurrent requests don't serialize behind
+// each other; override via ZEDINFER_MAX_CONCURRENT (clamped to [1, 256]).
+int resolve_hybrid_max_concurrent() {
+    constexpr int kDefault = 4;
+    const char* env = std::getenv("ZEDINFER_MAX_CONCURRENT");
+    if (env == nullptr || *env == '\0') {
+        return kDefault;
+    }
+    try {
+        size_t consumed = 0;
+        long value = std::stol(env, &consumed);
+        if (consumed == std::string(env).size() && value >= 1 && value <= 256) {
+            return static_cast<int>(value);
+        }
+    } catch (const std::exception&) {}
+    LOGW << "[Model] Invalid ZEDINFER_MAX_CONCURRENT='" << env << "', using default " << kDefault;
+    return kDefault;
+}
+
 // Decide ExpertPoolConfig for a Qwen3MoE model. Order:
 //  1. If ZEDINFER_MOE_GPU_SLOTS is set: parse and respect it.
 //  2. Else: auto-size. Apply gpu_memory_utilization the same way init_block_pool does
@@ -415,8 +439,10 @@ std::shared_ptr<Model> Model::parse(const std::string& model_path, zedinferDevic
         if (!qcfg) {
             throw std::logic_error("Config is not Qwen3_5Config");
         }
-        // M0 default; M5 will revisit this to plumb through SchedulerConfig.
-        const int max_concurrent = 1;
+        // SSM slot count = max concurrent hybrid requests. >1 lets the scheduler
+        // interleave concurrent requests instead of serializing them behind one
+        // SSM slot. Tune via ZEDINFER_MAX_CONCURRENT.
+        const int max_concurrent = resolve_hybrid_max_concurrent();
         ExecutorConfig exec(target_device, 0, ZEDINFER_DTYPE_BF16);
         return std::make_shared<Qwen3_5Model>(*qcfg, std::move(weights), exec, max_concurrent, model_path);
     } else if (config->model_type == "qwen3_5_moe") {
@@ -424,10 +450,11 @@ std::shared_ptr<Model> Model::parse(const std::string& model_path, zedinferDevic
         if (!qcfg) {
             throw std::logic_error("Config is not Qwen3_5MoEConfig");
         }
-        // M0 default; M5 will revisit this to plumb through SchedulerConfig. moe_pool_config was
-        // computed up-front so the loader's CPU-pinned routing predicate and the ExpertPool stay
-        // coupled to the same single decision (env override or auto fallback).
-        const int max_concurrent = 1;
+        // SSM slot count = max concurrent hybrid requests (see ZEDINFER_MAX_CONCURRENT).
+        // moe_pool_config was computed up-front so the loader's CPU-pinned routing predicate
+        // and the ExpertPool stay coupled to the same single decision (env override or auto
+        // fallback).
+        const int max_concurrent = resolve_hybrid_max_concurrent();
         ExecutorConfig exec(target_device, 0, ZEDINFER_DTYPE_BF16);
         return std::make_shared<Qwen3_5MoeModel>(*qcfg, std::move(weights), exec, max_concurrent, moe_pool_config,
                                                  model_path);

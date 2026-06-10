@@ -1,6 +1,7 @@
 #include "backend/kvcache/block_pool.hpp"
 #include "backend/kvcache/prefix_cache.hpp"
 #include "backend/tensor/tensor.hpp"
+#include "frontend/models/ssm_state_pool.hpp"
 #include "frontend/sampler/sampler.hpp"
 #include "frontend/tokenizer/base.hpp"
 #include "zedinfer/batch_context.hpp"
@@ -166,6 +167,117 @@ TEST(SchedulerSamplingTest, ActiveDecodeKvExhaustionFailsRequestInsteadOfSpinnin
     EXPECT_EQ(scheduler.active_count(), 0);
     ASSERT_EQ(future.wait_for(std::chrono::seconds(0)), std::future_status::ready);
     EXPECT_THROW(future.get(), std::runtime_error);
+}
+
+// Hybrid (Qwen3.5-family) models run one request per forward and gate admission
+// on a free SSMStatePool slot. The single-request, round-robin hybrid scheduler
+// must INTERLEAVE concurrent requests: a request submitted while another is
+// mid-generation has to start making progress before the first one finishes,
+// rather than waiting FIFO behind a single SSM slot (the bug this guards).
+TEST(SchedulerSamplingTest, HybridSchedulerInterleavesConcurrentRequests) {
+    SchedulerConfig config;
+    config.max_batch_tokens = 64;
+    config.max_prefill_tokens = 16;
+    Scheduler scheduler(config);
+
+    kvcache::BlockConfig block_config;
+    block_config.block_size = 4;
+    block_config.num_kv_heads = 1;
+    block_config.head_dim = 1;
+    block_config.dtype = ZEDINFER_DTYPE_F32;
+    kvcache::BlockPool pool(block_config, 64, ZEDINFER_DEVICE_CPU, 0);
+    kvcache::BlockAllocator allocator(pool, 1);
+    scheduler.set_block_allocator(&allocator);
+
+    // CPU-backed SSM pool with 2 slots → up to 2 concurrent hybrid requests.
+    model::SSMStatePoolConfig ssm_cfg;
+    ssm_cfg.num_linear_layers = 1;
+    ssm_cfg.num_v_heads = 1;
+    ssm_cfg.value_head_dim = 1;
+    ssm_cfg.d_state = 1;
+    ssm_cfg.conv_kernel_dim = 2;
+    ssm_cfg.qkv_dim = 1;
+    ssm_cfg.max_concurrent = 2;
+    ssm_cfg.state_dtype = ZEDINFER_DTYPE_F32;
+    ExecutorConfig ssm_exec(ZEDINFER_DEVICE_CPU, 0, ZEDINFER_DTYPE_F32);
+    model::SSMStatePool ssm_pool(ssm_cfg, ssm_exec);
+    scheduler.set_ssm_state_pool(&ssm_pool);
+
+    constexpr int kTokensEach = 4;
+    auto submit_req = [&]() {
+        auto req = std::make_unique<InferenceRequest>();
+        req->input_ids = {1};
+        req->config.max_new_tokens = kTokensEach;
+        scheduler.submit(std::move(req));
+    };
+    submit_req(); // request_id 1 (A)
+    submit_req(); // request_id 2 (B)
+
+    // Drive schedule(); after each batch apply the minimal state update the real
+    // serving loop's process_results would (prefill → DECODE + first token,
+    // decode → +1 token, finish at the token budget) so the next schedule sees
+    // realistic phases. Record the request id served each step.
+    std::vector<uint64_t> order;
+    auto apply_and_record = [&](ScheduledBatch& b) {
+        for (size_t i = 0; i < b.prefill_requests.size(); ++i) {
+            auto* r = b.prefill_requests[i];
+            r->block_table().seq_len += b.prefill_chunk_sizes[i];
+            r->phase = RequestPhase::DECODE;
+            r->generated_count = 1;
+            if (r->generated_count >= r->config.max_new_tokens) {
+                r->phase = RequestPhase::COMPLETE;
+            }
+            order.push_back(r->request_id);
+        }
+        for (auto* r : b.decode_requests) {
+            r->block_table().seq_len += 1;
+            r->generated_count += 1;
+            if (r->generated_count >= r->config.max_new_tokens) {
+                r->phase = RequestPhase::COMPLETE;
+            }
+            order.push_back(r->request_id);
+        }
+    };
+
+    for (int step = 0; step < 32; ++step) {
+        ScheduledBatch b = scheduler.schedule();
+        if (b.empty()) {
+            if (!scheduler.has_work()) {
+                break;
+            }
+            continue;
+        }
+        apply_and_record(b);
+    }
+
+    // Both requests are fully served (one prefill token + kTokensEach-1 decodes).
+    int count_a = 0, count_b = 0;
+    for (uint64_t id : order) {
+        count_a += (id == 1);
+        count_b += (id == 2);
+    }
+    EXPECT_EQ(count_a, kTokensEach);
+    EXPECT_EQ(count_b, kTokensEach);
+
+    // The fix: B (id 2) must be scheduled BEFORE A (id 1) finishes its last
+    // token. Under the old single-slot serialization B would not appear until
+    // every A unit had run.
+    int a_completion_idx = -1, a_seen = 0, first_b_idx = -1;
+    for (int i = 0; i < static_cast<int>(order.size()); ++i) {
+        if (order[i] == 1 && ++a_seen == kTokensEach) {
+            a_completion_idx = i;
+            break;
+        }
+    }
+    for (int i = 0; i < static_cast<int>(order.size()); ++i) {
+        if (order[i] == 2) {
+            first_b_idx = i;
+            break;
+        }
+    }
+    ASSERT_GE(a_completion_idx, 0);
+    ASSERT_GE(first_b_idx, 0);
+    EXPECT_LT(first_b_idx, a_completion_idx) << "request B did not interleave with A (FIFO serialization)";
 }
 
 TEST(SchedulerSamplingTest, FullPrefixCacheHitStillSchedulesNonEmptyPrefill) {

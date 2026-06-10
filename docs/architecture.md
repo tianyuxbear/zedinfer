@@ -65,8 +65,13 @@ Resource container and factory. Owns model, tokenizer, sampler, block pool, pref
 Drives inference: `submit_async()` for HTTP, `generate()` for CLI sessions. Contains the Scheduler and runs `schedule() -> step() -> process_results()` loop.
 
 ### Scheduler (`include/zedinfer/scheduler.hpp`)
-- Decode-first scheduling with chunked prefill
-- Block-based admission control via `BlockAllocator::available_blocks()`
+- Decode-first scheduling with chunked prefill (dense / non-hybrid models: a fused multi-request batch per step)
+- Hybrid (Qwen3.5-family) models: `schedule_hybrid_single()` assembles a one-request batch per step (one decode
+  OR one prefill chunk) and round-robins across admitted requests, so concurrent requests interleave instead of
+  serializing FIFO behind a single SSM slot. There is no fused multi-sequence linear-attention kernel yet, so the
+  per-step batch stays single-request; aggregate throughput is unchanged but per-request latency is shared fairly.
+  Concurrency = `SSMStatePool` slot count (`ZEDINFER_MAX_CONCURRENT`, default 4).
+- Block-based admission control via `BlockAllocator::available_blocks()`; hybrid admission also needs a free SSM slot
 - Prefix cache integration: matches prompt prefix on admission, skips redundant prefill
 - `allocate_blocks_for_request()` handles prefix match + allocation + extension
 
@@ -197,6 +202,7 @@ A/B testing, and debugging. Resolved once per process (immutable at runtime).
 | `ZEDINFER_MOE_GPU_SLOTS` | Force MoE ExpertPool strategy: `>= num_experts` → ALL_GPU, else N PINNED_LRU slots/layer |
 | `ZEDINFER_MOE_VRAM_FRACTION` | Auto MoE sizing only: fraction of current util-aware headroom experts may use; default `0.40` |
 | `ZEDINFER_MOE_RESERVE_MB` | Auto MoE sizing only: MiB of current util-aware headroom reserved away from expert slots for non-expert weights, KV, activations, and scratch |
+| `ZEDINFER_MAX_CONCURRENT` | Hybrid models (Qwen3.5-family) only: max concurrent requests = SSMStatePool slot count. Default `4`; each slot costs one per-sequence SSM/conv state (tens of MB on 35B). Clamped to `[1, 256]` |
 | `ZEDINFER_REPETITION_PENALTY` | Override the repetition penalty from `generation_config.json` |
 | `ZEDINFER_GPTQ_ZEROPOINT` | Override auto-detected GPTQ zero-point (debug GPTQ checkpoints) |
 | `ZEDINFER_MTP_SPEC` | Enable MTP speculative decoding (active spec mode), same as `--mtp` |

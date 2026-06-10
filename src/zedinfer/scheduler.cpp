@@ -265,6 +265,17 @@ void Scheduler::allocate_blocks_for_request(InferenceRequest* req) {
 }
 
 ScheduledBatch Scheduler::schedule() {
+    // Hybrid models (Qwen3.5-family) run one request per forward — the linear-
+    // attention layers carry per-sequence recurrent state in a dedicated SSM
+    // slot and there is no fused multi-sequence kernel yet. A multi-request batch
+    // here would desync the single-row logits the hybrid forward returns from the
+    // multi-row slicing process_results performs. Route to the single-request,
+    // round-robin scheduler so concurrent requests interleave fairly instead of
+    // serializing FIFO behind one SSM slot.
+    if (ssm_state_pool_ != nullptr) {
+        return schedule_hybrid_single();
+    }
+
     ScheduledBatch batch;
     int token_budget = config_.max_batch_tokens;
     bool completed_active = false;
@@ -379,6 +390,126 @@ ScheduledBatch Scheduler::schedule() {
         }
     }
 
+    return batch;
+}
+
+ScheduledBatch Scheduler::schedule_hybrid_single() {
+    ScheduledBatch batch;
+    std::lock_guard<std::mutex> lock(submit_mutex_);
+
+    // Defensive: drop any active request already marked COMPLETE (process_results
+    // normally erases them under the same lock).
+    active_requests_.erase(std::remove_if(active_requests_.begin(), active_requests_.end(),
+                                          [](const auto& ptr) { return ptr->phase == RequestPhase::COMPLETE; }),
+                           active_requests_.end());
+
+    const int num_active = static_cast<int>(active_requests_.size());
+
+    // A request mid-prefill sits at the front of the waiting queue and already
+    // owns its SSM slot + KV blocks; it must keep receiving prefill chunks until
+    // it transitions to the active (decode) set.
+    const bool front_in_progress = !waiting_queue_.empty() && waiting_queue_.front()->phase == RequestPhase::PREFILL;
+
+    // Otherwise we may start a brand-new head request when an SSM slot is free.
+    bool can_start_new = false;
+    if (!front_in_progress && !waiting_queue_.empty() && num_active < config_.max_batch_requests) {
+        auto* head = waiting_queue_.front().get();
+        can_start_new = can_admit(*head);
+        if (!can_start_new) {
+            if (!head->admission_warned) {
+                LOGW << "[Scheduler] Cannot admit request " << head->request_id
+                     << " yet (prompt=" << head->input_ids.size()
+                     << " tokens, available=" << (block_allocator_ ? block_allocator_->available_blocks() : -1) << ")";
+                head->admission_warned = true;
+            }
+            // Nothing else is running and it still does not fit: it never will,
+            // so fail it instead of hanging the client forever. When other
+            // requests are active the shortfall may be transient (they hold the
+            // blocks/slot), so we just wait and retry on a later step.
+            if (num_active == 0) {
+                std::string error_msg = "Cannot admit request " + std::to_string(head->request_id) + ": prompt="
+                                      + std::to_string(head->input_ids.size()) + " tokens exceeds available capacity";
+                LOGE << "[Scheduler] Failing queued request: " << error_msg;
+                auto failed = std::move(waiting_queue_.front());
+                waiting_queue_.pop_front();
+                fail_queued_request(std::move(failed), "[Scheduler] " + error_msg);
+            }
+        }
+    }
+
+    const bool has_prefill_unit = front_in_progress || can_start_new;
+    const int num_units = num_active + (has_prefill_unit ? 1 : 0);
+    if (num_units == 0) {
+        return batch; // nothing runnable this step
+    }
+
+    // Round-robin one unit of work per step: units [0, num_active) decode an
+    // active request; the last unit (when present) advances the head prefill.
+    const int pick = static_cast<int>(rr_cursor_ % static_cast<uint64_t>(num_units));
+    ++rr_cursor_;
+
+    if (pick < num_active) {
+        // Decode unit: extend KV by one token (two when an MTP draft is pending),
+        // mirroring the multi-request path's exhaustion + MTP-fallback handling.
+        auto* req = active_requests_[pick].get();
+        int decode_tokens = (req->mtp_pending_draft >= 0) ? 2 : 1;
+        if (block_allocator_) {
+            try {
+                block_allocator_->ensure_blocks(req->block_table(), req->block_table().seq_len + decode_tokens);
+            } catch (const std::exception& e) {
+                bool recovered = false;
+                if (decode_tokens > 1) {
+                    req->mtp_pending_draft = -1;
+                    req->mtp_draft_q.clear();
+                    try {
+                        block_allocator_->ensure_blocks(req->block_table(), req->block_table().seq_len + 1);
+                        decode_tokens = 1;
+                        recovered = true;
+                    } catch (const std::exception&) {}
+                }
+                if (!recovered) {
+                    std::string error_msg = "KV cache exhausted during decode for request "
+                                          + std::to_string(req->request_id) + ": " + e.what();
+                    LOGE << "[Scheduler] " << error_msg;
+                    fail_active_request(*req, "[Scheduler] " + error_msg);
+                    active_requests_.erase(active_requests_.begin() + pick);
+                    return batch; // empty; step() no-ops and the loop retries
+                }
+            }
+        }
+        batch.decode_requests.push_back(req);
+        return batch;
+    }
+
+    // Prefill unit: advance the head waiting request by one chunk.
+    auto* req = waiting_queue_.front().get();
+    if (req->phase != RequestPhase::PREFILL) {
+        // First admission: grab the SSM slot + KV blocks (idempotent on re-entry).
+        try {
+            allocate_blocks_for_request(req);
+        } catch (const std::exception& e) {
+            std::string error_msg
+                = "Cannot allocate KV cache for request " + std::to_string(req->request_id) + ": " + e.what();
+            LOGE << "[Scheduler] Failing queued request: " << error_msg;
+            auto failed = std::move(waiting_queue_.front());
+            waiting_queue_.pop_front();
+            fail_queued_request(std::move(failed), "[Scheduler] " + error_msg);
+            return batch;
+        }
+    }
+
+    const int remaining = static_cast<int>(req->input_ids.size()) - req->prefill_progress;
+    const int chunk = std::min(remaining, config_.max_prefill_tokens);
+    batch.prefill_requests.push_back(req);
+    batch.prefill_chunk_starts.push_back(req->prefill_progress);
+    batch.prefill_chunk_sizes.push_back(chunk);
+    req->prefill_progress += chunk;
+    req->phase = RequestPhase::PREFILL;
+
+    if (req->prefill_progress >= static_cast<int>(req->input_ids.size())) {
+        active_requests_.push_back(std::move(waiting_queue_.front()));
+        waiting_queue_.pop_front();
+    }
     return batch;
 }
 
