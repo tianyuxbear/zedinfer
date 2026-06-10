@@ -225,7 +225,7 @@ class ModelLoadProgress {
 public:
     ModelLoadProgress() : enabled_(should_render_load_progress()) {}
 
-    void begin_stage(const std::string& label, size_t total_steps, LoadProgressColor color) {
+    void begin_stage(const std::string& title, size_t total_steps, LoadProgressColor color) {
         finish_stage();
 
         stage_total_ = clamp_progress_value(std::max<size_t>(total_steps, 1));
@@ -234,8 +234,8 @@ public:
             return;
         }
 
-        std::cout << label << std::endl;
-        bar_ = std::make_unique<termbar::ProgressBar>(static_cast<int>(stage_total_), to_termbar_color(color));
+        bar_ = std::make_unique<termbar::ProgressBar>(static_cast<int>(stage_total_), to_termbar_color(color), title,
+                                                      true);
         bar_->update(0);
     }
 
@@ -1015,7 +1015,7 @@ std::unique_ptr<ModelWeights> Model::load_weights(const std::string& model_path,
         }
         if (shard_total != total) {
             shard_total = total;
-            progress.begin_stage("Loading safetensor shards...", total, LoadProgressColor::Blue);
+            progress.begin_stage("[1/3 Load shards]", total, LoadProgressColor::Blue);
         }
         progress.update(current);
     });
@@ -1033,7 +1033,7 @@ std::unique_ptr<ModelWeights> Model::load_weights(const std::string& model_path,
     auto convert_start = std::chrono::high_resolution_clock::now();
     auto tensor_names = loader->get_all_tensor_names();
 
-    progress.begin_stage("Indexing tensors...", tensor_names.size(), LoadProgressColor::Blue);
+    progress.begin_stage("[2/3 Index tensors]", tensor_names.size(), LoadProgressColor::Blue);
 
     for (const auto& raw_name : tensor_names) {
         std::string mapped_name = map_weight_name(raw_name);
@@ -1120,7 +1120,7 @@ std::unique_ptr<ModelWeights> Model::load_weights(const std::string& model_path,
         }
     }
 
-    progress.begin_stage("Preparing model weights...", materialize_total, LoadProgressColor::Blue);
+    progress.begin_stage("[3/3 Prepare weights]", materialize_total, LoadProgressColor::Blue);
 
     // Materialize a tensor in CPU pinned memory by copying from its mmap source.
     // On NVIDIA runtime, Tensor::create(..., CPU, 0) goes through cudaMallocHost, so
