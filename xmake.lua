@@ -13,6 +13,45 @@ end
 -- Generate compile_commands.json for Clangd support
 add_rules("plugin.compile_commands.autoupdate", {outputdir = "build"})
 
+local function zedinfer_trim(s)
+    return s and s:trim() or nil
+end
+
+local function zedinfer_first_line(s)
+    if not s or s == "" then
+        return nil
+    end
+    return s:match("([^\r\n]+)")
+end
+
+local function zedinfer_c_string(s)
+    s = tostring(s or "unknown")
+    s = s:gsub("\\", "\\\\")
+    s = s:gsub("\"", "\\\"")
+    return s
+end
+
+local function zedinfer_build_version(git)
+    local git_hash = git({"rev-parse", "--short", "HEAD"}) or os.getenv("ZEDINFER_GIT_HASH") or "unknown"
+    local tag = zedinfer_first_line(git({"tag", "--points-at", "HEAD", "--sort=-version:refname"}))
+    local base = tag or git_hash
+    if base == "unknown" and os.getenv("ZEDINFER_VERSION") then
+        base = os.getenv("ZEDINFER_VERSION")
+    end
+
+    local dirty = false
+    if git({"rev-parse", "--is-inside-work-tree"}) == "true" then
+        local status = git({"status", "--porcelain"})
+        dirty = status ~= nil and status ~= ""
+    end
+
+    if dirty then
+        base = base .. "-dirty"
+    end
+
+    return base, git_hash, os.date("%Y-%m-%d")
+end
+
 -- Include directories
 add_includedirs("include")
 
@@ -174,18 +213,17 @@ target("zedinfer")
     -- static-link order (models is downstream of zedinfer in -l flags).
     add_files("src/zedinfer/*.cpp|chat_template_jinja.cpp")
 
-    -- Inject git hash and build date as compile-time defines.
-    -- Propagated to all dependent binaries (serve, bench, etc.) via {public = true}.
-    -- Priority: git command > ZEDINFER_GIT_HASH env var > "unknown" fallback in version.hpp.
+    -- Inject build identity as compile-time defines.
+    -- If HEAD has a tag and the worktree is clean, the version is that tag.
+    -- Otherwise it is the short commit hash. Dirty worktrees append "-dirty".
     on_config(function (target)
-        local git_hash = try {
-    function() return os.iorunv("git", {"rev-parse", "--short", "HEAD"}) end }
-        if git_hash then
-            target:add("defines", 'ZEDINFER_GIT_HASH="' .. git_hash:trim() .. '"', {public = true})
-        elseif os.getenv("ZEDINFER_GIT_HASH") then
-            target:add("defines", 'ZEDINFER_GIT_HASH="' .. os.getenv("ZEDINFER_GIT_HASH") .. '"', {public = true})
+        local function git(args)
+            return zedinfer_trim(try { function() return os.iorunv("git", args) end })
         end
-        target:add("defines", 'ZEDINFER_BUILD_DATE="' .. os.date("%Y-%m-%d") .. '"', {public = true})
+        local version, git_hash, build_date = zedinfer_build_version(git)
+        target:add("defines", 'ZEDINFER_VERSION="' .. zedinfer_c_string(version) .. '"', {public = true})
+        target:add("defines", 'ZEDINFER_GIT_HASH="' .. zedinfer_c_string(git_hash) .. '"', {public = true})
+        target:add("defines", 'ZEDINFER_BUILD_DATE="' .. zedinfer_c_string(build_date) .. '"', {public = true})
     end)
 
     on_install(function (target) end)

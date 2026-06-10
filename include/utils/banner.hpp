@@ -1,5 +1,7 @@
 #pragma once
 
+#include "zedinfer/version.hpp"
+
 #include <cstdio>
 #include <iostream>
 
@@ -52,6 +54,7 @@ inline void printZedInferBanner(std::ostream& os = std::cout) {
 
     os << '\n';
     for (const auto& line : lines) { os << white << line.zed << blue << line.infer << reset << '\n'; }
+    os << "\n" << blue << "Version: " << white << ZEDINFER_VERSION << reset << '\n';
     os << std::endl;
 }
 

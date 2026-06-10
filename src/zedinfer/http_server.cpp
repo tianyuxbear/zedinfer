@@ -5,6 +5,7 @@
 #include "zedinfer/engine.hpp"
 #include "zedinfer/multimodal_positions.hpp"
 #include "zedinfer/request.hpp"
+#include "zedinfer/version.hpp"
 
 #include <nlohmann/json.hpp>
 #include <plog/Log.h>
@@ -765,6 +766,7 @@ HttpServer::HttpServer(ServerConfig config, std::shared_ptr<InferenceEngine> eng
                  [this](const httplib::Request& req, httplib::Response& res) { handle_tokenize(req, res); });
     server_.Post("/detokenize",
                  [this](const httplib::Request& req, httplib::Response& res) { handle_detokenize(req, res); });
+    server_.Get("/version", [this](const httplib::Request& req, httplib::Response& res) { handle_version(req, res); });
 
     // Static files from cache
     server_.Get("/(.*)", [this](const httplib::Request& req, httplib::Response& res) {
@@ -791,6 +793,14 @@ void HttpServer::start() {
 
 void HttpServer::stop() {
     server_.stop();
+}
+
+// ============================================================================
+// GET /version
+// ============================================================================
+
+void HttpServer::handle_version(const httplib::Request&, httplib::Response& res) {
+    res.set_content(json{{"version", ZEDINFER_VERSION}}.dump(), "application/json");
 }
 
 // ============================================================================

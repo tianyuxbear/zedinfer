@@ -5,6 +5,7 @@
 #include "zedinfer.h"
 #include "zedinfer/engine.hpp"
 #include "zedinfer/scheduler.hpp"
+#include "zedinfer/version.hpp"
 
 #include <argparse/argparse.hpp>
 #include <nlohmann/json.hpp>
@@ -180,7 +181,7 @@ void maybe_write_csv(const std::string& csv_path, const std::string& model_tag, 
 } // namespace
 
 int main(int argc, char* argv[]) {
-    argparse::ArgumentParser program("ZedInfer PPL");
+    argparse::ArgumentParser program("ZedInfer PPL", ZEDINFER_VERSION);
 
     program.add_argument("model_path").help("Path to model directory");
 

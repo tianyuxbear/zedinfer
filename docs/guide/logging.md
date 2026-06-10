@@ -104,7 +104,7 @@ Files never contain ANSI color escapes.
 
 CLI tools print the shared ZedInfer banner during startup after logging is initialized and before model/server work begins.
 
-The banner is intentionally written to stdout instead of the logger. It is a startup marker, not a log record. When stdout is a TTY, the `Zed` part is white and the `Infer` part is blue. A blank line is printed before the banner.
+The banner is intentionally written to stdout instead of the logger. It is a startup marker, not a log record. When stdout is a TTY, the `Zed` part is white and the `Infer` part is blue. A blank line is printed before the banner, and the resolved build version is printed below it.
 
 The previous CPU instruction set and thread runtime dump is not printed by default.
 

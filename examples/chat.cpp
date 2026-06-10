@@ -31,8 +31,7 @@ static void print_welcome() {
 }
 
 int main(int argc, char* argv[]) {
-    argparse::ArgumentParser program("ZedInfer Chat", std::string("zedinfer ") + ZEDINFER_VERSION + " (build "
-                                                          + ZEDINFER_GIT_HASH + ", " + ZEDINFER_BUILD_DATE + ")");
+    argparse::ArgumentParser program("ZedInfer Chat", ZEDINFER_VERSION);
 
     program.add_argument("model_path").help("Path to the model directory");
 

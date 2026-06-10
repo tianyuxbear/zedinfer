@@ -152,6 +152,20 @@ curl http://localhost:8080/v1/models
 
 ---
 
+## GET /version
+
+Return the ZedInfer server version.
+
+```bash
+curl http://localhost:8080/version
+```
+
+```json
+{"version": "5f2bf90"}
+```
+
+---
+
 ## GET /health
 
 Health check endpoint. Returns model status, request counts, and KV cache utilization.

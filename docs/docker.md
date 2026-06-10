@@ -256,6 +256,14 @@ Health check. Returns model name, request counts, block pool utilization.
 curl http://localhost:8080/health
 ```
 
+### `GET /version`
+
+Return the ZedInfer server version.
+
+```bash
+curl http://localhost:8080/version
+```
+
 ### `DELETE /v1/sessions/:id`
 
 Delete a stateful session and release its KV cache.

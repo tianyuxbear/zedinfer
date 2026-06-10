@@ -31,8 +31,7 @@ static void signal_handler(int) {
 }
 
 int main(int argc, char* argv[]) {
-    argparse::ArgumentParser program("ZedInfer Server", std::string("zedinfer ") + ZEDINFER_VERSION + " (build "
-                                                            + ZEDINFER_GIT_HASH + ", " + ZEDINFER_BUILD_DATE + ")");
+    argparse::ArgumentParser program("ZedInfer Server", ZEDINFER_VERSION);
 
     program.add_argument("model_path").help("Path to the model directory");
 
