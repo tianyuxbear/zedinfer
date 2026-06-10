@@ -86,7 +86,7 @@ docker run --gpus all -it -v /path/to/models:/models \
 |----------|---------|-------------|
 | `--max-tokens` | `0` | Max tokens per response (`0` = unlimited) |
 
-In-session commands: `exit`/`quit`/`q` to exit, `reset`/`clear` to reset conversation.
+In-session commands: `/exit`/`/quit`/`/q` to exit, `/reset`/`/clear`/`/cls` to reset conversation, `/help` to show help.
 
 !!! note
     Requires `-it` (interactive + tty) for terminal input.

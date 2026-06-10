@@ -24,9 +24,9 @@ static void print_welcome() {
     printf("========================================\n");
     printf("\n");
     printf("Commands:\n");
-    printf("  exit, quit, q      Exit\n");
-    printf("  reset, clear       Clear conversation\n");
-    printf("  help               Show this message\n");
+    printf("  /exit, /quit, /q        Exit\n");
+    printf("  /reset, /clear, /cls    Clear conversation\n");
+    printf("  /help                   Show this message\n");
     printf("\n");
 }
 
@@ -133,20 +133,22 @@ int main(int argc, char* argv[]) {
         }
 
         // Commands
-        std::string cmd = user_input;
-        std::transform(cmd.begin(), cmd.end(), cmd.begin(), ::tolower);
+        if (user_input.front() == '/') {
+            std::string cmd = user_input.substr(1);
+            std::transform(cmd.begin(), cmd.end(), cmd.begin(), ::tolower);
 
-        if (cmd == "exit" || cmd == "quit" || cmd == "q") {
-            break;
-        }
-        if (cmd == "reset" || cmd == "clear" || cmd == "cls") {
-            session->reset();
-            printf("Conversation cleared.\n");
-            continue;
-        }
-        if (cmd == "help") {
-            print_welcome();
-            continue;
+            if (cmd == "exit" || cmd == "quit" || cmd == "q") {
+                break;
+            }
+            if (cmd == "reset" || cmd == "clear" || cmd == "cls") {
+                session->reset();
+                printf("Conversation cleared.\n");
+                continue;
+            }
+            if (cmd == "help") {
+                print_welcome();
+                continue;
+            }
         }
 
         // Generate
