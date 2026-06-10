@@ -175,6 +175,10 @@ ZEDINFER_DISABLE_FLASHINFER=1 xmake run bench /path/to/model --nvidia -p 128 -d 
 
 `ZEDINFER_DISABLE_FLASHINFER=1` 会在运行时强制回退到原有 paged attention kernel。`ZEDINFER_FLASHINFER_DISABLE_FASTPATH=1` 会关闭 FlashInfer 包装层内部的单请求 decode fast path，便于调试 planner 路径。
 
+### 日志
+
+所有 CLI 工具都支持统一日志参数，包括 `--log-level`、`--log-file`、`--log-to-console`、`--log-append` 和 `--log-overwrite`。日志等级、stdout/stderr 路由、文件行为、启动字符画和开发规范见 [docs/guide/logging.md](docs/guide/logging.md)。
+
 ---
 
 ## 🧪 测试
@@ -292,6 +296,7 @@ zedinfer/
 ├── docs/
 │   ├── architecture.md              # 当前系统架构
 │   ├── guide/flashinfer.md          # FlashInfer 后端接入说明
+│   ├── guide/logging.md             # 日志行为与开发规范
 │   ├── roadmap.md                   # 状态 + 未来规划
 │   └── plan/                        # 待实现特性的设计文档
 ├── xmake.lua                        # 构建配置

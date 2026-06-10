@@ -4,6 +4,14 @@ ZedInfer ships 5 binaries in the Docker image. Override the entrypoint to run to
 
 ---
 
+## Shared logging
+
+All CLI tools support `--log-level`, `--log-file`, `--log-to-console`, `--no-log-to-console`, `--log-append`, and `--log-overwrite`. Logs are mirrored to stdout/stderr by default, except for interactive `chat`, where console logs are disabled to avoid interleaving with prompts and streamed output.
+
+See the [Logging Guide](logging.md) for routing, file behavior, color formatting, startup banner behavior, and developer rules.
+
+---
+
 ## serve (default)
 
 HTTP server with Web UI. This is the default entrypoint.
@@ -99,8 +107,6 @@ docker run --gpus all -v /path/to/models:/models \
 |----------|---------|-------------|
 | `--prompt` | `"Who are you?"` | Prompt text |
 | `--max-new-tokens`, `--max-tokens` | `0` | Max tokens to generate (`0` = unlimited) |
-
----
 
 ## Version
 

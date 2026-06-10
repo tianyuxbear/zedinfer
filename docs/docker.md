@@ -104,6 +104,21 @@ docker run --gpus all -p 8080:8080 \
 | `--gpu-memory-utilization` | `0.9` | Fraction of GPU memory for KV cache (0.0–1.0) |
 | `--max-tokens` | `0` | Default max response tokens when API requests omit `max_tokens` (`0` = unlimited) |
 
+### Logging
+
+`serve` writes logs to both a file and stdout/stderr by default, so `docker logs` captures server logs without mounting the log directory. Warning, error, and fatal logs go to stderr; info, debug, and verbose logs go to stdout.
+
+Common options:
+
+```bash
+docker run --gpus all -p 8080:8080 \
+    -v /path/to/models:/models \
+    zedinfer:latest /models/Qwen3-8B --nvidia \
+    --log-level info --log-file /tmp/zedinfer/serve.log --log-append
+```
+
+For the full logging contract and developer rules, see [guide/logging.md](guide/logging.md).
+
 ### Examples
 
 ```bash

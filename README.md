@@ -175,6 +175,10 @@ ZEDINFER_DISABLE_FLASHINFER=1 xmake run bench /path/to/model --nvidia -p 128 -d 
 
 `ZEDINFER_DISABLE_FLASHINFER=1` keeps the build unchanged but forces the runtime back to the legacy paged-attention kernels. `ZEDINFER_FLASHINFER_DISABLE_FASTPATH=1` disables the single-request decode fast path inside the FlashInfer wrapper for planner-path debugging.
 
+### Logging
+
+All CLI tools support shared logging options such as `--log-level`, `--log-file`, `--log-to-console`, `--log-append`, and `--log-overwrite`. For the logging contract, stdout/stderr routing, file behavior, banner policy, and developer rules, see [docs/guide/logging.md](docs/guide/logging.md).
+
 ---
 
 ## 🧪 Test
@@ -292,6 +296,7 @@ zedinfer/
 ├── docs/
 │   ├── architecture.md              # Current system design
 │   ├── guide/flashinfer.md          # FlashInfer backend integration notes
+│   ├── guide/logging.md             # Logging behavior and developer rules
 │   ├── roadmap.md                   # Status + future plans
 │   └── plan/                        # Design docs for upcoming features
 ├── xmake.lua                        # Build configuration

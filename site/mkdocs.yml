@@ -60,6 +60,7 @@ nav:
     - Quick Start: guide/quickstart.md
     - API Reference: guide/api.md
     - CLI Tools: guide/cli.md
+    - Logging: guide/logging.md
     - Supported Models: guide/models.md
   - Architecture:
     - Overview: architecture/overview.md
