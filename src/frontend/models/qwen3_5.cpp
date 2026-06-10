@@ -67,13 +67,17 @@ void reorder_q_proj_weight(tensor_t w, int Hq, int Dh, int hidden) {
     api->memcpy_sync(w->data(), reord.data(), N * sizeof(uint16_t), ZEDINFER_MEMCPY_H2D);
 }
 
+static float bf16_bits_to_f32(uint16_t bits) {
+    uint32_t u = static_cast<uint32_t>(bits) << 16;
+    float f = 0.0f;
+    std::memcpy(&f, &u, sizeof(f));
+    return f;
+}
+
 // Replace an fp32 weight tensor with a freshly-allocated bf16 tensor of the
 // same shape, holding the truncate-to-bf16 conversion of the original values.
 // The new tensor is registered back into ModelWeights under the same key so
-// every later W(name) lookup transparently sees bf16. Used to pre-bake
-// linear_attn.norm.weight (stored fp32 per mamba_ssm_dtype, but rms_norm
-// requires same-dtype activations) once at load time so the forward path
-// doesn't do D2H+H2D every linear-attention layer every decode step.
+// every later W(name) lookup transparently sees bf16.
 void cast_fp32_weight_to_bf16(ModelWeights& weights, const std::string& name) {
     if (!weights.has_tensor(name)) {
         return;
@@ -100,11 +104,64 @@ void cast_fp32_weight_to_bf16(ModelWeights& weights, const std::string& name) {
     weights.add_tensor(name, replacement);
 }
 
+// Replace a bf16 weight tensor with a freshly-allocated fp32 tensor. GDN kernels
+// consume A_log as float* because the decay exponent is sensitive and older
+// Qwen3.5 releases stored this weight as fp32. Qwen3.6 bf16 releases store A_log
+// as BF16, so normalize the storage at load time.
+void cast_bf16_weight_to_f32(ModelWeights& weights, const std::string& name) {
+    if (!weights.has_tensor(name)) {
+        return;
+    }
+    tensor_t orig = weights.get_tensor(name);
+    if (!orig || orig->dtype() != ZEDINFER_DTYPE_BF16) {
+        return;
+    }
+
+    const size_t W = orig->numel();
+    auto* api = device::getRuntimeAPI(orig->deviceType());
+
+    std::vector<uint16_t> host_bf16(W);
+    std::vector<float> host_f32(W);
+    api->memcpy_sync(host_bf16.data(), orig->data(), W * sizeof(uint16_t), ZEDINFER_MEMCPY_D2H);
+    for (size_t i = 0; i < W; ++i) { host_f32[i] = bf16_bits_to_f32(host_bf16[i]); }
+
+    auto replacement = Tensor::create(orig->shape(), ZEDINFER_DTYPE_F32, orig->deviceType(), orig->deviceId());
+    api->memcpy_sync(replacement->data(), host_f32.data(), W * sizeof(float), ZEDINFER_MEMCPY_H2D);
+    weights.add_tensor(name, replacement);
+}
+
+// Walk linear-attention layers and convert A_log from bf16 to fp32 when needed.
+// The GDN kernels read this tensor as float*, so leaving a bf16 checkpoint tensor
+// in place corrupts the per-head decay and destabilizes long generation.
+void fixup_qwen3_5_linear_attn_A_log_weights(ModelWeights& weights, const Qwen3_5Config& cfg) {
+    int converted = 0;
+    int already_f32 = 0;
+    for (size_t L = 0; L < cfg.layer_types.size(); ++L) {
+        if (cfg.layer_types[L] != "linear_attention") {
+            continue;
+        }
+        const std::string name = "layers." + std::to_string(L) + ".linear_attn.A_log";
+        if (!weights.has_tensor(name)) {
+            continue;
+        }
+        tensor_t w = weights.get_tensor(name);
+        if (w->dtype() == ZEDINFER_DTYPE_BF16) {
+            cast_bf16_weight_to_f32(weights, name);
+            ++converted;
+        } else if (w->dtype() == ZEDINFER_DTYPE_F32) {
+            ++already_f32;
+        } else {
+            throw std::runtime_error("[Qwen3_5Model] " + name + " must be bf16 or fp32, got dtype "
+                                     + std::to_string(static_cast<int>(w->dtype())));
+        }
+    }
+    LOGI.printf("[Qwen3_5Model] Normalized linear_attn.A_log tensors to fp32: converted=%d already_f32=%d", converted,
+                already_f32);
+}
+
 // Walk linear-attention layers and convert their .norm.weight tensors from
-// fp32 to bf16 once. The on-disk dtype is fp32 per `mamba_ssm_dtype=float32`,
-// but ops::rms_norm requires the weight to match the activation dtype (bf16).
-// Doing this cast once at load saves a D2H+H2D pair per decode step per
-// linear-attention layer (30 layers × 2 syncs = ~2 ms / token on Qwen3.5).
+// fp32 to bf16 once when needed. ops::rms_norm requires the weight to match the
+// activation dtype (bf16); some releases already store this tensor as bf16.
 void fixup_qwen3_5_linear_attn_norm_weights(ModelWeights& weights, const Qwen3_5Config& cfg) {
     int count = 0;
     for (size_t L = 0; L < cfg.layer_types.size(); ++L) {
@@ -156,9 +213,13 @@ Qwen3_5Model::Qwen3_5Model(Qwen3_5Config config, std::unique_ptr<ModelWeights> w
     // HF [q_h0, g_h0, q_h1, g_h1, ...] per-head interleaving).
     fixup_qwen3_5_q_proj_weights(*weights_, config_);
 
-    // Pre-cast linear_attn.norm.weight (stored as fp32) to bf16 so the rms_norm
-    // dtype check inside forward_linear_attn_layer is satisfied without a
-    // per-call D2H+H2D pair per linear-attention layer.
+    // GDN kernels consume A_log as fp32. Qwen3.6 bf16 checkpoints store it as
+    // BF16, so promote it once at load to preserve the kernel contract.
+    fixup_qwen3_5_linear_attn_A_log_weights(*weights_, config_);
+
+    // Pre-cast linear_attn.norm.weight to bf16 when the checkpoint stores it as
+    // fp32, so the rms_norm dtype check inside forward_linear_attn_layer is
+    // satisfied without a per-call cast.
     fixup_qwen3_5_linear_attn_norm_weights(*weights_, config_);
 
     // Count linear-attention layers and compute the QKV concat width used by
