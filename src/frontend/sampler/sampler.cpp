@@ -1,15 +1,16 @@
 #include "frontend/sampler/sampler.hpp"
 #include "backend/core/context/context.hpp"
 #include "backend/ops/ops.hpp"
+#include "utils/logging.hpp"
 #include "zedinfer.h"
 #include "zedinfer/activation.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
-#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <iomanip>
 #include <sstream>
 #include <stdexcept>
 #include <utility>
@@ -127,9 +128,12 @@ int ArgmaxSampler::sample(tensor_t logits, const std::vector<int>* /*recent_toke
         for (size_t i = 0; i < vocab; ++i) { idx_val[i] = {static_cast<int>(i), host[i]}; }
         std::partial_sort(idx_val.begin(), idx_val.begin() + 5, idx_val.end(),
                           [](const auto& a, const auto& b) { return a.second > b.second; });
-        fprintf(stderr, "[zedinfer-logits] chose=%d top5:", chosen);
-        for (int k = 0; k < 5; ++k) { fprintf(stderr, " #%d=%d(logit=%.4f)", k, idx_val[k].first, idx_val[k].second); }
-        fprintf(stderr, "\n");
+        std::ostringstream oss;
+        oss << "[zedinfer-logits] chose=" << chosen << " top5:" << std::fixed << std::setprecision(4);
+        for (int k = 0; k < 5; ++k) {
+            oss << " #" << k << "=" << idx_val[k].first << "(logit=" << idx_val[k].second << ")";
+        }
+        LOGI << oss.str();
     }
 
     return chosen;

@@ -12,7 +12,6 @@
 #include "zedinfer/engine.hpp"
 
 #include <chrono>
-#include <cstdio>
 #include <cstdlib>
 #include <exception>
 #include <plog/Log.h>
@@ -354,8 +353,8 @@ bool ServingLoop::step() {
                             }
                         }
                         if (mtp_debug_env) {
-                            fprintf(stderr, "[MTP-debug] main_token=%d  mtp_top1=%lld\n", req->last_token,
-                                    (long long)mtp_top1);
+                            LOGI.printf("[MTP-debug] main_token=%d mtp_top1=%lld", req->last_token,
+                                        static_cast<long long>(mtp_top1));
                         }
                     }
                 }

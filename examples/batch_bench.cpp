@@ -1,7 +1,7 @@
 #include "backend/device/device.hpp"
-#include "utils/logging.hpp"
+#include "utils/banner.hpp"
+#include "utils/logging_cli.hpp"
 #include "utils/random.hpp"
-#include "utils/system_info.hpp"
 #include "zedinfer.h"
 #include "zedinfer/engine.hpp"
 #include "zedinfer/request.hpp"
@@ -57,6 +57,8 @@ int main(int argc, char* argv[]) {
         .default_value(0)
         .scan<'i', int>();
 
+    utils::addLoggingArguments(program, "logs/batch_bench.log");
+
     try {
         program.parse_args(argc, argv);
     } catch (const std::exception& err) {
@@ -65,8 +67,13 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    utils::initLoggerWithOverwrite(plog::verbose, "logs/batch_bench.log");
-    LOG_VERBOSE_(utils::BOTH) << utils::get_runtime_info();
+    try {
+        utils::initLoggerFromArguments(program);
+    } catch (const std::exception& err) {
+        std::cerr << err.what() << std::endl;
+        return 1;
+    }
+    utils::printZedInferBanner();
 
     auto model_path = program.get<std::string>("model_path");
     int batch_size = program.get<int>("--batch-size");

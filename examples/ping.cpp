@@ -1,6 +1,6 @@
 #include "backend/device/device.hpp"
-#include "utils/logging.hpp"
-#include "utils/system_info.hpp"
+#include "utils/banner.hpp"
+#include "utils/logging_cli.hpp"
 #include "zedinfer.h"
 #include "zedinfer/chat_template_jinja.hpp"
 #include "zedinfer/engine.hpp"
@@ -77,6 +77,8 @@ int main(int argc, char* argv[]) {
               "stateless full prefill.")
         .default_value(std::string(""));
 
+    utils::addLoggingArguments(program, "logs/ping.log");
+
     try {
         program.parse_args(argc, argv);
     } catch (const std::exception& err) {
@@ -85,8 +87,13 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    utils::initLoggerWithOverwrite(plog::verbose, "logs/ping.log");
-    LOG_VERBOSE_(utils::BOTH) << utils::get_runtime_info();
+    try {
+        utils::initLoggerFromArguments(program);
+    } catch (const std::exception& err) {
+        std::cerr << err.what() << std::endl;
+        return 1;
+    }
+    utils::printZedInferBanner();
 
     auto model_path = program.get<std::string>("model_path");
     bool use_nvidia = program.get<bool>("--nvidia");
@@ -105,7 +112,7 @@ int main(int argc, char* argv[]) {
     sched_config.mtp_enabled = program.get<bool>("--mtp");
     if (const char* env = std::getenv("ZEDINFER_KV_BLOCK_SIZE")) {
         sched_config.kv_block_size = std::atoi(env);
-        printf("[ping] Using kv_block_size=%d from env\n", sched_config.kv_block_size);
+        LOGI << "[ping] Using kv_block_size=" << sched_config.kv_block_size << " from env";
     }
 
     auto t0 = std::chrono::high_resolution_clock::now();
@@ -117,19 +124,18 @@ int main(int argc, char* argv[]) {
         // Qwen3.5 currently throws "not implemented until M1" from forward_config(),
         // which engine init invokes for KV/scratch sizing. Treat this as a clean WIP exit.
         if (msg.find("not implemented until M1") != std::string::npos) {
-            std::cout << "[ping] Qwen3.5 forward path is M1 work-in-progress; exiting clean.\n"
-                      << "       Detail: " << msg << "\n";
+            LOGW << "[ping] Qwen3.5 forward path is M1 work-in-progress; exiting clean. Detail: " << msg;
             return 0;
         }
-        std::cerr << "[ping] engine init failed: " << msg << "\n";
-        std::cerr << "       Hint: pinned-host memory or VRAM may be insufficient; try --gpu-memory-utilization 0.5 or "
-                     "a smaller model.\n";
+        LOGE << "[ping] engine init failed: " << msg;
+        LOGE << "[ping] Hint: pinned-host memory or VRAM may be insufficient; try --gpu-memory-utilization 0.5 or a "
+                "smaller model.";
         return 3;
     }
     auto t1 = std::chrono::high_resolution_clock::now();
     auto init_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
 
-    printf("Engine initialized in %ld ms (%s)\n", init_ms, use_nvidia ? "NVIDIA" : "CPU");
+    LOGI << "[ping] Engine initialized in " << init_ms << " ms (" << (use_nvidia ? "NVIDIA" : "CPU") << ")";
 
     GenerationConfig gen_config;
     gen_config.gen_mode = GenerationMode::PING;
@@ -152,21 +158,20 @@ int main(int argc, char* argv[]) {
     // multimodal flow so a future user can compare CLI vs HTTP outputs.
     if (!image_path.empty()) {
         if (!engine->has_vision()) {
-            std::cerr << "[ping] --image was passed but the loaded model has no vision tower. "
-                         "Re-run with a Qwen3.5-VL checkpoint.\n";
+            LOGE << "[ping] --image was passed but the loaded model has no vision tower. Re-run with a Qwen3.5-VL "
+                    "checkpoint.";
             return 4;
         }
         const auto* jinja = engine->chat_template_jinja();
         if (!jinja) {
-            std::cerr << "[ping] --image requires a Jinja chat template in the model directory; "
-                         "none found.\n";
+            LOGE << "[ping] --image requires a Jinja chat template in the model directory; none found.";
             return 4;
         }
 
         // 1. Read image bytes from disk and base64-encode them into a data URI.
         std::ifstream f(image_path, std::ios::binary);
         if (!f.is_open()) {
-            std::cerr << "[ping] failed to open image: " << image_path << "\n";
+            LOGE << "[ping] failed to open image: " << image_path;
             return 4;
         }
         std::ostringstream oss;
@@ -193,7 +198,7 @@ int main(int argc, char* argv[]) {
         try {
             encoded_image = engine->encode_image_data_uri(data_uri);
         } catch (const std::exception& e) {
-            std::cerr << "[ping] vision encode failed: " << e.what() << "\n";
+            LOGE << "[ping] vision encode failed: " << e.what();
             return 4;
         }
 
@@ -219,14 +224,14 @@ int main(int argc, char* argv[]) {
             positions = build_multimodal_position_ids(input_ids, engine->image_pad_token_id(), image_grids);
             input_embeds = engine->build_multimodal_input_embeds(input_ids, image_chunks);
         } catch (const std::exception& e) {
-            std::cerr << "[ping] multimodal prompt preparation failed: " << e.what() << "\n";
+            LOGE << "[ping] multimodal prompt preparation failed: " << e.what();
             return 4;
         }
         try {
             gen_config.max_new_tokens = resolve_max_new_tokens(
                 gen_config.max_new_tokens, static_cast<int>(input_ids.size()), engine->exec_config().max_seq_len);
         } catch (const std::exception& e) {
-            std::cerr << "[ping] " << e.what() << "\n";
+            LOGE << "[ping] " << e.what();
             return 4;
         }
 
@@ -257,7 +262,7 @@ int main(int argc, char* argv[]) {
             } else {
                 std::cout << std::endl;
             }
-        } catch (const std::exception& e) { std::cerr << "[ping] generation failed: " << e.what() << "\n"; }
+        } catch (const std::exception& e) { LOGE << "[ping] generation failed: " << e.what(); }
         engine->serving_loop().stop();
         serving_thread.join();
         return 0;
@@ -269,11 +274,10 @@ int main(int argc, char* argv[]) {
     } catch (const std::exception& err) {
         std::string msg = err.what() ? err.what() : "";
         if (msg.find("not implemented until M1") != std::string::npos) {
-            std::cout << "[ping] Qwen3.5 forward path is M1 work-in-progress; exiting clean.\n"
-                      << "       Detail: " << msg << "\n";
+            LOGW << "[ping] Qwen3.5 forward path is M1 work-in-progress; exiting clean. Detail: " << msg;
             return 0;
         }
-        std::cerr << "[ping] generation failed: " << msg << "\n";
+        LOGE << "[ping] generation failed: " << msg;
         return 2;
     }
 

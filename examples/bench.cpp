@@ -1,7 +1,7 @@
 #include "backend/device/device.hpp"
 #include "plog/Severity.h"
-#include "utils/logging.hpp"
-#include "utils/system_info.hpp"
+#include "utils/banner.hpp"
+#include "utils/logging_cli.hpp"
 #include "zedinfer.h"
 #include "zedinfer/engine.hpp"
 #include "zedinfer/scheduler.hpp"
@@ -58,6 +58,8 @@ int main(int argc, char* argv[]) {
         .default_value(0)
         .scan<'i', int>();
 
+    utils::addLoggingArguments(program, "logs/bench.log");
+
     try {
         program.parse_args(argc, argv);
     } catch (const std::exception& err) {
@@ -66,8 +68,13 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    utils::initLoggerWithOverwrite(plog::verbose, "logs/bench.log");
-    LOG_VERBOSE_(utils::BOTH) << utils::get_runtime_info();
+    try {
+        utils::initLoggerFromArguments(program);
+    } catch (const std::exception& err) {
+        std::cerr << err.what() << std::endl;
+        return 1;
+    }
+    utils::printZedInferBanner();
 
     // 2. Retrieve Arguments
     auto model_path = program.get<std::string>("model_path");
@@ -114,7 +121,7 @@ int main(int argc, char* argv[]) {
     double total_prefill_time = 0.0;
     double total_decode_time = 0.0;
 
-    std::cout << "\n[ZedInfer] Running " << rounds << " rounds of profiling..." << std::endl;
+    LOGI << "Running " << rounds << " rounds of profiling...";
 
     for (int i = 0; i < rounds; ++i) {
         auto res = engine->profiler().profile(prefill_len, decode_len);

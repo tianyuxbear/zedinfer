@@ -1,6 +1,6 @@
 #include "backend/device/device.hpp"
-#include "utils/logging.hpp"
-#include "utils/system_info.hpp"
+#include "utils/banner.hpp"
+#include "utils/logging_cli.hpp"
 #include "zedinfer.h"
 #include "zedinfer/engine.hpp"
 #include "zedinfer/http_server.hpp"
@@ -9,7 +9,6 @@
 #include "zedinfer/version.hpp"
 #include <argparse/argparse.hpp>
 #include <csignal>
-#include <cstdio>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -83,6 +82,8 @@ int main(int argc, char* argv[]) {
               "Empty (default) disables auth.")
         .default_value(std::string(""));
 
+    utils::addLoggingArguments(program, "logs/serve.log");
+
     try {
         program.parse_args(argc, argv);
     } catch (const std::exception& err) {
@@ -91,8 +92,13 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    utils::initLoggerWithOverwrite(plog::info, "logs/serve.log");
-    LOG_VERBOSE_(utils::BOTH) << utils::get_runtime_info();
+    try {
+        utils::initLoggerFromArguments(program);
+    } catch (const std::exception& err) {
+        std::cerr << err.what() << std::endl;
+        return 1;
+    }
+    utils::printZedInferBanner();
 
     auto model_path = program.get<std::string>("model_path");
     auto host = program.get<std::string>("--host");
@@ -139,32 +145,27 @@ int main(int argc, char* argv[]) {
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
 
-    printf("\n========================================\n");
-    printf("  ZedInfer Server\n");
-    printf("  Model: %s\n", engine->model_name().c_str());
+    LOGI << "[Server] Model: " << engine->model_name();
     if (!server_config.served_model_name.empty()) {
-        printf("  Served as: %s\n", server_config.served_model_name.c_str());
+        LOGI << "[Server] Served as: " << server_config.served_model_name;
     }
     if (!server_config.api_key.empty()) {
-        printf("  Auth: Bearer (api-key required)\n");
+        LOGI << "[Server] Auth: Bearer (api-key required)";
     }
-    printf("  Thinking default: %s\n", server_config.default_enable_thinking ? "enabled" : "disabled");
-    printf("  Thinking max tokens: ");
+    LOGI << "[Server] Thinking default: " << (server_config.default_enable_thinking ? "enabled" : "disabled");
     if (server_config.default_max_think_tokens > 0) {
-        printf("%d\n", server_config.default_max_think_tokens);
+        LOGI << "[Server] Thinking max tokens: " << server_config.default_max_think_tokens;
     } else {
-        printf("unlimited\n");
+        LOGI << "[Server] Thinking max tokens: unlimited";
     }
-    printf("  Default max tokens: ");
     if (server_config.default_max_tokens > 0) {
-        printf("%d\n", server_config.default_max_tokens);
+        LOGI << "[Server] Default max tokens: " << server_config.default_max_tokens;
     } else {
-        printf("unlimited\n");
+        LOGI << "[Server] Default max tokens: unlimited";
     }
-    printf("  Listening: http://%s:%d\n", host.c_str(), port);
-    printf("  Web UI: http://%s:%d/\n", host.c_str(), port);
-    printf("  API: http://%s:%d/v1/chat/completions\n", host.c_str(), port);
-    printf("========================================\n\n");
+    LOGI << "[Server] Listening: http://" << host << ":" << port;
+    LOGI << "[Server] Web UI: http://" << host << ":" << port << "/";
+    LOGI << "[Server] API: http://" << host << ":" << port << "/v1/chat/completions";
 
     server.start(); // blocks until stop()
 
@@ -174,6 +175,6 @@ int main(int argc, char* argv[]) {
     g_server = nullptr;
     g_engine = nullptr;
 
-    printf("Server stopped.\n");
+    LOGI << "[Server] Stopped";
     return 0;
 }

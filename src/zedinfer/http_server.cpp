@@ -735,10 +735,14 @@ HttpServer::HttpServer(ServerConfig config, std::shared_ptr<InferenceEngine> eng
 
     // HTTP access logger
     server_.set_logger([](const httplib::Request& req, const httplib::Response& res) {
-        // Only log API calls, not static files
-        if (req.path.find("/v1/") == 0 || req.path == "/health") {
-            LOGI << "[HTTP] " << req.method << " " << req.path << " → " << res.status;
-        }
+        const std::string target = req.target.empty() ? req.path : req.target;
+        const std::string user_agent = req.get_header_value("User-Agent", "-");
+        const std::string content_length = req.get_header_value("Content-Length", "-");
+
+        LOGI << "[HTTP] remote=" << req.remote_addr << ":" << req.remote_port << " local=" << req.local_addr << ":"
+             << req.local_port << " method=" << req.method << " target=\"" << target << "\" version=" << req.version
+             << " status=" << res.status << " bytes=" << res.body.size() << " content_length=" << content_length
+             << " user_agent=\"" << user_agent << "\"";
     });
 
     // API routes

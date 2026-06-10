@@ -9,7 +9,6 @@
 
 #include <algorithm>
 #include <chrono>
-#include <cstdio>
 #include <cstdlib>
 #include <plog/Log.h>
 #include <stdexcept>
@@ -574,8 +573,8 @@ void Scheduler::process_results(ScheduledBatch& batch, tensor_t logits, sampler:
                 t1 = apply_think_budget(req, t1);
 
                 if (dump_token_ids) {
-                    fprintf(stderr, "[zedinfer-tok] step=%d id=%d (spec-accept)\n", req->generated_count, t0);
-                    fprintf(stderr, "[zedinfer-tok] step=%d id=%d (spec-accept+1)\n", req->generated_count + 1, t1);
+                    LOGI.printf("[zedinfer-tok] step=%d id=%d (spec-accept)", req->generated_count, t0);
+                    LOGI.printf("[zedinfer-tok] step=%d id=%d (spec-accept+1)", req->generated_count + 1, t1);
                 }
 
                 req->output_ids.push_back(t0);
@@ -611,8 +610,7 @@ void Scheduler::process_results(ScheduledBatch& batch, tensor_t logits, sampler:
                 // 1-token forward at N+1 that overwrites it before any attention
                 // read reaches it.
                 if (dump_token_ids) {
-                    fprintf(stderr, "[zedinfer-tok] step=%d id=%d (spec-reject draft=%d)\n", req->generated_count, t0,
-                            draft);
+                    LOGI.printf("[zedinfer-tok] step=%d id=%d (spec-reject draft=%d)", req->generated_count, t0, draft);
                 }
 
                 req->output_ids.push_back(t0);
@@ -640,7 +638,7 @@ void Scheduler::process_results(ScheduledBatch& batch, tensor_t logits, sampler:
             token = apply_think_budget(req, token);
 
             if (dump_token_ids) {
-                fprintf(stderr, "[zedinfer-tok] step=%d id=%d\n", req->generated_count, token);
+                LOGI.printf("[zedinfer-tok] step=%d id=%d", req->generated_count, token);
             }
 
             req->output_ids.push_back(token);
@@ -715,7 +713,7 @@ void Scheduler::process_results(ScheduledBatch& batch, tensor_t logits, sampler:
             token = apply_think_budget(req, token);
 
             if (dump_token_ids) {
-                fprintf(stderr, "[zedinfer-tok] step=0 id=%d (prefill)\n", token);
+                LOGI.printf("[zedinfer-tok] step=0 id=%d (prefill)", token);
             }
 
             req->output_ids.push_back(token);
