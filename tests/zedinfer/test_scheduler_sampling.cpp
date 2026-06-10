@@ -129,6 +129,45 @@ TEST(SchedulerSamplingTest, OversizedQueuedRequestFailsInsteadOfSpinning) {
     EXPECT_THROW(future.get(), std::runtime_error);
 }
 
+TEST(SchedulerSamplingTest, ActiveDecodeKvExhaustionFailsRequestInsteadOfSpinning) {
+    SchedulerConfig config;
+    config.max_batch_tokens = 16;
+    config.max_prefill_tokens = 16;
+    Scheduler scheduler(config);
+
+    kvcache::BlockConfig block_config;
+    block_config.block_size = 1;
+    block_config.num_kv_heads = 1;
+    block_config.head_dim = 1;
+    block_config.dtype = ZEDINFER_DTYPE_F32;
+    kvcache::BlockPool pool(block_config, 257, ZEDINFER_DEVICE_CPU, 0);
+    kvcache::BlockAllocator allocator(pool, 1);
+    scheduler.set_block_allocator(&allocator);
+
+    auto req = std::make_unique<InferenceRequest>();
+    req->input_ids = {1};
+    req->config.max_new_tokens = 300;
+    auto future = req->result_promise.get_future();
+    scheduler.submit(std::move(req));
+
+    ScheduledBatch prefill = scheduler.schedule();
+    ASSERT_EQ(prefill.prefill_requests.size(), 1u);
+    ASSERT_EQ(scheduler.active_count(), 1);
+
+    auto* active = prefill.prefill_requests[0];
+    active->phase = RequestPhase::DECODE;
+    active->last_token = 1;
+    active->block_table().seq_len = 257;
+
+    ScheduledBatch decode;
+    EXPECT_NO_THROW(decode = scheduler.schedule());
+
+    EXPECT_TRUE(decode.empty());
+    EXPECT_EQ(scheduler.active_count(), 0);
+    ASSERT_EQ(future.wait_for(std::chrono::seconds(0)), std::future_status::ready);
+    EXPECT_THROW(future.get(), std::runtime_error);
+}
+
 TEST(SchedulerSamplingTest, FullPrefixCacheHitStillSchedulesNonEmptyPrefill) {
     SchedulerConfig config;
     config.max_batch_tokens = 16;

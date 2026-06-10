@@ -268,17 +268,54 @@ void Scheduler::allocate_blocks_for_request(InferenceRequest* req) {
 ScheduledBatch Scheduler::schedule() {
     ScheduledBatch batch;
     int token_budget = config_.max_batch_tokens;
+    bool completed_active = false;
 
-    // 1. Decode-first: all active decode requests (1 token each)
+    // 1. Decode-first: active decode requests (1 token normally, 2 with MTP verification)
     for (auto& req_ptr : active_requests_) {
         if (token_budget <= 0) {
             break;
         }
+        if (req_ptr->phase == RequestPhase::COMPLETE) {
+            completed_active = true;
+            continue;
+        }
+        int decode_tokens = (req_ptr->mtp_pending_draft >= 0) ? 2 : 1;
         if (block_allocator_) {
-            block_allocator_->ensure_blocks(req_ptr->block_table(), req_ptr->block_table().seq_len + 1);
+            try {
+                block_allocator_->ensure_blocks(req_ptr->block_table(), req_ptr->block_table().seq_len + decode_tokens);
+            } catch (const std::exception& e) {
+                if (decode_tokens > 1) {
+                    req_ptr->mtp_pending_draft = -1;
+                    req_ptr->mtp_draft_q.clear();
+                    decode_tokens = 1;
+                    try {
+                        block_allocator_->ensure_blocks(req_ptr->block_table(), req_ptr->block_table().seq_len + 1);
+                    } catch (const std::exception& retry_error) {
+                        std::string error_msg = "KV cache exhausted during decode for request "
+                                              + std::to_string(req_ptr->request_id) + ": " + retry_error.what();
+                        LOGE << "[Scheduler] " << error_msg;
+                        fail_active_request(*req_ptr, "[Scheduler] " + error_msg);
+                        completed_active = true;
+                        continue;
+                    }
+                } else {
+                    std::string error_msg = "KV cache exhausted during decode for request "
+                                          + std::to_string(req_ptr->request_id) + ": " + e.what();
+                    LOGE << "[Scheduler] " << error_msg;
+                    fail_active_request(*req_ptr, "[Scheduler] " + error_msg);
+                    completed_active = true;
+                    continue;
+                }
+            }
         }
         batch.decode_requests.push_back(req_ptr.get());
-        token_budget--;
+        token_budget -= decode_tokens;
+    }
+    if (completed_active) {
+        std::lock_guard<std::mutex> lock(submit_mutex_);
+        active_requests_.erase(std::remove_if(active_requests_.begin(), active_requests_.end(),
+                                              [](const auto& ptr) { return ptr->phase == RequestPhase::COMPLETE; }),
+                               active_requests_.end());
     }
 
     // 2. Admit new prefill requests
@@ -311,7 +348,17 @@ ScheduledBatch Scheduler::schedule() {
             break;
         }
 
-        allocate_blocks_for_request(req);
+        try {
+            allocate_blocks_for_request(req);
+        } catch (const std::exception& e) {
+            std::string error_msg
+                = "Cannot allocate KV cache for request " + std::to_string(req->request_id) + ": " + e.what();
+            LOGE << "[Scheduler] Failing queued request: " << error_msg;
+            auto failed = std::move(waiting_queue_.front());
+            waiting_queue_.pop_front();
+            fail_queued_request(std::move(failed), "[Scheduler] " + error_msg);
+            continue;
+        }
 
         // Chunked prefill
         int remaining = static_cast<int>(req->input_ids.size()) - req->prefill_progress;
@@ -353,6 +400,23 @@ void Scheduler::fail_queued_request(std::unique_ptr<InferenceRequest> req, const
 
     try {
         req->result_promise.set_exception(std::make_exception_ptr(std::runtime_error(error_msg)));
+    } catch (...) {}
+}
+
+void Scheduler::fail_active_request(InferenceRequest& req, const std::string& error_msg) {
+    req.phase = RequestPhase::COMPLETE;
+
+    if (block_allocator_ && req.owns_block_table() && req.block_table().num_layers > 0) {
+        block_allocator_->release_sequence(req.block_table());
+    }
+
+    if (ssm_state_pool_ != nullptr && req.ssm_slot_idx() >= 0) {
+        ssm_state_pool_->release_slot(req.ssm_slot_idx());
+        req.set_ssm_slot_idx(-1);
+    }
+
+    try {
+        req.result_promise.set_exception(std::make_exception_ptr(std::runtime_error(error_msg)));
     } catch (...) {}
 }
 
