@@ -195,6 +195,8 @@ A/B testing, and debugging. Resolved once per process (immutable at runtime).
 | Variable | Effect |
 |----------|--------|
 | `ZEDINFER_MOE_GPU_SLOTS` | Force MoE ExpertPool strategy: `>= num_experts` → ALL_GPU, else N PINNED_LRU slots/layer |
+| `ZEDINFER_MOE_VRAM_FRACTION` | Auto MoE sizing only: fraction of current util-aware headroom experts may use; default `0.40` |
+| `ZEDINFER_MOE_RESERVE_MB` | Auto MoE sizing only: MiB of current util-aware headroom reserved away from expert slots for non-expert weights, KV, activations, and scratch |
 | `ZEDINFER_REPETITION_PENALTY` | Override the repetition penalty from `generation_config.json` |
 | `ZEDINFER_GPTQ_ZEROPOINT` | Override auto-detected GPTQ zero-point (debug GPTQ checkpoints) |
 | `ZEDINFER_MTP_SPEC` | Enable MTP speculative decoding (active spec mode), same as `--mtp` |

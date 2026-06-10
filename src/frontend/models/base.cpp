@@ -74,11 +74,59 @@ size_t estimate_per_expert_bytes(const Qwen3MoEConfig& cfg) {
     return 3 * hidden * inter * elem_bytes;
 }
 
+double parse_env_fraction(const char* name, double default_value) {
+    const char* env = std::getenv(name);
+    if (env == nullptr || *env == '\0') {
+        return default_value;
+    }
+
+    double value = 0.0;
+    try {
+        size_t consumed = 0;
+        value = std::stod(env, &consumed);
+        if (consumed != std::string(env).size()) {
+            throw std::invalid_argument("trailing characters");
+        }
+    } catch (const std::exception& e) {
+        throw std::runtime_error(std::string(name) + ": invalid fraction '" + env + "' (" + e.what() + ")");
+    }
+
+    if (!(value > 0.0 && value <= 1.0)) {
+        throw std::runtime_error(std::string(name) + " must be in (0, 1], got " + std::to_string(value));
+    }
+    return value;
+}
+
+size_t parse_env_mib(const char* name, size_t default_bytes) {
+    const char* env = std::getenv(name);
+    if (env == nullptr || *env == '\0') {
+        return default_bytes;
+    }
+
+    unsigned long long mib = 0;
+    try {
+        size_t consumed = 0;
+        mib = std::stoull(env, &consumed);
+        if (consumed != std::string(env).size()) {
+            throw std::invalid_argument("trailing characters");
+        }
+    } catch (const std::exception& e) {
+        throw std::runtime_error(std::string(name) + ": invalid MiB value '" + env + "' (" + e.what() + ")");
+    }
+
+    constexpr size_t kMiB = 1024ULL * 1024ULL;
+    if (mib > static_cast<unsigned long long>(std::numeric_limits<size_t>::max() / kMiB)) {
+        throw std::runtime_error(std::string(name) + " is too large: " + env + " MiB");
+    }
+    return static_cast<size_t>(mib) * kMiB;
+}
+
 // Decide ExpertPoolConfig for a Qwen3MoE model. Order:
 //  1. If ZEDINFER_MOE_GPU_SLOTS is set: parse and respect it.
 //  2. Else: auto-size. Apply gpu_memory_utilization the same way init_block_pool does
-//     (allowed = total × util; headroom = allowed − used), then carve out a fraction
-//     of headroom for experts. Falls back to ALL_GPU when experts fit.
+//     (allowed = total × util; headroom = allowed − used), reserve conservative
+//     headroom for non-expert weights + KV + runtime scratch, then carve out a
+//     fraction of what remains for experts. Falls back to ALL_GPU when experts fit.
 //
 // Using the same util-aware formula as init_block_pool prevents the loader from picking
 // ALL_GPU on a budget the engine will then refuse to honor (e.g. user passes
@@ -131,16 +179,32 @@ ExpertPoolConfig compute_moe_pool_config(const Qwen3MoEConfig& cfg, zedinferDevi
     const size_t per_expert = estimate_per_expert_bytes(cfg);
     const size_t total_expert_bytes = cfg.num_experts * cfg.num_hidden_layers * per_expert;
 
-    // Of the headroom, experts may take up to kExpertVramFraction; the rest covers
-    // KV cache + non-expert weights + activations + scratch.
-    constexpr double kExpertVramFraction = 0.70;
-    const size_t expert_budget = static_cast<size_t>(static_cast<double>(headroom_bytes) * kExpertVramFraction);
+    // The old 70% default was too optimistic because this decision runs before
+    // non-expert model weights, SSM state, and vision/runtime scratch have consumed
+    // VRAM. Keep the automatic path KV-friendly by default; users who prefer lower
+    // expert miss rates can still force a slot count via ZEDINFER_MOE_GPU_SLOTS.
+    constexpr size_t kMiB = 1024ULL * 1024ULL;
+    constexpr size_t kGiB = 1024ULL * kMiB;
+    constexpr double kDefaultExpertVramFraction = 0.40;
+    constexpr double kDefaultRuntimeReserveFraction = 0.20;
+    constexpr size_t kDefaultMinRuntimeReserve = 4ULL * kGiB;
+
+    const double expert_fraction = parse_env_fraction("ZEDINFER_MOE_VRAM_FRACTION", kDefaultExpertVramFraction);
+    const size_t default_runtime_reserve
+        = std::max(kDefaultMinRuntimeReserve,
+                   static_cast<size_t>(static_cast<double>(allowed_bytes) * kDefaultRuntimeReserveFraction));
+    const size_t runtime_reserve = parse_env_mib("ZEDINFER_MOE_RESERVE_MB", default_runtime_reserve);
+    const size_t capped_reserve = std::min(runtime_reserve, headroom_bytes);
+    const size_t budget_after_reserve = headroom_bytes - capped_reserve;
+    const size_t budget_by_fraction = static_cast<size_t>(static_cast<double>(headroom_bytes) * expert_fraction);
+    const size_t expert_budget = std::min(budget_by_fraction, budget_after_reserve);
 
     LOGI.printf("[Model] Auto MoE sizing: total=%zu MB, free=%zu MB, allowed=%zu MB (util=%.2f), "
-                "headroom=%zu MB, per_expert≈%zu KB, total_experts=%zu MB, budget=%zu MB",
+                "headroom=%zu MB, reserve=%zu MB, fraction=%.2f, per_expert≈%zu KB, total_experts=%zu MB, "
+                "expert_budget=%zu MB",
                 total_bytes / (1024 * 1024), free_bytes / (1024 * 1024), allowed_bytes / (1024 * 1024),
-                gpu_memory_utilization, headroom_bytes / (1024 * 1024), per_expert / 1024,
-                total_expert_bytes / (1024 * 1024), expert_budget / (1024 * 1024));
+                gpu_memory_utilization, headroom_bytes / (1024 * 1024), runtime_reserve / (1024 * 1024),
+                expert_fraction, per_expert / 1024, total_expert_bytes / (1024 * 1024), expert_budget / (1024 * 1024));
 
     if (total_expert_bytes <= expert_budget) {
         LOGI.printf("[Model] Auto: experts fit in budget; ALL_GPU");
