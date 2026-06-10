@@ -230,6 +230,7 @@ public:
 
         stage_total_ = clamp_progress_value(std::max<size_t>(total_steps, 1));
         current_step_ = 0;
+        LOGI.printf("[Loader] %s: %zu steps", title.c_str(), total_steps);
         if (!enabled_) {
             return;
         }
@@ -268,7 +269,9 @@ private:
 
 class ModelLoadProgress {
 public:
-    void begin_stage(const std::string&, size_t, LoadProgressColor) {}
+    void begin_stage(const std::string& title, size_t total_steps, LoadProgressColor) {
+        LOGI.printf("[Loader] %s: %zu steps", title.c_str(), total_steps);
+    }
     void update(size_t) {}
     void advance() {}
     void finish_stage() {}
