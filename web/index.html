@@ -94,6 +94,14 @@ body {
     color: var(--text-light);
     text-align: center;
 }
+.sidebar-footer-version {
+    padding: 0 16px 12px;
+    font-size: 10px;
+    color: var(--text-secondary);
+    text-align: center;
+    opacity: 0.7;
+    user-select: text;
+}
 
 /* ===== Main ===== */
 .main {
@@ -928,6 +936,9 @@ body {
     </div>
     <div class="sidebar-footer">
         Powered by ZedInfer
+    </div>
+    <div class="sidebar-footer-version">
+        <span id="version-info">getVersionInfo()</span>
     </div>
 </div>
 
@@ -3040,6 +3051,13 @@ async function migrateLegacyStoreIfNeeded() {
     });
 }
 
+function getVersionInfo() {
+    return fetch('/version')
+        .then(response => response.json())
+        .then(data => data.version || 'unknown')
+        .catch(() => 'unknown');
+}
+
 inputEl.addEventListener('input', function() {
     this.style.height = 'auto';
     this.style.height = Math.min(this.scrollHeight, 200) + 'px';
@@ -3108,6 +3126,12 @@ document.addEventListener('keydown', event => {
         event.preventDefault();
         closeConfirmModal(false);
     }
+});
+
+document.getElementById('version-info').textContent = 'Loading...';
+
+getVersionInfo().then(version => {
+    document.getElementById('version-info').textContent = version;
 });
 
 fetch('/v1/models')
