@@ -74,6 +74,7 @@ private:
 
     std::unique_ptr<InferenceRequest> build_request(const std::vector<int>& input_ids, const GenerationConfig& config);
     void resolve_request_limits(InferenceRequest& request) const;
+    void prepare_multimodal_inputs(InferenceRequest& request);
 
     // Fail all requests in a batch with an error (used when forward pass throws)
     void fail_batch(ScheduledBatch& batch, const std::string& error_msg);

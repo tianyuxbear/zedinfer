@@ -37,3 +37,13 @@ TEST(MultiModalProcessorTest, PreservesMediumImageAspectAndAlignment) {
     // 1024x512 is already aligned to patch_size * spatial_merge_size.
     EXPECT_EQ(processor.num_image_tokens_for(512, 1024), 512);
 }
+
+TEST(MultiModalProcessorTest, ReportsMergedImageTokenGrid) {
+    MultiModalProcessor processor(qwen_vision_config());
+
+    auto grid = processor.image_token_grid_for(512, 1024);
+    EXPECT_EQ(grid.t, 1);
+    EXPECT_EQ(grid.h, 16);
+    EXPECT_EQ(grid.w, 32);
+    EXPECT_EQ(grid.num_tokens(), 512);
+}

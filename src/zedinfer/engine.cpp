@@ -835,11 +835,15 @@ int InferenceEngine::image_pad_token_id() const {
 }
 
 EncodedImage InferenceEngine::encode_image_data_uri(std::string_view data_uri) {
+    ImagePayload payload = MultiModalProcessor::decode_data_uri(data_uri);
+    return encode_image_payload(payload);
+}
+
+EncodedImage InferenceEngine::encode_image_payload(const ImagePayload& payload) {
     auto* q35 = dynamic_cast<model::Qwen3_5Model*>(model_.get());
     if (!q35 || !q35->vision_tower() || !mm_processor_) {
-        throw std::runtime_error("[Engine] encode_image_data_uri called on a non-vision model");
+        throw std::runtime_error("[Engine] encode_image_payload called on a non-vision model");
     }
-    ImagePayload payload = MultiModalProcessor::decode_data_uri(data_uri);
     ProcessedImage processed = mm_processor_->process(payload, exec_config_);
     auto embeds = q35->vision_tower()->forward(processed.patches, processed.pos_ids_thw, processed.grid_h,
                                                processed.grid_w, exec_config_);
@@ -857,6 +861,13 @@ EncodedImage InferenceEngine::encode_image_data_uri(std::string_view data_uri) {
                                  + ") do not match vision embedding rows (" + std::to_string(embeds->dim(0)) + ")");
     }
     return out;
+}
+
+ImageTokenGrid InferenceEngine::image_token_grid_for(int h, int w) const {
+    if (!has_vision() || !mm_processor_) {
+        throw std::runtime_error("[Engine] image_token_grid_for called on a non-vision model");
+    }
+    return mm_processor_->image_token_grid_for(h, w);
 }
 
 tensor_t InferenceEngine::build_multimodal_input_embeds(const std::vector<int>& input_ids,

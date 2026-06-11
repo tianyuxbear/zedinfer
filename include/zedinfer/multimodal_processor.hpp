@@ -3,6 +3,7 @@
 #include "backend/tensor/tensor.hpp"
 #include "frontend/models/base.hpp"
 #include "zedinfer/activation.hpp"
+#include "zedinfer/multimodal_positions.hpp"
 
 #include <cstdint>
 #include <string>
@@ -49,6 +50,7 @@ public:
     // Number of LLM-side image tokens produced for an image of given pixel
     // height / width. Useful when constructing the prompt before the vision
     // tower has run (to size <|image_pad|> placeholders).
+    ImageTokenGrid image_token_grid_for(int h, int w) const;
     int num_image_tokens_for(int h, int w) const;
 
 private:

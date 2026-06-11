@@ -4,6 +4,7 @@
 #include "zedinfer/chat_template_jinja.hpp"
 #include "zedinfer/engine.hpp"
 #include "zedinfer/multimodal_positions.hpp"
+#include "zedinfer/multimodal_processor.hpp"
 #include "zedinfer/request.hpp"
 #include "zedinfer/version.hpp"
 
@@ -1283,79 +1284,72 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
                    "prompt_render_failed");
         return;
     }
-    // Vision pipeline. The Jinja chat template renders ONE <|image_pad|>
-    // placeholder per image part; the vision tower outputs num_image_tokens
-    // (= patches / spatial_merge^2) rows per image. Before scattering we must
-    // expand each single placeholder into num_image_tokens copies so the
-    // tokenized input_ids have a matching count of <|image_pad|> positions.
-    tensor_t multimodal_input_embeds;
+    // Multimodal request preparation. The HTTP thread only does CPU work here:
+    // decode data URIs, compute the post-resize image token grid, expand the
+    // prompt's single <|image_pad|> placeholders, and build host-side MRoPE
+    // positions. GPU vision encoding and input-embed scatter are deferred to
+    // ServingLoop::prepare_multimodal_inputs() on the engine serving thread.
+    std::vector<ImagePayload> multimodal_images;
     std::vector<int32_t> multimodal_pos_ids_thw;
     int32_t multimodal_mrope_delta = 0;
     if (any_image_part && engine_->has_vision()) {
-        // 1. Encode every image to its embedding tensor — chunks come out in
-        // encounter order across all messages.
-        std::vector<EncodedImage> encoded_images;
-        encoded_images.reserve(4);
+        std::vector<ImageTokenGrid> image_grids;
+        multimodal_images.reserve(4);
+        image_grids.reserve(4);
+
+        auto image_uri_from_part = [](const json& part) -> std::string {
+            if (!part.is_object()) {
+                return {};
+            }
+            const std::string ptype = part.value("type", "");
+            if (ptype == "image_url" && part.contains("image_url")) {
+                const auto& iu = part["image_url"];
+                if (iu.is_string()) {
+                    return iu.get<std::string>();
+                }
+                if (iu.is_object() && iu.contains("url") && iu["url"].is_string()) {
+                    return iu["url"].get<std::string>();
+                }
+            }
+            if (ptype == "image" && part.contains("image") && part["image"].is_string()) {
+                return part["image"].get<std::string>();
+            }
+            return {};
+        };
+
         for (const auto& msg : body["messages"]) {
             if (!msg.contains("content") || !msg["content"].is_array()) {
                 continue;
             }
             for (const auto& part : msg["content"]) {
-                if (!part.is_object()) {
-                    continue;
-                }
-                const std::string ptype = part.value("type", "");
-                std::string uri;
-                if (ptype == "image_url" && part.contains("image_url")) {
-                    const auto& iu = part["image_url"];
-                    if (iu.is_string()) {
-                        uri = iu.get<std::string>();
-                    } else if (iu.is_object() && iu.contains("url") && iu["url"].is_string()) {
-                        uri = iu["url"].get<std::string>();
-                    }
-                } else if (ptype == "image" && part.contains("image") && part["image"].is_string()) {
-                    uri = part["image"].get<std::string>();
-                }
+                std::string uri = image_uri_from_part(part);
                 if (uri.empty()) {
                     continue;
                 }
                 try {
-                    encoded_images.push_back(engine_->encode_image_data_uri(uri));
+                    ImagePayload payload = MultiModalProcessor::decode_data_uri(uri);
+                    image_grids.push_back(engine_->image_token_grid_for(payload.height, payload.width));
+                    multimodal_images.push_back(std::move(payload));
                 } catch (const std::exception& e) {
-                    send_error(res, 400, std::string("Failed to decode / encode image: ") + e.what(),
-                               "invalid_request_error", "invalid_image_data");
-                    LOGW << "[HttpServer] Image encode failed: " << e.what();
+                    send_error(res, 400, std::string("Failed to decode image: ") + e.what(), "invalid_request_error",
+                               "invalid_image_data");
+                    LOGW << "[HttpServer] Image decode failed: " << e.what();
                     return;
                 }
             }
         }
 
-        if (!encoded_images.empty()) {
-            // 2. Re-render and tokenize the prompt with one <|image_pad|>
-            //    placeholder per image, then expand at token-id level. String
-            //    repetition is not safe here: long runs of special-token text
-            //    can be merged unexpectedly by the tokenizer.
+        if (!multimodal_images.empty()) {
+            // The Jinja chat template renders ONE <|image_pad|> placeholder per
+            // image part; the vision tower outputs grid.num_tokens() rows per
+            // image. Expand at token-id level because string repetition of
+            // special-token text can be merged unexpectedly by the tokenizer.
             const int pad_id = engine_->image_pad_token_id();
-            std::string prompt;
-            try {
-                prompt = build_prompt_from_messages();
-            } catch (const std::exception& e) {
-                send_error(res, 400, std::string("Failed to render prompt: ") + e.what(), "invalid_request_error",
-                           "prompt_render_failed");
-                return;
-            }
-
-            prompt_opens_think = detect_open_think(prompt);
-            std::vector<int> placeholder_input_ids;
-            if (!tokenize_prompt(prompt, placeholder_input_ids)) {
-                return;
-            }
-
             std::vector<size_t> image_token_counts;
-            image_token_counts.reserve(encoded_images.size());
-            for (const auto& encoded : encoded_images) { image_token_counts.push_back(encoded.num_tokens()); }
+            image_token_counts.reserve(image_grids.size());
+            for (const auto& grid : image_grids) { image_token_counts.push_back(grid.num_tokens()); }
             try {
-                input_ids = expand_multimodal_input_ids(placeholder_input_ids, pad_id, image_token_counts);
+                input_ids = expand_multimodal_input_ids(input_ids, pad_id, image_token_counts);
             } catch (const std::exception& e) {
                 send_error(res, 400,
                            std::string("Image count does not match rendered <|image_pad|> placeholders: ") + e.what(),
@@ -1363,14 +1357,6 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
                 return;
             }
 
-            std::vector<tensor_t> image_chunks;
-            std::vector<ImageTokenGrid> image_grids;
-            image_chunks.reserve(encoded_images.size());
-            image_grids.reserve(encoded_images.size());
-            for (const auto& encoded : encoded_images) {
-                image_chunks.push_back(encoded.embeds);
-                image_grids.push_back(ImageTokenGrid{encoded.grid_t, encoded.grid_h, encoded.grid_w});
-            }
             try {
                 auto positions = build_multimodal_position_ids(input_ids, pad_id, image_grids);
                 multimodal_pos_ids_thw = std::move(positions.pos_ids_thw);
@@ -1381,17 +1367,8 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
                 LOGW << "[HttpServer] build_multimodal_position_ids failed: " << e.what();
                 return;
             }
-
-            try {
-                multimodal_input_embeds = engine_->build_multimodal_input_embeds(input_ids, image_chunks);
-                LOGI.printf("[HttpServer] Multimodal: %zu image chunk(s), %zu prompt tokens, pad_id=%d",
-                            image_chunks.size(), input_ids.size(), pad_id);
-            } catch (const std::exception& e) {
-                send_error(res, 500, std::string("Failed to build multimodal input embeddings: ") + e.what(),
-                           "internal_error", "multimodal_embeds_failed");
-                LOGW << "[HttpServer] build_multimodal_input_embeds failed: " << e.what();
-                return;
-            }
+            LOGI.printf("[HttpServer] Multimodal queued: %zu image(s), %zu prompt tokens, pad_id=%d",
+                        multimodal_images.size(), input_ids.size(), pad_id);
         }
     } else if (any_image_part) {
         LOGW << "[HttpServer] Multimodal request received but the loaded model has no vision tower; "
@@ -1438,12 +1415,11 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
     inference_req->config.max_think_tokens = config_.default_max_think_tokens;
     inference_req->arrival_time = std::chrono::steady_clock::now();
     inference_req->cancelled = cancel_flag;
-    // Attach vision-pre-baked input_embeds when present; the serving loop
-    // forwards this tensor to hybrid_transformer_forward, which bypasses the
-    // text embed_tokens lookup and uses our tensor (with image embeddings
-    // already scattered) as the layer-0 hidden state.
-    if (multimodal_input_embeds) {
-        inference_req->set_input_embeds(multimodal_input_embeds);
+    // Attach decoded image payloads when present. The serving loop consumes
+    // these on the engine thread to run the vision tower and build input_embeds
+    // before the first prefill forward.
+    if (!multimodal_images.empty()) {
+        inference_req->set_pending_images(std::move(multimodal_images));
         inference_req->set_pos_ids_thw_host(std::move(multimodal_pos_ids_thw), inference_req->input_ids.size(),
                                             multimodal_mrope_delta);
     }

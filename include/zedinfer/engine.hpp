@@ -11,6 +11,7 @@
 #include "zedinfer/activation.hpp"
 #include "zedinfer/chat_template.hpp"
 #include "zedinfer/generation_types.hpp"
+#include "zedinfer/multimodal_positions.hpp"
 #include "zedinfer/profiler.hpp"
 #include "zedinfer/request.hpp"
 #include "zedinfer/serving_loop.hpp"
@@ -28,6 +29,7 @@ namespace zedinfer {
 class InferenceSession;
 class ChatTemplateJinja;
 class MultiModalProcessor;
+struct ImagePayload;
 
 struct EncodedImage {
     tensor_t embeds;
@@ -136,6 +138,10 @@ public:
     //   encode_image_data_uri  : full base64 image URI → device-resident
     //                            [num_image_tokens, hidden_size] embedding tensor
     //                            produced by the vision tower + spatial merger.
+    //   encode_image_payload   : already-decoded RGB image payload → same output
+    //                            as encode_image_data_uri, without base64/stb decode.
+    //   image_token_grid_for   : CPU-only sizing helper for constructing the
+    //                            expanded <|image_pad|> run before GPU encoding.
     //   build_multimodal_input_embeds : look up text token embeddings for
     //                            input_ids and scatter the supplied image
     //                            embedding chunks (in encounter order) over
@@ -144,6 +150,8 @@ public:
     //   image_pad_token_id     : tokenizer id of <|image_pad|>, or -1.
     bool has_vision() const;
     EncodedImage encode_image_data_uri(std::string_view data_uri);
+    EncodedImage encode_image_payload(const ImagePayload& payload);
+    ImageTokenGrid image_token_grid_for(int h, int w) const;
     tensor_t build_multimodal_input_embeds(const std::vector<int>& input_ids,
                                            const std::vector<tensor_t>& image_embeds_chunks);
     int image_pad_token_id() const;

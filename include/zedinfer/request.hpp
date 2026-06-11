@@ -3,6 +3,7 @@
 #include "backend/kvcache/block_pool.hpp"
 #include "backend/tensor/tensor.hpp"
 #include "zedinfer/generation_types.hpp"
+#include "zedinfer/multimodal_processor.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -163,6 +164,11 @@ struct InferenceRequest {
         mrope_position_delta_ = 0;
     }
 
+    bool has_pending_images() const { return !pending_images_.empty(); }
+    const std::vector<ImagePayload>& pending_images() const { return pending_images_; }
+    void set_pending_images(std::vector<ImagePayload> images) { pending_images_ = std::move(images); }
+    void clear_pending_images() { pending_images_.clear(); }
+
 private:
     kvcache::SequenceBlockTable* block_table_ptr_ = nullptr;
     kvcache::SequenceBlockTable owned_block_table_;
@@ -172,6 +178,7 @@ private:
     tensor_t input_embeds_;
     tensor_t pos_ids_thw_;
     std::vector<int32_t> pos_ids_thw_host_;
+    std::vector<ImagePayload> pending_images_;
     size_t pos_ids_thw_token_count_ = 0;
     int32_t mrope_position_delta_ = 0;
     bool has_input_embeds_ = false;

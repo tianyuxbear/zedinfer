@@ -128,13 +128,17 @@ std::pair<int, int> MultiModalProcessor::target_size_for(int h, int w) const {
     return {target_h, target_w};
 }
 
-int MultiModalProcessor::num_image_tokens_for(int h, int w) const {
+ImageTokenGrid MultiModalProcessor::image_token_grid_for(int h, int w) const {
     const auto [target_h, target_w] = target_size_for(h, w);
     const int patches_h = target_h / cfg_.patch_size;
     const int patches_w = target_w / cfg_.patch_size;
     const int merged_h = patches_h / cfg_.spatial_merge_size;
     const int merged_w = patches_w / cfg_.spatial_merge_size;
-    return merged_h * merged_w; // T = 1 for static images
+    return ImageTokenGrid{1, merged_h, merged_w};
+}
+
+int MultiModalProcessor::num_image_tokens_for(int h, int w) const {
+    return static_cast<int>(image_token_grid_for(h, w).num_tokens());
 }
 
 ProcessedImage MultiModalProcessor::process(const ImagePayload& img, const ExecutorConfig& exec) const {

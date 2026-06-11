@@ -135,6 +135,33 @@ void ServingLoop::resolve_request_limits(InferenceRequest& request) const {
                                                            engine_->exec_config().max_seq_len);
 }
 
+void ServingLoop::prepare_multimodal_inputs(InferenceRequest& request) {
+    if (!request.has_pending_images()) {
+        return;
+    }
+    if (!engine_->has_vision()) {
+        throw std::runtime_error("[ServingLoop] multimodal request reached a non-vision engine");
+    }
+    if (!request.has_pos_ids_thw_host()) {
+        throw std::runtime_error("[ServingLoop] multimodal request is missing pos_ids_thw_host");
+    }
+
+    std::vector<EncodedImage> encoded_images;
+    encoded_images.reserve(request.pending_images().size());
+    for (const auto& image : request.pending_images()) {
+        encoded_images.push_back(engine_->encode_image_payload(image));
+    }
+
+    std::vector<tensor_t> image_chunks;
+    image_chunks.reserve(encoded_images.size());
+    for (const auto& encoded : encoded_images) { image_chunks.push_back(encoded.embeds); }
+
+    request.set_input_embeds(engine_->build_multimodal_input_embeds(request.input_ids, image_chunks));
+    request.clear_pending_images();
+    LOGI.printf("[ServingLoop] Multimodal prepared: %zu image chunk(s), %zu prompt tokens", image_chunks.size(),
+                request.input_ids.size());
+}
+
 // ============================================================================
 // Batch Mode
 // ============================================================================
@@ -156,6 +183,23 @@ bool ServingLoop::step() {
     auto batch = scheduler_.schedule();
     if (batch.empty()) {
         return false;
+    }
+
+    try {
+        for (auto* req : batch.decode_requests) {
+            if (req && req->has_pending_images()) {
+                throw std::runtime_error("[ServingLoop] multimodal request reached decode before prefill preparation");
+            }
+        }
+        for (auto* req : batch.prefill_requests) {
+            if (req) {
+                prepare_multimodal_inputs(*req);
+            }
+        }
+    } catch (const std::exception& e) {
+        LOGE << "[ServingLoop] Multimodal prepare failed: " << e.what();
+        fail_batch(batch, std::string("Multimodal prepare error: ") + e.what());
+        return true;
     }
 
     auto batch_ctx = batch.build_context();
