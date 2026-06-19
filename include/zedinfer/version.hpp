@@ -1,9 +1,9 @@
 #pragma once
 
-#define ZEDINFER_VERSION "0.1.0"
+#ifndef ZEDINFER_VERSION
+#define ZEDINFER_VERSION "unknown"
+#endif
 
-// Injected by xmake at build time via on_config (see xmake.lua).
-// Falls back to "unknown" when git is unavailable (e.g., Docker build without .git/).
 #ifndef ZEDINFER_GIT_HASH
 #define ZEDINFER_GIT_HASH "unknown"
 #endif

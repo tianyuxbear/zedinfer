@@ -39,12 +39,28 @@ struct QuantizedLinearKernelConfig {
 };
 
 template <typename T> struct QuantizedLinearWorkspace {
-    zedinfer::core::storage_t activation_storage;
-    zedinfer::core::storage_t splitk_storage;
     int8_t* act_q = nullptr;
     T* act_scales = nullptr;
     float* splitk_workspace = nullptr;
 };
+
+// Persistent thread_local backing for the quantized-linear scratch. Refcounts on
+// the pool's shared_ptr are expensive when the pool is heavily populated by
+// expert weights (the ALL_GPU pool holds ~15 GB / ~30 k blocks for Qwen3.5-A3B),
+// and the per-call alloc/dealloc round-trip pumps the BestFitMemoryPool's
+// multimap + addr_to_block_ on every one of the ~3 k linears per decode token.
+// Keep the storage alive for the thread's lifetime and grow lazily; subsequent
+// kernels reuse the same buffer. Safe because all consumers are on the same
+// compute stream — the stream serializes write→read so the next quantize cannot
+// stomp a buffer that the previous matvec is still reading.
+template <typename T> struct PersistentQuantWorkspace {
+    zedinfer::core::storage_t activation_storage;
+    zedinfer::core::storage_t splitk_storage;
+    size_t activation_capacity = 0;
+    size_t splitk_capacity = 0;
+};
+
+template <typename T> thread_local PersistentQuantWorkspace<T> s_quant_workspace;
 
 static int get_num_sms() {
     int device = 0;
@@ -183,16 +199,28 @@ QuantizedLinearWorkspace<T> allocate_quantized_linear_workspace(zedinfer::core::
     const size_t q_bytes = M * K * sizeof(int8_t);
     const size_t scale_offset = (q_bytes + 15u) & ~size_t(15u);
     const size_t scale_bytes = M * static_cast<size_t>(num_act_groups) * sizeof(T);
+    const size_t needed_act = scale_offset + scale_bytes;
 
-    workspace.activation_storage = runtime.allocateDeviceStorage(scale_offset + scale_bytes);
-    auto* base = reinterpret_cast<std::byte*>(workspace.activation_storage->memory());
+    auto& ws = s_quant_workspace<T>;
+    if (!ws.activation_storage || ws.activation_capacity < needed_act) {
+        // Grow with a 2x headroom so a slow drip of larger sizes doesn't churn
+        // the underlying allocator every call.
+        const size_t new_cap = std::max(needed_act, ws.activation_capacity * 2);
+        ws.activation_storage = runtime.allocateDeviceStorage(new_cap);
+        ws.activation_capacity = new_cap;
+    }
+    auto* base = reinterpret_cast<std::byte*>(ws.activation_storage->memory());
     workspace.act_q = reinterpret_cast<int8_t*>(base);
     workspace.act_scales = reinterpret_cast<T*>(base + scale_offset);
 
     if (split_k > 1) {
         const size_t splitk_bytes = static_cast<size_t>(split_k) * M * N * sizeof(float);
-        workspace.splitk_storage = runtime.allocateDeviceStorage(splitk_bytes);
-        workspace.splitk_workspace = reinterpret_cast<float*>(workspace.splitk_storage->memory());
+        if (!ws.splitk_storage || ws.splitk_capacity < splitk_bytes) {
+            const size_t new_cap = std::max(splitk_bytes, ws.splitk_capacity * 2);
+            ws.splitk_storage = runtime.allocateDeviceStorage(new_cap);
+            ws.splitk_capacity = new_cap;
+        }
+        workspace.splitk_workspace = reinterpret_cast<float*>(ws.splitk_storage->memory());
         CUDA_CHECK(cudaMemsetAsync(workspace.splitk_workspace, 0, splitk_bytes, stream));
     }
 

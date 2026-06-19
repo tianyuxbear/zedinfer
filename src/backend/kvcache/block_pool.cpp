@@ -261,7 +261,7 @@ SequenceBlockTable BlockAllocator::allocate_sequence(int estimated_tokens) {
     int total_needed = blocks_per_layer * num_layers_;
     if (total_needed > pool_.available_blocks()) {
         throw std::runtime_error("[BlockAllocator] Not enough blocks: need " + std::to_string(total_needed)
-                                 + ", available " + std::to_string(pool_.free_blocks()));
+                                 + ", available " + std::to_string(pool_.available_blocks()));
     }
 
     SequenceBlockTable table;
@@ -298,8 +298,41 @@ int BlockAllocator::extend_sequence(SequenceBlockTable& table, int layer) {
 void BlockAllocator::ensure_blocks(SequenceBlockTable& table, int needed_len) {
     int bs = pool_.config().block_size;
     int blocks_needed = (needed_len + bs - 1) / bs;
+    int additional_needed = 0;
+    std::vector<size_t> original_sizes(static_cast<size_t>(table.num_layers));
+
     for (int layer = 0; layer < table.num_layers; ++layer) {
-        while (static_cast<int>(table.pages[layer].size()) < blocks_needed) { extend_sequence(table, layer); }
+        original_sizes[layer] = table.pages[layer].size();
+        int current = static_cast<int>(table.pages[layer].size());
+        if (blocks_needed > current) {
+            additional_needed += blocks_needed - current;
+        }
+    }
+
+    if (additional_needed > pool_.available_blocks()) {
+        throw std::runtime_error("[BlockAllocator] Not enough blocks to extend: need "
+                                 + std::to_string(additional_needed) + ", available "
+                                 + std::to_string(pool_.available_blocks()));
+    }
+
+    auto rollback = [&] {
+        for (int layer = 0; layer < table.num_layers; ++layer) {
+            auto& pages = table.pages[layer];
+            while (pages.size() > original_sizes[layer]) {
+                pool_.free(pages.back());
+                pages.pop_back();
+            }
+        }
+        table.clear_runtime_caches();
+    };
+
+    try {
+        for (int layer = 0; layer < table.num_layers; ++layer) {
+            while (static_cast<int>(table.pages[layer].size()) < blocks_needed) { extend_sequence(table, layer); }
+        }
+    } catch (...) {
+        rollback();
+        throw;
     }
 }
 

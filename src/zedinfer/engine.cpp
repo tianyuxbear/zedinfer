@@ -2,12 +2,20 @@
 #include "backend/core/context/context.hpp"
 #include "backend/device/runtime_api.hpp"
 #include "backend/kvcache/block_pool.hpp"
+#include "backend/ops/ops.hpp"
+#include "backend/ops/scatter_image_embeds/scatter_image_embeds.hpp"
 #include "frontend/models/forward_config.hpp"
+#include "frontend/models/hybrid_transformer_forward.hpp"
 #include "frontend/models/paged_forward_context.hpp"
+#include "frontend/models/qwen3_5.hpp"
+#include "frontend/models/qwen3_5_moe.hpp"
+#include "frontend/models/vision_tower.hpp"
 #include "frontend/sampler/sampler.hpp"
 #include "frontend/tokenizer/hf_tokenizer.hpp"
 #include "utils/logging.hpp"
 #include "utils/types.hpp"
+#include "zedinfer/chat_template_jinja.hpp"
+#include "zedinfer/multimodal_processor.hpp"
 #include "zedinfer/session.hpp"
 
 #include <algorithm>
@@ -15,8 +23,12 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <limits>
+#include <memory>
+#include <nlohmann/json.hpp>
 #include <plog/Log.h>
 #include <sstream>
 #include <stdexcept>
@@ -24,6 +36,179 @@
 namespace zedinfer {
 
 namespace {
+
+// Construct a sampler from the model's generation_config.json (HuggingFace
+// convention). When `do_sample=true` and the parsed params validate, return a
+// GeneralSampler so generations follow the model author's recommended decoding
+// (temperature / top_k / top_p). Otherwise fall back to ARGMAX greedy.
+//
+// Greedy decoding on reasoning-style models is prone to deterministic loops
+// once probability mass is concentrated on a small set of near-tied tokens
+// (e.g. CoT "Wait, ..." patterns); honoring the model's own do_sample=true is
+// the canonical fix.
+std::shared_ptr<sampler::Sampler> create_sampler_from_generation_config(const std::string& model_path,
+                                                                        const ExecutorConfig& exec_config) {
+    namespace fs = std::filesystem;
+    // Debug override: if ZEDINFER_FORCE_ARGMAX is set, ignore generation_config
+    // and use deterministic greedy sampling. Useful for reproducible debugging
+    // of forward-path correctness without sampler RNG noise.
+    if (const char* force_argmax = std::getenv("ZEDINFER_FORCE_ARGMAX");
+        force_argmax != nullptr && *force_argmax != '\0' && std::string(force_argmax) != "0") {
+        LOGI << "[Sampler] ZEDINFER_FORCE_ARGMAX set; using ARGMAX regardless of generation_config.json";
+        return sampler::createSampler(exec_config, sampler::SamplerType::ARGMAX);
+    }
+    fs::path gen_cfg_path = fs::path(model_path) / "generation_config.json";
+    if (!fs::exists(gen_cfg_path)) {
+        LOGI << "[Sampler] No generation_config.json at " << gen_cfg_path.string() << "; defaulting to ARGMAX (greedy)";
+        return sampler::createSampler(exec_config, sampler::SamplerType::ARGMAX);
+    }
+    try {
+        std::ifstream file(gen_cfg_path);
+        nlohmann::json j;
+        file >> j;
+
+        const bool do_sample = j.value("do_sample", false);
+        if (!do_sample) {
+            LOGI << "[Sampler] generation_config.json has do_sample=false; using ARGMAX (greedy)";
+            return sampler::createSampler(exec_config, sampler::SamplerType::ARGMAX);
+        }
+
+        sampler::SamplerParams params;
+        params.temperature = j.value("temperature", params.temperature);
+        params.top_k = j.value("top_k", params.top_k);
+        params.top_p = j.value("top_p", params.top_p);
+        // Repetition penalty: honor generation_config.json if specified, else
+        // default to 1.0 (off) to match HF transformers and vLLM. A previous
+        // version defaulted to 1.1 to suppress "Wait, the user is asking ..."
+        // attractor loops in long open-<think> generation, but 1.1 is too
+        // aggressive for arithmetic / code prompts: it demotes already-emitted
+        // tokens that the answer LEGITIMATELY needs to repeat (digits like
+        // "2", operators "+"/"=" in math; identifiers/keywords in code). The
+        // first-token sample is unaffected (output_ids is empty), but step 2+
+        // pulls the nucleus off the correct continuation, so a "What is 2+2?"
+        // prompt would non-deterministically answer "2 and 3 is 5" or
+        // "2+4=10" instead of "2+2=4". If a deployment needs a bounded
+        // reasoning block, it can opt into Scheduler::max_think_tokens
+        // force-emit via CLI without perturbing non-thinking sampling.
+        params.repetition_penalty = j.value("repetition_penalty", 1.0f);
+        // Debug override: ZEDINFER_REPETITION_PENALTY=<float> bypasses the
+        // generation_config value entirely. Useful when validating whether
+        // the default 1.1 (introduced to suppress thinking-loop attractors)
+        // is interfering with non-reasoning prompts.
+        if (const char* env_rp = std::getenv("ZEDINFER_REPETITION_PENALTY"); env_rp != nullptr && *env_rp != '\0') {
+            try {
+                params.repetition_penalty = std::stof(env_rp);
+                LOGI.printf("[Sampler] ZEDINFER_REPETITION_PENALTY=%.3f overriding generation_config",
+                            params.repetition_penalty);
+            } catch (const std::exception& e) {
+                LOGW << "[Sampler] ZEDINFER_REPETITION_PENALTY parse failed: " << e.what()
+                     << "; using generation_config value " << params.repetition_penalty;
+            }
+        }
+        // generation_config rarely sets a fixed seed; honor it if present, else 0
+        // (createSampler will seed from std::random_device).
+        params.seed = j.value("seed", 0u);
+
+        if (!params.validate()) {
+            LOGW << "[Sampler] generation_config.json params failed validation (" << params.info()
+                 << "); falling back to ARGMAX";
+            return sampler::createSampler(exec_config, sampler::SamplerType::ARGMAX);
+        }
+
+        LOGI.printf("[Sampler] Using GeneralSampler from generation_config.json: "
+                    "temperature=%.3f top_k=%d top_p=%.3f repetition_penalty=%.3f",
+                    params.temperature, params.top_k, params.top_p, params.repetition_penalty);
+        return sampler::createSampler(exec_config, sampler::SamplerType::GENERAL, params);
+    } catch (const std::exception& e) {
+        LOGW << "[Sampler] Failed to parse " << gen_cfg_path.string() << ": " << e.what() << "; defaulting to ARGMAX";
+        return sampler::createSampler(exec_config, sampler::SamplerType::ARGMAX);
+    }
+}
+
+bool read_json_i32(const nlohmann::json& j, const char* key, int& out) {
+    if (!j.contains(key) || !j[key].is_number()) {
+        return false;
+    }
+    const int64_t value = j[key].get<int64_t>();
+    if (value < std::numeric_limits<int>::min() || value > std::numeric_limits<int>::max()) {
+        throw std::runtime_error(std::string("preprocessor_config value out of int range: ") + key);
+    }
+    out = static_cast<int>(value);
+    return true;
+}
+
+int pixels_for_image_tokens(int tokens, const model::VisionConfig& cfg) {
+    const int patch = std::max(1, cfg.patch_size);
+    const int merge = std::max(1, cfg.spatial_merge_size);
+    const int64_t patch_area = static_cast<int64_t>(patch) * patch * merge * merge;
+    const int64_t pixels = static_cast<int64_t>(tokens) * patch_area;
+    return static_cast<int>(std::min<int64_t>(pixels, std::numeric_limits<int>::max()));
+}
+
+void apply_vision_preprocessor_config(const std::string& model_path, model::VisionConfig& cfg) {
+    namespace fs = std::filesystem;
+    int min_pixels = cfg.min_pixels;
+    int max_pixels = cfg.max_pixels;
+    bool min_from_file = false;
+    bool max_from_file = false;
+
+    const fs::path preproc_path = fs::path(model_path) / "preprocessor_config.json";
+    if (fs::exists(preproc_path)) {
+        try {
+            std::ifstream file(preproc_path);
+            nlohmann::json j;
+            file >> j;
+            min_from_file = read_json_i32(j, "min_pixels", min_pixels);
+            max_from_file = read_json_i32(j, "max_pixels", max_pixels);
+            if (j.contains("size") && j["size"].is_object()) {
+                const auto& size = j["size"];
+                if (!min_from_file) {
+                    min_from_file = read_json_i32(size, "shortest_edge", min_pixels);
+                }
+                if (!max_from_file) {
+                    max_from_file = read_json_i32(size, "longest_edge", max_pixels);
+                }
+            }
+        } catch (const std::exception& e) {
+            LOGW << "[Engine] preprocessor_config.json vision limits load failed: " << e.what();
+        }
+    }
+
+    int runtime_max_tokens = 1024;
+    if (const char* env_max = std::getenv("ZEDINFER_IMAGE_MAX_TOKENS"); env_max != nullptr && *env_max != '\0') {
+        try {
+            runtime_max_tokens = std::max(1, std::stoi(env_max));
+            LOGI << "[Engine] ZEDINFER_IMAGE_MAX_TOKENS=" << runtime_max_tokens;
+        } catch (const std::exception& e) {
+            LOGW << "[Engine] ZEDINFER_IMAGE_MAX_TOKENS parse failed: " << e.what()
+                 << "; using default 1024 image tokens";
+        }
+    }
+
+    const int default_min_pixels = pixels_for_image_tokens(8, cfg);
+    const int runtime_max_pixels = pixels_for_image_tokens(runtime_max_tokens, cfg);
+    if (min_pixels <= 0) {
+        min_pixels = default_min_pixels;
+    }
+    if (max_pixels <= 0) {
+        max_pixels = runtime_max_pixels;
+    }
+    if (max_pixels > runtime_max_pixels) {
+        LOGW << "[Engine] Capping vision max_pixels from " << max_pixels << " to " << runtime_max_pixels << " ("
+             << runtime_max_tokens << " image tokens) to avoid vision prefill OOM";
+        max_pixels = runtime_max_pixels;
+    }
+    if (min_pixels > max_pixels) {
+        LOGW << "[Engine] Clamping vision min_pixels from " << min_pixels << " to max_pixels=" << max_pixels;
+        min_pixels = max_pixels;
+    }
+
+    cfg.min_pixels = min_pixels;
+    cfg.max_pixels = max_pixels;
+    LOGI << "[Engine] Vision preprocessing limits: min_pixels=" << cfg.min_pixels
+         << (min_from_file ? " (preprocessor_config)" : " (default)") << ", max_pixels=" << cfg.max_pixels
+         << (max_from_file ? " (preprocessor_config/capped)" : " (default)");
+}
 
 double read_tensor_scalar(const std::byte* data, zedinferDataType_t dtype, size_t index) {
     switch (dtype) {
@@ -80,6 +265,64 @@ double compute_row_nll(const std::byte* data, zedinferDataType_t dtype, size_t r
     return log_denom - target_logit;
 }
 
+model::HybridForwardConfig make_hybrid_config(const model::Qwen3_5Model& model) {
+    if (auto* moe_model = dynamic_cast<const model::Qwen3_5MoeModel*>(&model)) {
+        return moe_model->hybrid_forward_config_moe();
+    }
+    return model.hybrid_forward_config();
+}
+
+class PerplexityForward {
+public:
+    explicit PerplexityForward(InferenceEngine& engine)
+        : engine_(engine), hybrid_model_(dynamic_cast<const model::Qwen3_5Model*>(&engine.model())) {
+        if (hybrid_model_) {
+            auto* pool = engine_.ssm_state_pool();
+            if (!pool) {
+                throw std::runtime_error("[PPL] hybrid model has no SSMStatePool");
+            }
+            ssm_pool_ = pool;
+            ssm_slot_ = ssm_pool_->acquire_slot();
+            req_.set_ssm_slot_idx(ssm_slot_);
+            hybrid_cfg_ = std::make_unique<model::HybridForwardConfig>(make_hybrid_config(*hybrid_model_));
+        } else {
+            fwd_cfg_ = std::make_unique<model::ModelForwardConfig>(engine_.model().forward_config());
+        }
+    }
+
+    ~PerplexityForward() {
+        if (ssm_pool_ && ssm_slot_ >= 0) {
+            ssm_pool_->release_slot(ssm_slot_);
+        }
+    }
+
+    PerplexityForward(const PerplexityForward&) = delete;
+    PerplexityForward& operator=(const PerplexityForward&) = delete;
+
+    void reset_sequence() {
+        if (ssm_pool_ && ssm_slot_ >= 0) {
+            ssm_pool_->reset_slot(ssm_slot_);
+        }
+    }
+
+    tensor_t operator()(const std::vector<int>& input_block, int past_len, kvcache::SequenceBlockTable& block_table) {
+        model::PagedForwardContext ctx(input_block, past_len, block_table, *engine_.block_pool());
+        if (hybrid_cfg_) {
+            return model::hybrid_transformer_forward(*hybrid_cfg_, ctx, req_, engine_.exec_config());
+        }
+        return model::transformer_forward(*fwd_cfg_, ctx, engine_.exec_config());
+    }
+
+private:
+    InferenceEngine& engine_;
+    const model::Qwen3_5Model* hybrid_model_ = nullptr;
+    model::SSMStatePool* ssm_pool_ = nullptr;
+    int ssm_slot_ = -1;
+    InferenceRequest req_;
+    std::unique_ptr<model::HybridForwardConfig> hybrid_cfg_;
+    std::unique_ptr<model::ModelForwardConfig> fwd_cfg_;
+};
+
 } // namespace
 
 InferenceEngine::InferenceEngine(std::shared_ptr<model::Model> model, std::shared_ptr<tokenizer::Tokenizer> tokenizer,
@@ -124,13 +367,84 @@ std::shared_ptr<InferenceEngine> InferenceEngine::create(const std::string& mode
     exec_config.data_type = utils::str_to_dtype(model->config().torch_dtype);
     exec_config.max_seq_len = tokenizer->get_config().model_max_length;
 
-    auto sampler = sampler::createSampler(exec_config, sampler::SamplerType::ARGMAX);
+    auto sampler = create_sampler_from_generation_config(model_path, exec_config);
     auto chat_template = ChatTemplate::load(model_path, model->model_type());
 
     auto engine = std::shared_ptr<InferenceEngine>(new InferenceEngine(
         std::move(model), std::move(tokenizer), std::move(sampler), device, exec_config, std::move(chat_template)));
 
+    // Always also instantiate an ArgmaxSampler and a GeneralSampler so the HTTP
+    // layer's per-request sampling overrides have something to dispatch to,
+    // regardless of which one engine.sampler() points at by default.
+    engine->argmax_sampler_ = sampler::createSampler(exec_config, sampler::SamplerType::ARGMAX);
+    {
+        sampler::SamplerParams default_general_params;
+        engine->general_sampler_ = std::static_pointer_cast<sampler::GeneralSampler>(
+            sampler::createSampler(exec_config, sampler::SamplerType::GENERAL, default_general_params));
+    }
+
+    // Try to load a Jinja chat template from common HF locations so every model
+    // — not just Qwen3.5 — gets the canonical prompt formatter. Sources, in
+    // priority order:
+    //   1. <model_path>/chat_template.jinja        (Qwen3.5+, latest HF export)
+    //   2. <model_path>/tokenizer_config.json's "chat_template" key
+    //      (legacy convention used by DeepSeek-R1, Qwen2/Qwen3, Llama, Mistral)
+    // Failure on either path falls through to the legacy hardcoded ChatTemplate.
+    {
+        namespace fs = std::filesystem;
+        fs::path jinja_file = fs::path(model_path) / "chat_template.jinja";
+        if (fs::exists(jinja_file)) {
+            try {
+                engine->chat_template_jinja_
+                    = std::make_shared<ChatTemplateJinja>(ChatTemplateJinja::load(jinja_file.string()));
+                LOGI << "[Engine] Loaded Jinja chat template from " << jinja_file;
+            } catch (const std::exception& e) { LOGW << "[Engine] chat_template.jinja load failed: " << e.what(); }
+        }
+        if (!engine->chat_template_jinja_) {
+            fs::path tcfg = fs::path(model_path) / "tokenizer_config.json";
+            if (fs::exists(tcfg)) {
+                try {
+                    std::ifstream f(tcfg);
+                    nlohmann::json j;
+                    f >> j;
+                    if (j.contains("chat_template") && j["chat_template"].is_string()) {
+                        std::string src = j["chat_template"].get<std::string>();
+                        if (!src.empty()) {
+                            engine->chat_template_jinja_
+                                = std::make_shared<ChatTemplateJinja>(ChatTemplateJinja::load_from_source(src));
+                            LOGI.printf("[Engine] Loaded Jinja chat template from tokenizer_config.json (%zu bytes)",
+                                        src.size());
+                        }
+                    }
+                } catch (const std::exception& e) {
+                    LOGW << "[Engine] tokenizer_config.json chat_template extract failed: " << e.what();
+                }
+            }
+        }
+        if (!engine->chat_template_jinja_) {
+            LOGI << "[Engine] No Jinja chat template found; falling back to legacy ChatTemplate";
+        }
+    }
+
     engine->build_stop_token_ids();
+
+    // Resolve <think>/</think> token ids from the tokenizer once at engine
+    // init. Reasoning models in the Qwen3.5 family carry these as special
+    // tokens (248068 / 248069); models that do not have them get -1 here and
+    // the scheduler's force-emit-</think> path becomes a no-op.
+    engine->think_open_token_id_ = engine->tokenizer_->get_special_token_id("<think>");
+    engine->think_close_token_id_ = engine->tokenizer_->get_special_token_id("</think>");
+    // Resolve "\n\n" token id for the post-</think> separator. The BPE
+    // tokenizer encodes "\n\n" as a single token (id 271 for Qwen3.5's
+    // vocab); if for some reason it splits, take the first id. We need this
+    // so the scheduler can mirror the natural </think>\n\n pattern from the
+    // training chat_template after force-closing thinking.
+    {
+        auto nl_ids = engine->tokenizer_->encode("\n\n");
+        engine->double_newline_token_id_ = nl_ids.empty() ? -1 : nl_ids.back();
+    }
+    LOGI << "[Engine] Think tokens: <think>=" << engine->think_open_token_id_
+         << " </think>=" << engine->think_close_token_id_ << " \\n\\n=" << engine->double_newline_token_id_;
 
     engine->model_name_ = model_name;
     engine->scheduler_config_ = sched_config;
@@ -146,6 +460,29 @@ std::shared_ptr<InferenceEngine> InferenceEngine::create(const std::string& mode
             = std::make_unique<kvcache::PrefixCache>(*engine->block_pool_, engine->block_allocator_->num_layers());
     }
 
+    // Hybrid models (Qwen3.5 family) need a paired SSM snapshot cache so the
+    // prefix-cache fast path stays correct for the linear-attention layers.
+    // Capacity defaults to 8 entries — one snapshot is ~ssm_bytes/slot +
+    // conv_bytes/slot (~50 MB for Qwen3.5-27B), so 8 entries ≈ 400 MB host RAM.
+    // Tunable later via env var if multi-user serving brings in more
+    // concurrent prompts.
+    if (auto* ssm_pool = engine->ssm_state_pool()) {
+        engine->ssm_snapshot_cache_ = std::make_unique<kvcache::SSMSnapshotCache>(*ssm_pool, /*max_entries=*/8);
+    }
+
+    // Multimodal pipeline init for vision-capable Qwen3.5 models. The
+    // MultiModalProcessor caches just the VisionConfig copy; the heavy lifting
+    // (stb_image decode + resize + patchify) happens per request.
+    if (auto* q35 = dynamic_cast<model::Qwen3_5Model*>(engine->model_.get())) {
+        if (q35->vision_tower() != nullptr) {
+            auto vision_cfg = static_cast<const model::Qwen3_5Config&>(q35->config()).vision;
+            apply_vision_preprocessor_config(model_path, vision_cfg);
+            engine->mm_processor_ = std::make_unique<MultiModalProcessor>(vision_cfg);
+            engine->image_pad_token_id_ = engine->tokenizer_->get_special_token_id("<|image_pad|>");
+            LOGI.printf("[Engine] Vision pipeline enabled; <|image_pad|>=%d", engine->image_pad_token_id_);
+        }
+    }
+
     // Create decode scratch buffers (pre-allocated for N=1 decode)
     {
         auto fwd_cfg = engine->model_->forward_config();
@@ -158,9 +495,20 @@ std::shared_ptr<InferenceEngine> InferenceEngine::create(const std::string& mode
     engine->profiler_ = std::make_unique<Profiler>(*engine);
     // Local debugging/profiling can skip engine warmup to isolate model correctness from the
     // startup benchmark pass. Normal runs keep warmup enabled.
-    if (std::getenv("ZEDINFER_DISABLE_WARMUP") == nullptr) {
+    //
+    // Hybrid Qwen3.5 models also skip warmup automatically: the warmup path drives
+    // transformer_forward (Qwen2/Qwen3 path) which can't dispatch the hybrid
+    // SSM+attention forward without a real InferenceRequest (for the SSM slot).
+    // Real generation goes through ServingLoop which acquires SSM slots and
+    // routes to hybrid_transformer_forward.
+    const bool is_hybrid_qwen3_5
+        = (engine->model_->model_type() == "qwen3_5" || engine->model_->model_type() == "qwen3_5_moe");
+    if (std::getenv("ZEDINFER_DISABLE_WARMUP") == nullptr && !is_hybrid_qwen3_5) {
         LOG_VERBOSE_(utils::BOTH) << "[Engine] Performing warmup...";
         engine->profiler_->warmup();
+        LOG_VERBOSE_(utils::BOTH) << "[Engine] Ready";
+    } else if (is_hybrid_qwen3_5) {
+        LOG_VERBOSE_(utils::BOTH) << "[Engine] Warmup skipped (Qwen3.5 hybrid path requires per-request SSM slot)";
         LOG_VERBOSE_(utils::BOTH) << "[Engine] Ready";
     } else {
         LOG_VERBOSE_(utils::BOTH) << "[Engine] Warmup skipped by ZEDINFER_DISABLE_WARMUP";
@@ -225,7 +573,7 @@ PerplexityStats InferenceEngine::evaluate_perplexity(const std::vector<std::stri
     double chunk_ppl_m2 = 0.0;
 
     size_t eval_block_size = 16;
-    auto fwd_cfg = model_->forward_config();
+    PerplexityForward forward(*this);
 
     if (config.verbose) {
         LOGI << "[PPL] Start evaluation" << ", run_id=" << result.run_id << ", samples=" << result.total_samples
@@ -287,6 +635,7 @@ PerplexityStats InferenceEngine::evaluate_perplexity(const std::vector<std::stri
                 }
 
                 block_table.seq_len = 0;
+                forward.reset_sequence();
                 const size_t eval_begin = begin + eval_from + 1;
                 double window_nll_sum = 0.0;
                 size_t window_eval_tokens = 0;
@@ -300,9 +649,7 @@ PerplexityStats InferenceEngine::evaluate_perplexity(const std::vector<std::stri
                     tensor_t logits;
                     try {
                         block_allocator_->ensure_blocks(block_table, static_cast<int>(local_end));
-                        model::PagedForwardContext ctx(input_block, static_cast<int>(local_begin), block_table,
-                                                       *block_pool_);
-                        logits = model::transformer_forward(fwd_cfg, ctx, exec_config_);
+                        logits = forward(input_block, static_cast<int>(local_begin), block_table);
                     } catch (const std::runtime_error&) {
                         if (eval_block_size > 1) {
                             eval_block_size = std::max<size_t>(1, eval_block_size / 2);
@@ -466,6 +813,122 @@ PerplexityStats InferenceEngine::evaluate_perplexity(const std::vector<std::stri
 // Block Pool Initialization
 // ============================================================================
 
+model::SSMStatePool* InferenceEngine::ssm_state_pool() {
+    // Currently only Qwen3.5 dense and Qwen3.5-MoE own an SSMStatePool. Both
+    // derive from Qwen3_5Model, so a single downcast resolves either. Other
+    // models return nullptr — the scheduler keeps its single-pool behavior.
+    if (auto* q35 = dynamic_cast<model::Qwen3_5Model*>(model_.get())) {
+        return &q35->ssm_state_pool();
+    }
+    return nullptr;
+}
+
+bool InferenceEngine::has_vision() const {
+    if (auto* q35 = dynamic_cast<const model::Qwen3_5Model*>(model_.get())) {
+        return q35->vision_tower() != nullptr;
+    }
+    return false;
+}
+
+int InferenceEngine::image_pad_token_id() const {
+    return image_pad_token_id_;
+}
+
+EncodedImage InferenceEngine::encode_image_data_uri(std::string_view data_uri) {
+    ImagePayload payload = MultiModalProcessor::decode_data_uri(data_uri);
+    return encode_image_payload(payload);
+}
+
+EncodedImage InferenceEngine::encode_image_payload(const ImagePayload& payload) {
+    auto* q35 = dynamic_cast<model::Qwen3_5Model*>(model_.get());
+    if (!q35 || !q35->vision_tower() || !mm_processor_) {
+        throw std::runtime_error("[Engine] encode_image_payload called on a non-vision model");
+    }
+    ProcessedImage processed = mm_processor_->process(payload, exec_config_);
+    auto embeds = q35->vision_tower()->forward(processed.patches, processed.pos_ids_thw, processed.grid_h,
+                                               processed.grid_w, exec_config_);
+
+    const int sms = q35->vision_tower()->config().spatial_merge_size;
+    EncodedImage out;
+    out.embeds = embeds;
+    out.grid_t = processed.grid_t;
+    out.grid_h = processed.grid_h / sms;
+    out.grid_w = processed.grid_w / sms;
+    const size_t grid_tokens
+        = static_cast<size_t>(out.grid_t) * static_cast<size_t>(out.grid_h) * static_cast<size_t>(out.grid_w);
+    if (grid_tokens != embeds->dim(0)) {
+        throw std::runtime_error("[Engine] image grid tokens (" + std::to_string(grid_tokens)
+                                 + ") do not match vision embedding rows (" + std::to_string(embeds->dim(0)) + ")");
+    }
+    return out;
+}
+
+ImageTokenGrid InferenceEngine::image_token_grid_for(int h, int w) const {
+    if (!has_vision() || !mm_processor_) {
+        throw std::runtime_error("[Engine] image_token_grid_for called on a non-vision model");
+    }
+    return mm_processor_->image_token_grid_for(h, w);
+}
+
+tensor_t InferenceEngine::build_multimodal_input_embeds(const std::vector<int>& input_ids,
+                                                        const std::vector<tensor_t>& image_embeds_chunks) {
+    if (image_pad_token_id_ < 0) {
+        throw std::runtime_error("[Engine] build_multimodal_input_embeds: model has no <|image_pad|> token");
+    }
+    const size_t N = input_ids.size();
+    const size_t hidden_size = model_->config().hidden_size;
+    auto* api = core::context().runtime().api();
+
+    // 1. Host → device upload of input_ids.
+    auto ids_dev = Tensor::create({N}, ZEDINFER_DTYPE_I32, exec_config_.device_type, exec_config_.device_id);
+    api->memcpy_sync(ids_dev->data(), input_ids.data(), N * sizeof(int32_t),
+                     exec_config_.device_type == ZEDINFER_DEVICE_CPU ? ZEDINFER_MEMCPY_H2H : ZEDINFER_MEMCPY_H2D);
+
+    // 2. Text token embed lookup.
+    auto embeds
+        = Tensor::create({N, hidden_size}, exec_config_.data_type, exec_config_.device_type, exec_config_.device_id);
+    ops::embedding(embeds, ids_dev, model_->weights().get_tensor("embed_tokens.weight"));
+
+    if (image_embeds_chunks.empty()) {
+        return embeds;
+    }
+
+    size_t image_rows = 0;
+    for (const auto& c : image_embeds_chunks) { image_rows += c->dim(0); }
+    const size_t image_pad_count
+        = static_cast<size_t>(std::count(input_ids.begin(), input_ids.end(), image_pad_token_id_));
+    if (image_pad_count != image_rows) {
+        throw std::runtime_error("[Engine] build_multimodal_input_embeds: input has " + std::to_string(image_pad_count)
+                                 + " <|image_pad|> token(s), but image embeds have " + std::to_string(image_rows)
+                                 + " row(s)");
+    }
+
+    // 3. Concat all image embeds chunks (in encounter order) so we can scatter
+    //    in a single op call. For the common single-image case this is just a
+    //    pointer rebind; for multi-image we copy each chunk into the right
+    //    offset via D2D memcpy_async.
+    tensor_t image_embeds;
+    if (image_embeds_chunks.size() == 1) {
+        image_embeds = image_embeds_chunks.front();
+    } else {
+        image_embeds = Tensor::create({image_rows, hidden_size}, exec_config_.data_type, exec_config_.device_type,
+                                      exec_config_.device_id);
+        auto* stream = core::context().runtime().stream();
+        size_t off_bytes = 0;
+        const auto kind = exec_config_.device_type == ZEDINFER_DEVICE_CPU ? ZEDINFER_MEMCPY_H2H : ZEDINFER_MEMCPY_D2D;
+        for (const auto& c : image_embeds_chunks) {
+            const size_t bytes = c->numel() * c->elementSize();
+            api->memcpy_async(reinterpret_cast<std::byte*>(image_embeds->data()) + off_bytes, c->data(), bytes, kind,
+                              stream);
+            off_bytes += bytes;
+        }
+    }
+
+    // 4. Scatter into the text embed sequence at <|image_pad|> positions.
+    ops::scatter_image_embeds(embeds, ids_dev, image_embeds, image_pad_token_id_);
+    return embeds;
+}
+
 void InferenceEngine::init_block_pool() {
     if (!scheduler_config_.use_paged_kvcache) {
         LOGI << "[Engine] Paged KV cache disabled, skipping block pool";
@@ -539,7 +1002,25 @@ void InferenceEngine::init_block_pool() {
         LOGW << "[Engine] KV page pool reduced to " << try_blocks << " blocks after allocation retries";
     }
 
-    block_allocator_ = std::make_unique<kvcache::BlockAllocator>(*block_pool_, mc.num_hidden_layers);
+    // Number of KV-bearing layers: for hybrid models (Qwen3.5) only the full-attention
+    // layers contribute KV blocks; linear-attention layers carry SSM state in
+    // SSMStatePool instead and must NOT consume KV slots. For non-hybrid models all
+    // hidden layers carry KV → fall through to num_hidden_layers.
+    size_t num_kv_layers = mc.num_hidden_layers;
+    if (!mc.layer_types.empty()) {
+        size_t full_count = 0;
+        for (const auto& t : mc.layer_types) {
+            if (t == "full_attention") {
+                ++full_count;
+            }
+        }
+        if (full_count > 0 && full_count < mc.num_hidden_layers) {
+            num_kv_layers = full_count;
+            LOGI << "[Engine] Hybrid model: KV pool sized for " << full_count << " full-attention layers (of "
+                 << mc.num_hidden_layers << " total)";
+        }
+    }
+    block_allocator_ = std::make_unique<kvcache::BlockAllocator>(*block_pool_, num_kv_layers);
 }
 
 // ============================================================================

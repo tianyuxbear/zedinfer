@@ -1,7 +1,7 @@
 #include "backend/device/device.hpp"
 #include "plog/Severity.h"
-#include "utils/logging.hpp"
-#include "utils/system_info.hpp"
+#include "utils/banner.hpp"
+#include "utils/logging_cli.hpp"
 #include "zedinfer.h"
 #include "zedinfer/engine.hpp"
 #include "zedinfer/scheduler.hpp"
@@ -18,8 +18,7 @@ using namespace zedinfer;
 
 int main(int argc, char* argv[]) {
     // 1. Argument Parsing Setup
-    argparse::ArgumentParser program("ZedInfer Benchmarks", std::string("zedinfer ") + ZEDINFER_VERSION + " (build "
-                                                                + ZEDINFER_GIT_HASH + ", " + ZEDINFER_BUILD_DATE + ")");
+    argparse::ArgumentParser program("ZedInfer Benchmarks", ZEDINFER_VERSION);
 
     program.add_argument("model_path").help("Path to the model directory");
 
@@ -28,7 +27,10 @@ int main(int argc, char* argv[]) {
         .default_value(128)
         .scan<'i', int>(); // Use scan to enforce integer parsing
 
-    program.add_argument("-d", "--decode-len").help("Number of tokens to decode").default_value(128).scan<'i', int>();
+    program.add_argument("-d", "--decode-len", "--max-tokens")
+        .help("Number of tokens to decode")
+        .default_value(128)
+        .scan<'i', int>();
 
     program.add_argument("-r", "--rounds").help("Number of benchmark rounds").default_value(3).scan<'i', int>();
 
@@ -39,6 +41,24 @@ int main(int argc, char* argv[]) {
         .default_value(0.9f)
         .scan<'g', float>();
 
+    program.add_argument("--mtp")
+        .help("Enable Qwen3.5 MTP speculative decoding (off by default). "
+              "Only effective when the loaded model ships an MTP head.")
+        .default_value(false)
+        .implicit_value(true);
+
+    program.add_argument("--enable-thinking")
+        .help("Accepted for CLI parity; token-level profiler does not render chat prompts")
+        .default_value(false)
+        .implicit_value(true);
+
+    program.add_argument("--max-think-tokens")
+        .help("Accepted for CLI parity; token-level profiler does not render chat prompts")
+        .default_value(0)
+        .scan<'i', int>();
+
+    utils::addLoggingArguments(program, "logs/bench.log");
+
     try {
         program.parse_args(argc, argv);
     } catch (const std::exception& err) {
@@ -47,8 +67,13 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    utils::initLoggerWithOverwrite(plog::verbose, "logs/bench.log");
-    LOG_VERBOSE_(utils::BOTH) << utils::get_runtime_info();
+    try {
+        utils::initLoggerFromArguments(program);
+    } catch (const std::exception& err) {
+        std::cerr << err.what() << std::endl;
+        return 1;
+    }
+    utils::printZedInferBanner();
 
     // 2. Retrieve Arguments
     auto model_path = program.get<std::string>("model_path");
@@ -56,14 +81,29 @@ int main(int argc, char* argv[]) {
     auto decode_len = program.get<int>("--decode-len");
     auto rounds = program.get<int>("--rounds");
     bool use_nvidia = program.get<bool>("--nvidia");
+    bool enable_thinking = program.get<bool>("--enable-thinking");
+    int max_think_tokens = program.get<int>("--max-think-tokens");
+    if (decode_len <= 0) {
+        std::cerr << "--decode-len/--max-tokens must be > 0 for benchmark runs" << std::endl;
+        return 1;
+    }
+    if (max_think_tokens < 0) {
+        std::cerr << "--max-think-tokens must be >= 0" << std::endl;
+        return 1;
+    }
 
     zedinferDeviceType_t device_type = use_nvidia ? ZEDINFER_DEVICE_NVIDIA : ZEDINFER_DEVICE_CPU;
     device::Device device(device_type, 0);
 
     SchedulerConfig sched_config;
     sched_config.gpu_memory_utilization = program.get<float>("--gpu-memory-utilization");
+    sched_config.mtp_enabled = program.get<bool>("--mtp");
 
     LOGI << "Initializing engine with device: " << (use_nvidia ? "NVIDIA" : "CPU");
+    if (enable_thinking || max_think_tokens > 0) {
+        LOGW << "--enable-thinking/--max-think-tokens have no effect in bench; profiler uses synthetic token ids "
+                "directly";
+    }
     auto start = std::chrono::high_resolution_clock::now();
 
     auto engine = InferenceEngine::create(model_path, device, sched_config);
@@ -80,7 +120,7 @@ int main(int argc, char* argv[]) {
     double total_prefill_time = 0.0;
     double total_decode_time = 0.0;
 
-    std::cout << "\n[ZedInfer] Running " << rounds << " rounds of profiling..." << std::endl;
+    LOGI << "Running " << rounds << " rounds of profiling...";
 
     for (int i = 0; i < rounds; ++i) {
         auto res = engine->profiler().profile(prefill_len, decode_len);

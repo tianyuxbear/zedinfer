@@ -31,18 +31,22 @@
 - **Paged KV cache** — Fixed-size block pool with static VRAM budget, O(1) block allocation
 - **Paged attention** — NVIDIA path can dispatch to FlashInfer for decode/prefill with legacy CUDA kernels kept as fallback
 - **Prefix caching** — Cross-request KV block sharing via chain-hashed content matching and reference counting
-- **HTTP API** — OpenAI-compatible `/v1/chat/completions` with SSE streaming and embedded web chat UI
+- **HTTP API** — OpenAI-compatible `/v1/chat/completions`, OpenAI Responses `/v1/responses`, Anthropic Messages `/v1/messages`, SSE streaming, and embedded web chat UI
 - **Stateful sessions** — Server-side KV cache reuse across multi-turn conversations
 - **Optimized operators** — cuBLAS/cuBLASLt for GPU linear, oneDNN for CPU linear, pre-allocated decode scratch buffers
-- **Direct model forward** — No graph execution overhead; single shared `transformer_forward()` loop
+- **Direct model forward** — No graph execution overhead; single shared forward loop
 - **Zero Python runtime** — Pure C++ serving path, no Python dependency at inference time
 - **FlashInfer integration** — Optional NVIDIA paged-attention backend enabled with `--flashinfer=y`
+- **Qwen3.5 / Qwen3.6 family (hybrid-MoE-VL)** — GatedDeltaNet linear attention + full attention + MoE/dense FFN, per-request SSM state pool, SSM snapshot cache; 3D mRoPE, GPTQ INT4
+- **MoE + expert offloading** — `ExpertPool` with PINNED_LRU host-staged experts (run 35B-A3B INT4 on a 24GB GPU) + GPU top-k routing, auto GPU-slot sizing
+- **Multimodal & reasoning** — Qwen3.5-VL vision tower; OpenAI-compatible image input, `reasoning_content`, tool calls, per-request sampling overrides
+- **MTP speculative decoding** — opt-in `--mtp` multi-token prediction with true rejection sampling; net speedup on dense models + structured workloads
 
 ### Planned (see `docs/plan/`)
 
 - 🔜 **CUDA Graph** — Capture/replay decode forward pass (Phase 1 DecodeScratch done)
-- 📋 **INT8/INT4 quantization** — Weight-only quantization for 2-4x memory reduction
-- 📋 **Heterogeneous inference** — CPU/GPU mixed execution with expert offloading for MoE models
+- 📋 **Fused MoE GEMM** — grouped int4 expert GEMM for ALL-GPU MoE (raises baseline; not for the offload path)
+- 📋 **Wider INT4 coverage** — quantize linear-attn / embed / lm_head (currently bf16) to fit dense 27B on 24GB
 
 ---
 
@@ -50,12 +54,15 @@
 
 | Model | Architecture | Parameters | Tested |
 |-------|-------------|-----------|--------|
-| DeepSeek-R1-Distill-Qwen-1.5B | Qwen2 | 1.5B | ✅ |
-| DeepSeek-R1-0528-Qwen3-8B | Qwen3 | 8B | ✅ |
-| Qwen2.5-Math-1.5B-Instruct | Qwen2 | 1.5B | ✅ |
-| Qwen3-8B | Qwen3 | 8B | ✅ |
+| DeepSeek-R1-Distill-Qwen-1.5B | Qwen2 (dense) | 1.5B | ✅ |
+| DeepSeek-R1-0528-Qwen3-8B | Qwen3 (dense) | 8B | ✅ |
+| Qwen2.5-Math-1.5B-Instruct | Qwen2 (dense) | 1.5B | ✅ |
+| Qwen3-8B | Qwen3 (dense) | 8B | ✅ |
+| Qwen3.5-27B / Qwen3.6-27B | Qwen3.5 hybrid dense (linear-attn + full-attn, VL) | 27B | ✅ |
+| Qwen3.5-35B-A3B / Qwen3.6-35B-A3B | Qwen3.5 hybrid MoE (256 experts, ~3B active, VL) | 35B | ✅ |
 
-Adding a new Qwen-family model requires only defining a `ModelForwardConfig` (bias/Q-K norm flags) — zero forward logic needed.
+- Qwen2 / Qwen3 (dense): adding a new one needs only a `ModelForwardConfig` (bias / Q-K norm flags) — no forward logic.
+- Qwen3.5 / Qwen3.6: hybrid (GatedDeltaNet + full attention) + MoE/dense + vision; GPTQ INT4 supported; 35B-A3B runs on 24GB via expert offload. Tested via `ping` / `serve` (text + image) on B200.
 
 ---
 
@@ -167,6 +174,10 @@ ZEDINFER_DISABLE_FLASHINFER=1 xmake run bench /path/to/model --nvidia -p 128 -d 
 ```
 
 `ZEDINFER_DISABLE_FLASHINFER=1` keeps the build unchanged but forces the runtime back to the legacy paged-attention kernels. `ZEDINFER_FLASHINFER_DISABLE_FASTPATH=1` disables the single-request decode fast path inside the FlashInfer wrapper for planner-path debugging.
+
+### Logging
+
+All CLI tools support shared logging options such as `--log-level`, `--log-file`, `--log-to-console`, `--log-append`, and `--log-overwrite`. For the logging contract, stdout/stderr routing, file behavior, banner policy, and developer rules, see [docs/guide/logging.md](docs/guide/logging.md).
 
 ---
 
@@ -285,6 +296,7 @@ zedinfer/
 ├── docs/
 │   ├── architecture.md              # Current system design
 │   ├── guide/flashinfer.md          # FlashInfer backend integration notes
+│   ├── guide/logging.md             # Logging behavior and developer rules
 │   ├── roadmap.md                   # Status + future plans
 │   └── plan/                        # Design docs for upcoming features
 ├── xmake.lua                        # Build configuration

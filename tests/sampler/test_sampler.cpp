@@ -1,5 +1,6 @@
 #include "backend/tensor/tensor.hpp"
 #include "frontend/sampler/sampler.hpp"
+#include "utils/types.hpp"
 
 #include <cmath>
 #include <gtest/gtest.h>
@@ -19,6 +20,15 @@ static tensor_t make_logits(const std::vector<float>& data, size_t vocab_size) {
 static tensor_t make_logits_2d(const std::vector<float>& data, size_t seq_len, size_t vocab_size) {
     auto t = Tensor::create({seq_len, vocab_size}, ZEDINFER_DTYPE_F32, ZEDINFER_DEVICE_CPU, 0);
     t->load(data.data());
+    return t;
+}
+
+static tensor_t make_f16_logits_2d(const std::vector<float>& data, size_t seq_len, size_t vocab_size) {
+    std::vector<fp16_t> converted(data.size());
+    for (size_t i = 0; i < data.size(); ++i) { converted[i] = utils::cast<fp16_t>(data[i]); }
+
+    auto t = Tensor::create({seq_len, vocab_size}, ZEDINFER_DTYPE_F16, ZEDINFER_DEVICE_CPU, 0);
+    t->load(converted.data());
     return t;
 }
 
@@ -98,6 +108,19 @@ TEST_F(ArgmaxSamplerTest, WorksWith2DLogits) {
     EXPECT_EQ(token, 0); // argmax of last row
 }
 
+TEST_F(ArgmaxSamplerTest, WorksWithOffset2DLogitsSlice) {
+    std::vector<float> data = {
+        0.1f, 0.2f, 0.3f, 9.0f, // row 0
+        0.1f, 0.2f, 8.0f, 0.3f, // row 1
+        0.1f, 7.0f, 0.2f, 0.3f, // row 2
+    };
+    auto logits = make_logits_2d(data, 3, 4);
+
+    int token = sampler_->sample(logits->slice(0, 1, 3));
+
+    EXPECT_EQ(token, 1);
+}
+
 TEST_F(ArgmaxSamplerTest, LargeVocab) {
     // vocab_size = 1000, max at position 777
     std::vector<float> data(1000, 0.0f);
@@ -138,6 +161,21 @@ TEST(GeneralSamplerTest, LowTemperatureApproachesArgmax) {
     auto logits = make_logits({0.1f, 0.5f, 0.3f, 0.9f, 0.2f}, 5);
     int token = s.sample(logits);
     EXPECT_EQ(token, 3); // should pick max with near-zero temperature
+}
+
+TEST(GeneralSamplerTest, LowPrecisionSliced2DLogitsUseLastSlicedRow) {
+    SamplerParams params(0.01f, 0, 1.0f, 123);
+    GeneralSampler s(params);
+    std::vector<float> data = {
+        0.1f, 0.2f, 0.3f, 9.0f, // row 0
+        0.1f, 0.2f, 8.0f, 0.3f, // row 1
+        0.1f, 7.0f, 0.2f, 0.3f, // row 2
+    };
+    auto logits = make_f16_logits_2d(data, 3, 4);
+
+    int token = s.sample(logits->slice(0, 1, 3));
+
+    EXPECT_EQ(token, 1);
 }
 
 TEST(GeneralSamplerTest, TopKFiltering) {

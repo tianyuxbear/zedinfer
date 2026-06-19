@@ -352,8 +352,10 @@ ZEDINFER_MOE_GPU_SLOTS = N   N per layer (explicit override).
                              don't disagree:
                                allowed   = total × gpu_memory_utilization
                                headroom  = max(0, allowed − used)
-                               budget    = headroom × kExpertVramFraction
-                                                              (= 0.70)
+                               reserve   = max(4 GiB, allowed × 0.20)
+                               budget    = min(headroom × fraction,
+                                               headroom − reserve)
+                                                             (fraction defaults to 0.40)
                              Then:
                                • Estimate per-expert bytes (quant-aware).
                                • Fits → ALL_GPU.
@@ -367,9 +369,12 @@ from `SchedulerConfig`). Same `ExpertPoolConfig` drives both the loader's CPU-pi
 routing predicate and the pool strategy, so they can't drift.
 
 Auto-sizing caveats:
-- The 70% headroom-fraction is conservative — biased toward fewer slots over KV
-  starvation. The remaining 30% covers KV cache + non-expert weights + activations
-  + scratch. Set `ZEDINFER_MOE_GPU_SLOTS=N` to override when the heuristic mis-sizes.
+- The default auto path is deliberately KV-friendly: it only lets experts use 40%
+  of the util-aware headroom and also reserves at least `max(4 GiB, allowed × 0.20)`
+  away from expert slots for KV cache + non-expert weights + activations + scratch.
+  Set `ZEDINFER_MOE_GPU_SLOTS=N` to force a slot count, or tune
+  `ZEDINFER_MOE_VRAM_FRACTION` / `ZEDINFER_MOE_RESERVE_MB` when the heuristic
+  mis-sizes for a specific workload.
 - "used" comes from `get_memory_info()` which reflects all processes on the GPU.
   On a busy multi-tenant GPU, transient pressure from other workloads can flip the
   decision between back-to-back runs. The override env var is the escape hatch.

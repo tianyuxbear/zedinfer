@@ -42,7 +42,9 @@ public:
     // Check if server-side KV cache is consistent (detects session expiry/recreation)
     bool is_valid() const { return block_table_.num_layers > 0; }
 
-    const std::string& output_prefix() const { return template_.output_prefix; }
+    void set_enable_thinking(bool enable_thinking) { config_.enable_thinking = enable_thinking; }
+    bool enable_thinking() const { return config_.enable_thinking; }
+    const std::string& output_prefix() const;
     const ChatTemplate& chat_tmpl() const { return template_; }
 
 private:

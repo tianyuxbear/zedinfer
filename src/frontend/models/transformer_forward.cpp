@@ -16,7 +16,7 @@ namespace zedinfer::model {
  * dynamic allocation via Tensor::create.
  */
 tensor_t transformer_forward(const ModelForwardConfig& model, PagedForwardContext& ctx,
-                             const ExecutorConfig& exec_config, DecodeScratch* scratch) {
+                             const ExecutorConfig& exec_config, DecodeScratch* scratch, tensor_t input_embeds) {
     const auto& cfg = model.config;
     const size_t N = static_cast<size_t>(ctx.num_tokens());
     const size_t hidden_size = cfg.hidden_size;
@@ -46,9 +46,18 @@ tensor_t transformer_forward(const ModelForwardConfig& model, PagedForwardContex
         ctx.prepare_inputs(ids, pos_ids, exec_config);
     }
 
-    // Embedding
-    auto hidden = use_scratch ? scratch->hidden : make({N, hidden_size});
-    ops::embedding(hidden, ids, model.W("embed_tokens.weight"));
+    // Embedding (or external embeds for multimodal vision pipeline).
+    // When input_embeds is provided the caller has already shaped it as
+    // [N, hidden_size] with vision-tower output scattered into the right
+    // token positions; we adopt it as the layer-0 hidden state directly.
+    // Vision pipelines always run prefill (N > 1), so scratch is unused here.
+    tensor_t hidden;
+    if (input_embeds) {
+        hidden = input_embeds;
+    } else {
+        hidden = use_scratch ? scratch->hidden : make({N, hidden_size});
+        ops::embedding(hidden, ids, model.W("embed_tokens.weight"));
+    }
 
     // Transformer layers
     for (size_t L = 0; L < cfg.num_hidden_layers; ++L) {

@@ -5,10 +5,13 @@
 #include "zedinfer/batch_context.hpp"
 #include "zedinfer/request.hpp"
 
+#include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <deque>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <vector>
 
 namespace zedinfer {
@@ -20,10 +23,15 @@ namespace kvcache {
 class KVCache;
 class BlockAllocator;
 class PrefixCache;
+class SSMSnapshotCache;
 } // namespace kvcache
+namespace model {
+class SSMStatePool;
+} // namespace model
 namespace sampler {
 class Sampler;
-}
+class GeneralSampler;
+} // namespace sampler
 namespace tokenizer {
 class Tokenizer;
 }
@@ -41,6 +49,14 @@ struct SchedulerConfig {
     float gpu_memory_utilization = 0.9f;
     int kv_block_size = 16;
     bool use_paged_kvcache = true;
+
+    // Qwen3.5 MTP speculative decoding. Off by default — must be opted in
+    // via --mtp on the CLI (or ZEDINFER_MTP_SPEC=1 / ZEDINFER_MTP_DEBUG=1
+    // env vars, kept as research toggles). When on AND the loaded model
+    // ships an MTP head, the serving loop runs MTPModule after each main
+    // forward to draft t+2 and the next scheduler step issues a 2-token
+    // verify batch.
+    bool mtp_enabled = false;
 };
 
 /**
@@ -60,6 +76,32 @@ public:
     // Set prefix cache (optional, enables prefix sharing across requests)
     void set_prefix_cache(kvcache::PrefixCache* cache);
 
+    // Set SSM snapshot cache (optional, paired with prefix_cache on hybrid
+    // models). KV-only partial hits are ignored because SSM/conv state would
+    // be prefix-blind. Full-prompt hits are also rejected until logits-aware
+    // prefix caching exists, because cached KV/SSM state alone cannot produce
+    // the first sampled token.
+    void set_ssm_snapshot_cache(kvcache::SSMSnapshotCache* cache);
+
+    // Wire an SSM state pool for hybrid models (Qwen3.5). When set, can_admit
+    // also checks pool availability; admission grabs a slot, completion releases it.
+    // Pass nullptr (the default) for non-hybrid models.
+    void set_ssm_state_pool(model::SSMStatePool* pool);
+
+    // Register the reasoning model's <think> / </think> token ids so the
+    // scheduler can (a) initialize per-request in_thinking state by scanning
+    // the prompt and (b) force-emit </think> after GenerationConfig::
+    // max_think_tokens tokens to escape long-generation drift on GPTQ-Int4
+    // weights. Pass -1 for models that do not have these as special tokens
+    // (the force-emit path becomes a no-op).
+    //
+    // `double_newline_id` is the tokenizer id for "\n\n". After the scheduler
+    // force-emits </think>, it also force-emits one "\n\n" to recreate the
+    // </think>\n\n pattern the model was trained on, anchoring the post-
+    // thinking state so it can transition to the answer instead of
+    // continuing the truncated reasoning. Pass -1 to skip the newline.
+    void set_think_token_ids(int open_id, int close_id, int double_newline_id = -1);
+
     /**
      * Submit a new request. Thread-safe (can be called from HTTP threads).
      */
@@ -69,6 +111,14 @@ public:
     bool has_work() const;
     int pending_count() const;
     int active_count() const;
+
+    // Block the calling (serving) thread until there is work to do or `running`
+    // becomes false. The wait shares submit_mutex_ with submit(), so the wakeup
+    // condition is evaluated under the same lock that guards the queues — no
+    // lost wakeups and no data race on the predicate state.
+    void wait_for_work(const std::atomic<bool>& running);
+    // Wake any thread parked in wait_for_work() (e.g. on stop()).
+    void wake_waiters();
 
     // Remove completed/failed requests from active list (called after fail_batch)
     void cleanup_failed_requests();
@@ -82,23 +132,53 @@ public:
     /**
      * Process results after model forward.
      * Samples tokens, advances state, completes finished requests.
+     *
+     * Three samplers are passed so the scheduler can route each request:
+     *   - default_sampler: used when the request has NO sampling overrides
+     *     (matches the model's generation_config.json choice)
+     *   - argmax_sampler:  used when override sets use_argmax=true or
+     *     temperature == 0 (OpenAI greedy semantics)
+     *   - general_sampler: used otherwise; per-request temperature/top_p/top_k
+     *     /repetition_penalty/seed land via setParams() right before sample()
      */
-    void process_results(ScheduledBatch& batch, tensor_t logits, sampler::Sampler& sampler,
+    void process_results(ScheduledBatch& batch, tensor_t logits, sampler::Sampler& default_sampler,
+                         sampler::Sampler& argmax_sampler, sampler::GeneralSampler& general_sampler,
                          tokenizer::Tokenizer& tokenizer, const std::vector<int>& stop_token_ids);
 
 private:
     SchedulerConfig config_;
     kvcache::BlockAllocator* block_allocator_ = nullptr;
     kvcache::PrefixCache* prefix_cache_ = nullptr;
-    std::mutex submit_mutex_;
+    kvcache::SSMSnapshotCache* ssm_snapshot_cache_ = nullptr;
+    model::SSMStatePool* ssm_state_pool_ = nullptr;
+    int think_open_token_id_ = -1;
+    int think_close_token_id_ = -1;
+    int double_newline_token_id_ = -1;
+    // mutable so the const status queries (has_work/pending_count/active_count)
+    // can lock it; they are called from HTTP threads concurrently with submit().
+    mutable std::mutex submit_mutex_;
+    std::condition_variable work_cv_;
 
     std::deque<std::unique_ptr<InferenceRequest>> waiting_queue_;
     std::vector<std::unique_ptr<InferenceRequest>> active_requests_; // decode phase
 
     uint64_t next_request_id_ = 1;
+    // Round-robin cursor for hybrid single-request-per-step scheduling. Rotates
+    // which admitted request advances each step so concurrent hybrid requests
+    // interleave instead of running strictly FIFO. Unused on non-hybrid models.
+    uint64_t rr_cursor_ = 0;
+
+    // Hybrid (Qwen3.5-family) models carry per-sequence SSM/conv recurrent state
+    // and have no fused multi-sequence forward yet, so each forward processes a
+    // single request. This assembles a one-request batch (one decode OR one
+    // prefill chunk), round-robin across admitted requests. Selected by
+    // schedule() when an SSM state pool is wired.
+    ScheduledBatch schedule_hybrid_single();
 
     bool can_admit(const InferenceRequest& req) const;
     void allocate_blocks_for_request(InferenceRequest* req);
+    void fail_queued_request(std::unique_ptr<InferenceRequest> req, const std::string& error_msg);
+    void fail_active_request(InferenceRequest& req, const std::string& error_msg);
     void complete_request(InferenceRequest& req);
 };
 

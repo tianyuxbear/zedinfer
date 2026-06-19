@@ -1,10 +1,11 @@
 #include "backend/device/device.hpp"
 #include "plog/Severity.h"
-#include "utils/logging.hpp"
-#include "utils/system_info.hpp"
+#include "utils/banner.hpp"
+#include "utils/logging_cli.hpp"
 #include "zedinfer.h"
 #include "zedinfer/engine.hpp"
 #include "zedinfer/scheduler.hpp"
+#include "zedinfer/version.hpp"
 
 #include <argparse/argparse.hpp>
 #include <nlohmann/json.hpp>
@@ -180,10 +181,7 @@ void maybe_write_csv(const std::string& csv_path, const std::string& model_tag, 
 } // namespace
 
 int main(int argc, char* argv[]) {
-    utils::initLoggerWithOverwrite(plog::verbose, "logs/ppl.log");
-    LOG_VERBOSE_(utils::BOTH) << utils::get_runtime_info();
-
-    argparse::ArgumentParser program("ZedInfer PPL");
+    argparse::ArgumentParser program("ZedInfer PPL", ZEDINFER_VERSION);
 
     program.add_argument("model_path").help("Path to model directory");
 
@@ -217,6 +215,18 @@ int main(int argc, char* argv[]) {
         .default_value(0.9f)
         .scan<'g', float>();
 
+    program.add_argument("--enable-thinking")
+        .help("Accepted for CLI parity; perplexity uses raw tokenized dataset text")
+        .default_value(false)
+        .implicit_value(true);
+
+    program.add_argument("--max-think-tokens")
+        .help("Accepted for CLI parity; perplexity uses raw tokenized dataset text")
+        .default_value(0)
+        .scan<'i', int>();
+
+    utils::addLoggingArguments(program, "logs/ppl.log");
+
     try {
         program.parse_args(argc, argv);
     } catch (const std::exception& err) {
@@ -224,6 +234,14 @@ int main(int argc, char* argv[]) {
         std::cerr << program;
         return 1;
     }
+
+    try {
+        utils::initLoggerFromArguments(program);
+    } catch (const std::exception& err) {
+        std::cerr << err.what() << std::endl;
+        return 1;
+    }
+    utils::printZedInferBanner();
 
     const auto model_path = program.get<std::string>("model_path");
     const auto dataset_path = program.get<std::string>("dataset_path");
@@ -233,9 +251,11 @@ int main(int argc, char* argv[]) {
     const int context_window_i = program.get<int>("--context-window");
     const auto csv_out = program.get<std::string>("--csv-out");
     const bool use_nvidia = program.get<bool>("--nvidia");
+    const bool enable_thinking = program.get<bool>("--enable-thinking");
+    const int max_think_tokens = program.get<int>("--max-think-tokens");
 
-    if (max_samples_i < 0 || max_length_i < 0 || context_window_i < 0) {
-        std::cerr << "max-samples, max-length and context-window must be >= 0" << std::endl;
+    if (max_samples_i < 0 || max_length_i < 0 || context_window_i < 0 || max_think_tokens < 0) {
+        std::cerr << "max-samples, max-length, context-window and max-think-tokens must be >= 0" << std::endl;
         return 1;
     }
 
@@ -262,6 +282,10 @@ int main(int argc, char* argv[]) {
 
     SchedulerConfig sched_config;
     sched_config.gpu_memory_utilization = program.get<float>("--gpu-memory-utilization");
+    if (enable_thinking || max_think_tokens > 0) {
+        LOGW
+            << "--enable-thinking/--max-think-tokens have no effect in ppl; perplexity uses raw tokenized dataset text";
+    }
 
     LOGI << "Loaded samples: " << samples.size();
     LOGI << "Initializing engine on device: " << device_name;

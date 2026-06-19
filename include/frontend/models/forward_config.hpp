@@ -192,10 +192,15 @@ struct ModelForwardConfig {
     tensor_t v_bias(const std::string& p) const { return has_qkv_bias ? W(p + "self_attn.v_proj.bias") : nullptr; }
 };
 
-// Shared transformer forward loop (defined in transformer_forward.cpp)
+// Shared transformer forward loop (defined in transformer_forward.cpp).
+// `input_embeds`: when non-null, used directly as the layer-0 hidden state in
+// place of the embed_tokens lookup. Hybrid Qwen3.5 vision pipelines fill this
+// with vision-tower output scattered over the token positions; non-vision
+// callers pass nullptr and the lookup happens normally.
 class PagedForwardContext;
 struct DecodeScratch;
 tensor_t transformer_forward(const ModelForwardConfig& model, PagedForwardContext& ctx,
-                             const ExecutorConfig& exec_config, DecodeScratch* scratch = nullptr);
+                             const ExecutorConfig& exec_config, DecodeScratch* scratch = nullptr,
+                             tensor_t input_embeds = nullptr);
 
 } // namespace zedinfer::model

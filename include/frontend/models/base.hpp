@@ -3,6 +3,7 @@
 #include "backend/tensor/tensor.hpp"
 #include "zedinfer.h"
 
+#include <array>
 #include <functional>
 #include <memory>
 #include <nlohmann/json.hpp>
@@ -62,6 +63,31 @@ struct QuantizationConfig {
     }
 };
 
+struct LinearAttnConfig {
+    int num_v_heads = 0;
+    int value_head_dim = 0;
+    int num_k_heads = 0;
+    int key_head_dim = 0;
+    int d_state = 0;         // inferred from in_proj_b shape; defaults to value_head_dim during parse
+    int conv_kernel_dim = 4;
+    std::string state_dtype; // "bfloat16" | "float32" | "float16"
+};
+
+struct VisionConfig {
+    int depth = 0;
+    int hidden_size = 0;
+    int out_hidden_size = 0;
+    int num_heads = 0;
+    int patch_size = 16;
+    int temporal_patch_size = 2;
+    int spatial_merge_size = 2;
+    int num_position_embeddings = 0;
+    int intermediate_size = 0;
+    float layer_norm_eps = 1e-6f;
+    int max_pixels = 16777216; // 4096*4096 default; HF preprocessor_config typically caps lower
+    int min_pixels = 0;
+};
+
 struct ModelConfig {
     std::vector<std::string> architectures;
     std::string model_type;
@@ -87,6 +113,25 @@ struct ModelConfig {
     bool tie_word_embeddings;
 
     QuantizationConfig quant_config;
+
+    // Hybrid SSM + softmax attention (Qwen3.5 family).
+    // Zero-valued / empty for non-hybrid models (Qwen2 / Qwen3 / Qwen3-MoE).
+    std::vector<std::string> layer_types; // "linear_attention" | "full_attention" per layer
+    bool attn_output_gate = false;
+    float partial_rotary_factor = 1.0f;
+    std::array<int, 3> mrope_section{0, 0, 0};
+    bool mrope_interleaved = false;
+    int mtp_num_hidden_layers = 0;
+    LinearAttnConfig linear_attn;
+
+    bool has_vision = false;
+    VisionConfig vision;
+
+    // Special-token IDs surfaced for multimodal preprocessing.
+    int image_token_id = -1;
+    int video_token_id = -1;
+    int vision_start_token_id = -1;
+    int vision_end_token_id = -1;
 
     virtual ~ModelConfig() = default;
 };

@@ -2,9 +2,13 @@
 #include "frontend/loader/safetensors.hpp"
 #include "frontend/models/qwen2.hpp"
 #include "frontend/models/qwen3.hpp"
+#include "frontend/models/qwen3_5.hpp"
+#include "frontend/models/qwen3_5_config.hpp"
+#include "frontend/models/qwen3_5_moe.hpp"
 #include "frontend/models/qwen3_moe.hpp"
 #include "utils/types.hpp"
 #include "zedinfer.h"
+#include "zedinfer/activation.hpp"
 #ifdef ZEDINFER_USE_TERMBAR
 #include "termbar.h"
 #endif
@@ -70,11 +74,83 @@ size_t estimate_per_expert_bytes(const Qwen3MoEConfig& cfg) {
     return 3 * hidden * inter * elem_bytes;
 }
 
+double parse_env_fraction(const char* name, double default_value) {
+    const char* env = std::getenv(name);
+    if (env == nullptr || *env == '\0') {
+        return default_value;
+    }
+
+    double value = 0.0;
+    try {
+        size_t consumed = 0;
+        value = std::stod(env, &consumed);
+        if (consumed != std::string(env).size()) {
+            throw std::invalid_argument("trailing characters");
+        }
+    } catch (const std::exception& e) {
+        throw std::runtime_error(std::string(name) + ": invalid fraction '" + env + "' (" + e.what() + ")");
+    }
+
+    if (!(value > 0.0 && value <= 1.0)) {
+        throw std::runtime_error(std::string(name) + " must be in (0, 1], got " + std::to_string(value));
+    }
+    return value;
+}
+
+size_t parse_env_mib(const char* name, size_t default_bytes) {
+    const char* env = std::getenv(name);
+    if (env == nullptr || *env == '\0') {
+        return default_bytes;
+    }
+
+    unsigned long long mib = 0;
+    try {
+        size_t consumed = 0;
+        mib = std::stoull(env, &consumed);
+        if (consumed != std::string(env).size()) {
+            throw std::invalid_argument("trailing characters");
+        }
+    } catch (const std::exception& e) {
+        throw std::runtime_error(std::string(name) + ": invalid MiB value '" + env + "' (" + e.what() + ")");
+    }
+
+    constexpr size_t kMiB = 1024ULL * 1024ULL;
+    if (mib > static_cast<unsigned long long>(std::numeric_limits<size_t>::max() / kMiB)) {
+        throw std::runtime_error(std::string(name) + " is too large: " + env + " MiB");
+    }
+    return static_cast<size_t>(mib) * kMiB;
+}
+
+// Number of concurrent sequences a hybrid (Qwen3.5-family) model is sized for.
+// This is the SSMStatePool slot count: each in-flight request owns one slot of
+// per-sequence GatedDeltaNet + causal-conv recurrent state (~tens of MB on the
+// 35B model), so the value trades VRAM for concurrency. The scheduler admits at
+// most this many hybrid requests at once and interleaves them one forward per
+// step. Default keeps a few slots so concurrent requests don't serialize behind
+// each other; override via ZEDINFER_MAX_CONCURRENT (clamped to [1, 256]).
+int resolve_hybrid_max_concurrent() {
+    constexpr int kDefault = 4;
+    const char* env = std::getenv("ZEDINFER_MAX_CONCURRENT");
+    if (env == nullptr || *env == '\0') {
+        return kDefault;
+    }
+    try {
+        size_t consumed = 0;
+        long value = std::stol(env, &consumed);
+        if (consumed == std::string(env).size() && value >= 1 && value <= 256) {
+            return static_cast<int>(value);
+        }
+    } catch (const std::exception&) {}
+    LOGW << "[Model] Invalid ZEDINFER_MAX_CONCURRENT='" << env << "', using default " << kDefault;
+    return kDefault;
+}
+
 // Decide ExpertPoolConfig for a Qwen3MoE model. Order:
 //  1. If ZEDINFER_MOE_GPU_SLOTS is set: parse and respect it.
 //  2. Else: auto-size. Apply gpu_memory_utilization the same way init_block_pool does
-//     (allowed = total × util; headroom = allowed − used), then carve out a fraction
-//     of headroom for experts. Falls back to ALL_GPU when experts fit.
+//     (allowed = total × util; headroom = allowed − used), reserve conservative
+//     headroom for non-expert weights + KV + runtime scratch, then carve out a
+//     fraction of what remains for experts. Falls back to ALL_GPU when experts fit.
 //
 // Using the same util-aware formula as init_block_pool prevents the loader from picking
 // ALL_GPU on a budget the engine will then refuse to honor (e.g. user passes
@@ -127,16 +203,32 @@ ExpertPoolConfig compute_moe_pool_config(const Qwen3MoEConfig& cfg, zedinferDevi
     const size_t per_expert = estimate_per_expert_bytes(cfg);
     const size_t total_expert_bytes = cfg.num_experts * cfg.num_hidden_layers * per_expert;
 
-    // Of the headroom, experts may take up to kExpertVramFraction; the rest covers
-    // KV cache + non-expert weights + activations + scratch.
-    constexpr double kExpertVramFraction = 0.70;
-    const size_t expert_budget = static_cast<size_t>(static_cast<double>(headroom_bytes) * kExpertVramFraction);
+    // The old 70% default was too optimistic because this decision runs before
+    // non-expert model weights, SSM state, and vision/runtime scratch have consumed
+    // VRAM. Keep the automatic path KV-friendly by default; users who prefer lower
+    // expert miss rates can still force a slot count via ZEDINFER_MOE_GPU_SLOTS.
+    constexpr size_t kMiB = 1024ULL * 1024ULL;
+    constexpr size_t kGiB = 1024ULL * kMiB;
+    constexpr double kDefaultExpertVramFraction = 0.40;
+    constexpr double kDefaultRuntimeReserveFraction = 0.20;
+    constexpr size_t kDefaultMinRuntimeReserve = 4ULL * kGiB;
+
+    const double expert_fraction = parse_env_fraction("ZEDINFER_MOE_VRAM_FRACTION", kDefaultExpertVramFraction);
+    const size_t default_runtime_reserve
+        = std::max(kDefaultMinRuntimeReserve,
+                   static_cast<size_t>(static_cast<double>(allowed_bytes) * kDefaultRuntimeReserveFraction));
+    const size_t runtime_reserve = parse_env_mib("ZEDINFER_MOE_RESERVE_MB", default_runtime_reserve);
+    const size_t capped_reserve = std::min(runtime_reserve, headroom_bytes);
+    const size_t budget_after_reserve = headroom_bytes - capped_reserve;
+    const size_t budget_by_fraction = static_cast<size_t>(static_cast<double>(headroom_bytes) * expert_fraction);
+    const size_t expert_budget = std::min(budget_by_fraction, budget_after_reserve);
 
     LOGI.printf("[Model] Auto MoE sizing: total=%zu MB, free=%zu MB, allowed=%zu MB (util=%.2f), "
-                "headroom=%zu MB, per_expert≈%zu KB, total_experts=%zu MB, budget=%zu MB",
+                "headroom=%zu MB, reserve=%zu MB, fraction=%.2f, per_expert≈%zu KB, total_experts=%zu MB, "
+                "expert_budget=%zu MB",
                 total_bytes / (1024 * 1024), free_bytes / (1024 * 1024), allowed_bytes / (1024 * 1024),
-                gpu_memory_utilization, headroom_bytes / (1024 * 1024), per_expert / 1024,
-                total_expert_bytes / (1024 * 1024), expert_budget / (1024 * 1024));
+                gpu_memory_utilization, headroom_bytes / (1024 * 1024), runtime_reserve / (1024 * 1024),
+                expert_fraction, per_expert / 1024, total_expert_bytes / (1024 * 1024), expert_budget / (1024 * 1024));
 
     if (total_expert_bytes <= expert_budget) {
         LOGI.printf("[Model] Auto: experts fit in budget; ALL_GPU");
@@ -161,6 +253,25 @@ ExpertPoolConfig compute_moe_pool_config(const Qwen3MoEConfig& cfg, zedinferDevi
                 (total_expert_bytes - expert_budget) / (1024 * 1024));
     return pool;
 }
+
+// Thin adapter so the Qwen3.5-MoE dispatcher can reuse the same auto-sizing logic as
+// Qwen3-MoE without duplicating the env-var + VRAM heuristic. Shim a Qwen3MoEConfig
+// from the relevant fields of Qwen3_5MoEConfig; the helper only reads num_experts,
+// num_experts_per_tok, num_hidden_layers, hidden_size, moe_intermediate_size, and
+// quant_config (already inherited on the base ModelConfig). The hybrid-specific
+// SSM reservation is M5's job per docs/plan/qwen3_5_p1_m0_load_and_parse.md.
+ExpertPoolConfig compute_moe_pool_config_qwen3_5(const Qwen3_5MoEConfig& cfg, zedinferDeviceType_t target_device,
+                                                 float gpu_memory_utilization) {
+    Qwen3MoEConfig shim(static_cast<const ModelConfig&>(cfg));
+    shim.num_experts = static_cast<size_t>(cfg.num_experts);
+    shim.num_experts_per_tok = static_cast<size_t>(cfg.num_experts_per_tok);
+    shim.moe_intermediate_size = static_cast<size_t>(cfg.moe_intermediate_size);
+    shim.shared_expert_intermediate_size = static_cast<size_t>(cfg.shared_expert_intermediate_size);
+    shim.decoder_sparse_step = static_cast<size_t>(cfg.decoder_sparse_step);
+    shim.mlp_only_layers = cfg.mlp_only_layers;
+    return compute_moe_pool_config(shim, target_device, gpu_memory_utilization);
+}
+
 enum class LoadProgressColor {
     Blue,
 };
@@ -202,17 +313,18 @@ class ModelLoadProgress {
 public:
     ModelLoadProgress() : enabled_(should_render_load_progress()) {}
 
-    void begin_stage(const std::string& label, size_t total_steps, LoadProgressColor color) {
+    void begin_stage(const std::string& title, size_t total_steps, LoadProgressColor color) {
         finish_stage();
 
         stage_total_ = clamp_progress_value(std::max<size_t>(total_steps, 1));
         current_step_ = 0;
+        LOGI.printf("[Loader] %s: %zu steps", title.c_str(), total_steps);
         if (!enabled_) {
             return;
         }
 
-        std::cout << label << std::endl;
-        bar_ = std::make_unique<termbar::ProgressBar>(static_cast<int>(stage_total_), to_termbar_color(color));
+        bar_ = std::make_unique<termbar::ProgressBar>(static_cast<int>(stage_total_), to_termbar_color(color), title,
+                                                      true);
         bar_->update(0);
     }
 
@@ -245,7 +357,9 @@ private:
 
 class ModelLoadProgress {
 public:
-    void begin_stage(const std::string&, size_t, LoadProgressColor) {}
+    void begin_stage(const std::string& title, size_t total_steps, LoadProgressColor) {
+        LOGI.printf("[Loader] %s: %zu steps", title.c_str(), total_steps);
+    }
     void update(size_t) {}
     void advance() {}
     void finish_stage() {}
@@ -264,7 +378,7 @@ std::shared_ptr<Model> Model::parse(const std::string& model_path, zedinferDevic
     // For MoE models, decide the ExpertPool strategy up front so the loader's CPU-pinned
     // routing predicate and the pool strategy stay coupled to the same single decision
     // (env var override or auto-sized fallback).
-    ExpertPoolConfig moe_pool_config; // defaults: ALL_GPU; only meaningful for qwen3_moe.
+    ExpertPoolConfig moe_pool_config; // defaults: ALL_GPU; only meaningful for qwen3_moe / qwen3_5_moe.
     std::function<bool(const std::string&)> route = [](const std::string&) { return false; };
     if (config->model_type == "qwen3_moe" && target_device != ZEDINFER_DEVICE_CPU) {
         auto* moe_config = dynamic_cast<const Qwen3MoEConfig*>(config.get());
@@ -272,6 +386,15 @@ std::shared_ptr<Model> Model::parse(const std::string& model_path, zedinferDevic
             moe_pool_config = compute_moe_pool_config(*moe_config, target_device, gpu_memory_utilization);
             if (moe_pool_config.strategy == ExpertPoolStrategy::PINNED_LRU) {
                 LOGI << "[Model] Routing MoE expert tensors to CPU pinned memory";
+                route = [](const std::string& name) { return name.find(".mlp.experts.") != std::string::npos; };
+            }
+        }
+    } else if (config->model_type == "qwen3_5_moe" && target_device != ZEDINFER_DEVICE_CPU) {
+        auto* moe_config = dynamic_cast<const Qwen3_5MoEConfig*>(config.get());
+        if (moe_config) {
+            moe_pool_config = compute_moe_pool_config_qwen3_5(*moe_config, target_device, gpu_memory_utilization);
+            if (moe_pool_config.strategy == ExpertPoolStrategy::PINNED_LRU) {
+                LOGI << "[Model] Routing Qwen3.5 MoE expert tensors to CPU pinned memory";
                 route = [](const std::string& name) { return name.find(".mlp.experts.") != std::string::npos; };
             }
         }
@@ -311,6 +434,30 @@ std::shared_ptr<Model> Model::parse(const std::string& model_path, zedinferDevic
             throw std::logic_error("Config is not Qwen3MoEConfig");
         }
         return std::make_shared<Qwen3MoEModel>(*moe_config, std::move(weights), moe_pool_config);
+    } else if (config->model_type == "qwen3_5") {
+        auto* qcfg = dynamic_cast<Qwen3_5Config*>(config.get());
+        if (!qcfg) {
+            throw std::logic_error("Config is not Qwen3_5Config");
+        }
+        // SSM slot count = max concurrent hybrid requests. >1 lets the scheduler
+        // interleave concurrent requests instead of serializing them behind one
+        // SSM slot. Tune via ZEDINFER_MAX_CONCURRENT.
+        const int max_concurrent = resolve_hybrid_max_concurrent();
+        ExecutorConfig exec(target_device, 0, ZEDINFER_DTYPE_BF16);
+        return std::make_shared<Qwen3_5Model>(*qcfg, std::move(weights), exec, max_concurrent, model_path);
+    } else if (config->model_type == "qwen3_5_moe") {
+        auto* qcfg = dynamic_cast<Qwen3_5MoEConfig*>(config.get());
+        if (!qcfg) {
+            throw std::logic_error("Config is not Qwen3_5MoEConfig");
+        }
+        // SSM slot count = max concurrent hybrid requests (see ZEDINFER_MAX_CONCURRENT).
+        // moe_pool_config was computed up-front so the loader's CPU-pinned routing predicate
+        // and the ExpertPool stay coupled to the same single decision (env override or auto
+        // fallback).
+        const int max_concurrent = resolve_hybrid_max_concurrent();
+        ExecutorConfig exec(target_device, 0, ZEDINFER_DTYPE_BF16);
+        return std::make_shared<Qwen3_5MoeModel>(*qcfg, std::move(weights), exec, max_concurrent, moe_pool_config,
+                                                 model_path);
     }
 
     throw std::runtime_error("Unsupported model type: " + config->model_type);
@@ -583,7 +730,28 @@ std::unique_ptr<ModelConfig> Model::load_config(const std::string& config_path) 
     std::string model_type = safe_string(j, "model_type", "unknown");
 
     ModelConfig base_config;
-    load_base_config(base_config, j);
+    // Qwen3.5 nests text-model fields under "text_config" (top-level only carries
+    // multimodal token IDs + vision_config + quantization_config). Route the base
+    // load through that nested object so hidden_size/num_hidden_layers/etc. are
+    // populated from the right slot. The qwen3_5 dispatcher branch below relies on
+    // the result and additionally populates hybrid/vision/mrope fields.
+    const bool is_qwen3_5 = (model_type == "qwen3_5" || model_type == "qwen3_5_moe");
+    if (is_qwen3_5 && j.contains("text_config") && j["text_config"].is_object()) {
+        // Make a mutable copy so we can inject safe defaults for fields the dense
+        // base loader requires unconditionally (e.g. intermediate_size, which the
+        // Qwen3.5-MoE text_config omits because every layer uses experts).
+        json text_for_base = j["text_config"];
+        if (!text_for_base.contains("intermediate_size")) {
+            text_for_base["intermediate_size"] = text_for_base.value("moe_intermediate_size", static_cast<size_t>(0));
+        }
+        load_base_config(base_config, text_for_base);
+        // load_base_config copies model_type out of the nested JSON (e.g. "qwen3_5_text"
+        // or "qwen3_5_moe_text"); restore the canonical top-level value so the
+        // dispatcher and downstream model code see "qwen3_5" / "qwen3_5_moe".
+        base_config.model_type = model_type;
+    } else {
+        load_base_config(base_config, j);
+    }
 
     if (j.contains("quantization_config") && j["quantization_config"].is_object()) {
         auto& q_json = j["quantization_config"];
@@ -667,6 +835,92 @@ std::unique_ptr<ModelConfig> Model::load_config(const std::string& config_path) 
                     moe_config->num_hidden_layers, moe_config->num_experts, moe_config->num_experts_per_tok,
                     moe_config->moe_intermediate_size, moe_config->shared_expert_intermediate_size);
         return moe_config;
+    } else if (model_type == "qwen3_5" || model_type == "qwen3_5_moe") {
+        // base_config has already been populated from text_config above (see is_qwen3_5
+        // dispatch). Here we layer on the hybrid / vision / mrope / linear-attn fields.
+        const json& text_json = j.contains("text_config") && j["text_config"].is_object() ? j["text_config"] : j;
+        const json vision_json = j.value("vision_config", json::object());
+
+        // Hybrid attention layout.
+        if (text_json.contains("layer_types") && text_json["layer_types"].is_array()) {
+            base_config.layer_types.clear();
+            base_config.layer_types.reserve(text_json["layer_types"].size());
+            for (const auto& el : text_json["layer_types"]) {
+                base_config.layer_types.push_back(el.get<std::string>());
+            }
+        }
+        base_config.attn_output_gate = text_json.value("attn_output_gate", false);
+        base_config.mtp_num_hidden_layers = text_json.value("mtp_num_hidden_layers", 0);
+
+        // RoPE parameters (Qwen3.5 nests them under text_config.rope_parameters).
+        if (text_json.contains("rope_parameters") && text_json["rope_parameters"].is_object()) {
+            const auto& rp = text_json["rope_parameters"];
+            base_config.partial_rotary_factor = rp.value("partial_rotary_factor", 1.0f);
+            base_config.mrope_interleaved = rp.value("mrope_interleaved", false);
+            if (rp.contains("mrope_section") && rp["mrope_section"].is_array() && rp["mrope_section"].size() == 3) {
+                for (int i = 0; i < 3; ++i) { base_config.mrope_section[i] = rp["mrope_section"][i].get<int>(); }
+            }
+            base_config.rope_theta = rp.value("rope_theta", base_config.rope_theta);
+        }
+
+        // Linear attention sub-config (mamba-style state-space layers).
+        base_config.linear_attn.num_v_heads = text_json.value("linear_num_value_heads", 0);
+        base_config.linear_attn.value_head_dim = text_json.value("linear_value_head_dim", 0);
+        base_config.linear_attn.num_k_heads = text_json.value("linear_num_key_heads", 0);
+        base_config.linear_attn.key_head_dim = text_json.value("linear_key_head_dim", 0);
+        base_config.linear_attn.conv_kernel_dim = text_json.value("linear_conv_kernel_dim", 4);
+        base_config.linear_attn.state_dtype = text_json.value("mamba_ssm_dtype", std::string("bfloat16"));
+        // d_state defaults to value_head_dim; the loader can override it from the actual
+        // in_proj_b tensor shape once weights are read.
+        base_config.linear_attn.d_state = base_config.linear_attn.value_head_dim;
+
+        // Vision sub-config (top-level "vision_config", not nested in text_config).
+        if (!vision_json.empty() && vision_json.is_object()) {
+            base_config.has_vision = true;
+            base_config.vision.depth = vision_json.value("depth", 0);
+            base_config.vision.hidden_size = vision_json.value("hidden_size", 0);
+            base_config.vision.out_hidden_size = vision_json.value("out_hidden_size", 0);
+            base_config.vision.num_heads = vision_json.value("num_heads", 0);
+            base_config.vision.patch_size = vision_json.value("patch_size", 16);
+            base_config.vision.temporal_patch_size = vision_json.value("temporal_patch_size", 2);
+            base_config.vision.spatial_merge_size = vision_json.value("spatial_merge_size", 2);
+            base_config.vision.num_position_embeddings = vision_json.value("num_position_embeddings", 0);
+            base_config.vision.intermediate_size = vision_json.value("intermediate_size", 0);
+            base_config.vision.layer_norm_eps = vision_json.value("layer_norm_eps", 1e-6f);
+            // The pixel limits are usually carried by preprocessor_config.json,
+            // not config.json. Read model-config overrides here; engine init
+            // later merges preprocessor_config.json before constructing the
+            // MultiModalProcessor.
+            base_config.vision.max_pixels = vision_json.value("max_pixels", base_config.vision.max_pixels);
+            base_config.vision.min_pixels = vision_json.value("min_pixels", base_config.vision.min_pixels);
+        }
+
+        // Special-token IDs live at the *top* of the config, not under text_config.
+        base_config.image_token_id = j.value("image_token_id", -1);
+        base_config.video_token_id = j.value("video_token_id", -1);
+        base_config.vision_start_token_id = j.value("vision_start_token_id", -1);
+        base_config.vision_end_token_id = j.value("vision_end_token_id", -1);
+
+        if (model_type == "qwen3_5_moe") {
+            auto moe_cfg = std::make_unique<Qwen3_5MoEConfig>(std::move(base_config));
+            moe_cfg->num_experts = text_json.value("num_experts", 0);
+            moe_cfg->num_experts_per_tok = text_json.value("num_experts_per_tok", 0);
+            moe_cfg->moe_intermediate_size = text_json.value("moe_intermediate_size", 0);
+            moe_cfg->shared_expert_intermediate_size = text_json.value("shared_expert_intermediate_size", 0);
+            moe_cfg->decoder_sparse_step = text_json.value("decoder_sparse_step", 1);
+            if (text_json.contains("mlp_only_layers") && text_json["mlp_only_layers"].is_array()) {
+                moe_cfg->mlp_only_layers = text_json["mlp_only_layers"].get<std::vector<int>>();
+            }
+            LOGI.printf("[Model] Qwen3.5-MoE: %zu layers, %d experts (top-%d), moe_inter=%d, shared_inter=%d",
+                        moe_cfg->num_hidden_layers, moe_cfg->num_experts, moe_cfg->num_experts_per_tok,
+                        moe_cfg->moe_intermediate_size, moe_cfg->shared_expert_intermediate_size);
+            return moe_cfg;
+        }
+
+        auto dense_cfg = std::make_unique<Qwen3_5Config>(std::move(base_config));
+        LOGI.printf("[Model] Qwen3.5: %zu layers (hybrid, linear_v_heads=%d), vision=%s", dense_cfg->num_hidden_layers,
+                    dense_cfg->linear_attn.num_v_heads, dense_cfg->has_vision ? "true" : "false");
+        return dense_cfg;
     }
 
     throw std::runtime_error("Unsupported model type: " + model_type);
@@ -705,7 +959,19 @@ static int detect_gptq_zero_point(const LayerGroup& group, int num_bits) {
     if (zp_env) {
         return std::atoi(zp_env);
     }
-    // AutoGPTQ convention: stored = actual - 1
+    // GPTQ on-disk conventions vary: AutoGPTQ historically stores `stored = actual - 1`
+    // (sym=true → stored=7 represents actual=8), while newer exporters (Qwen3.5 GPTQ
+    // packaging) store the actual value directly (`stored=8` represents actual=8).
+    // For sym=true int4 the actual zero-point is canonically 8 either way; detect
+    // which convention is in use by inspecting the stored nibble:
+    //   - stored = 7 → AutoGPTQ convention, actual = stored + 1 = 8
+    //   - stored = 8 → direct convention,   actual = stored     = 8
+    // Either path yields actual_zp = 8 for proper sym=true checkpoints. We keep
+    // the legacy +1 path for asymmetric or non-canonical stored values so we don't
+    // silently change behavior for arbitrary GPTQ variants.
+    if (stored_zp == actual_zero_point) {
+        return stored_zp;
+    }
     return stored_zp + 1;
 }
 
@@ -843,7 +1109,7 @@ std::unique_ptr<ModelWeights> Model::load_weights(const std::string& model_path,
         }
         if (shard_total != total) {
             shard_total = total;
-            progress.begin_stage("Loading safetensor shards...", total, LoadProgressColor::Blue);
+            progress.begin_stage("[1/3 Load shards]", total, LoadProgressColor::Blue);
         }
         progress.update(current);
     });
@@ -852,7 +1118,7 @@ std::unique_ptr<ModelWeights> Model::load_weights(const std::string& model_path,
     auto mmap_end = std::chrono::high_resolution_clock::now();
     progress.finish_stage();
     auto mmap_time = std::chrono::duration<double>(mmap_end - load_start).count();
-    LOGI.printf("⏱️  Mmap time: %.4fs", mmap_time);
+    LOGI.printf("[Loader] Mmap time: %.4fs", mmap_time);
 
     auto weights = std::make_unique<ModelWeights>();
     weights->retain_resource(loader);
@@ -861,7 +1127,7 @@ std::unique_ptr<ModelWeights> Model::load_weights(const std::string& model_path,
     auto convert_start = std::chrono::high_resolution_clock::now();
     auto tensor_names = loader->get_all_tensor_names();
 
-    progress.begin_stage("Indexing tensors...", tensor_names.size(), LoadProgressColor::Blue);
+    progress.begin_stage("[2/3 Index tensors]", tensor_names.size(), LoadProgressColor::Blue);
 
     for (const auto& raw_name : tensor_names) {
         std::string mapped_name = map_weight_name(raw_name);
@@ -948,7 +1214,7 @@ std::unique_ptr<ModelWeights> Model::load_weights(const std::string& model_path,
         }
     }
 
-    progress.begin_stage("Preparing model weights...", materialize_total, LoadProgressColor::Blue);
+    progress.begin_stage("[3/3 Prepare weights]", materialize_total, LoadProgressColor::Blue);
 
     // Materialize a tensor in CPU pinned memory by copying from its mmap source.
     // On NVIDIA runtime, Tensor::create(..., CPU, 0) goes through cudaMallocHost, so
@@ -989,7 +1255,7 @@ std::unique_ptr<ModelWeights> Model::load_weights(const std::string& model_path,
                 throw std::runtime_error("Act-order reordering requires packed weights: " + prefix);
             }
 
-            LOGI.printf("🔄 Reordering weights for %s (Act-Order detected)", prefix.c_str());
+            LOGI.printf("[Loader] Reordering weights for %s (Act-Order detected)", prefix.c_str());
 
             const int32_t* g_idx_ptr = reinterpret_cast<const int32_t*>(group.t_g_idx->data());
             const int32_t* packed_ptr = reinterpret_cast<const int32_t*>(group.t_packed->data());
@@ -1103,7 +1369,7 @@ std::unique_ptr<ModelWeights> Model::load_weights(const std::string& model_path,
     auto convert_end = std::chrono::high_resolution_clock::now();
     progress.finish_stage();
     auto convert_time = std::chrono::duration<double>(convert_end - convert_start).count();
-    LOGI.printf("⏱️  Conversion time: %.4fs (%zu tensors)", convert_time, converted_count);
+    LOGI.printf("[Loader] Conversion time: %.4fs (%zu tensors)", convert_time, converted_count);
     if (cpu_pinned_count > 0) {
         LOGI.printf("[Loader] Routed %zu tensors to CPU pinned memory via predicate", cpu_pinned_count);
     }
@@ -1123,6 +1389,10 @@ std::string Model::map_weight_name(const std::string& raw_name) {
     // Strip "model." prefix
     if (name.size() > 6 && name.substr(0, 6) == "model.") {
         name = name.substr(6);
+    }
+    // Then strip "language_model." prefix (Qwen3.5)
+    if (name.size() > 15 && name.substr(0, 15) == "language_model.") {
+        name = name.substr(15);
     }
 
     // Map GPTQ suffixes to internal naming convention

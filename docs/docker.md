@@ -102,6 +102,22 @@ docker run --gpus all -p 8080:8080 \
 | `--max-batch-tokens` | `2048` | Max tokens per batch |
 | `--max-batch-requests` | `64` | Max concurrent requests |
 | `--gpu-memory-utilization` | `0.9` | Fraction of GPU memory for KV cache (0.0–1.0) |
+| `--max-tokens` | `0` | Default max response tokens when API requests omit `max_tokens` (`0` = unlimited) |
+
+### Logging
+
+`serve` writes logs to both a file and stdout/stderr by default, so `docker logs` captures server logs without mounting the log directory. Warning, error, and fatal logs go to stderr; info, debug, and verbose logs go to stdout.
+
+Common options:
+
+```bash
+docker run --gpus all -p 8080:8080 \
+    -v /path/to/models:/models \
+    zedinfer:latest /models/Qwen3-8B --nvidia \
+    --log-level info --log-file /tmp/zedinfer/serve.log --log-append
+```
+
+For the full logging contract and developer rules, see [guide/logging.md](guide/logging.md).
 
 ### Examples
 
@@ -143,7 +159,6 @@ OpenAI-compatible chat completions.
     "messages": [
         {"role": "user", "content": "Hello"}
     ],
-    "max_tokens": 512,
     "stream": false,
     "session_id": ""
 }
@@ -152,7 +167,7 @@ OpenAI-compatible chat completions.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `messages` | array | — | Chat messages (required). Uses last `user` message. |
-| `max_tokens` | int | `512` | Max tokens to generate |
+| `max_tokens` | int | server default | Max tokens to generate. Omitted uses the server default, which is unlimited unless `serve --max-tokens` sets a cap. `0` means unlimited for that request. |
 | `stream` | bool | `false` | Enable SSE streaming |
 | `session_id` | string | `""` | Session ID for multi-turn conversation. Empty = stateless. |
 
@@ -193,6 +208,38 @@ curl http://localhost:8080/v1/chat/completions \
     -d '{"messages":[{"role":"user","content":"Hello"}],"session_id":"abc123"}'
 ```
 
+### `POST /v1/responses`
+
+OpenAI Responses-compatible endpoint. `/responses` is also accepted.
+
+```bash
+curl http://localhost:8080/v1/responses \
+    -H "Content-Type: application/json" \
+    -d '{"model":"qwen","input":"Hello","max_output_tokens":64}'
+```
+
+### `POST /v1/messages`
+
+Anthropic Messages-compatible endpoint for Claude Code style clients.
+
+```bash
+curl http://localhost:8080/v1/messages \
+    -H "Content-Type: application/json" \
+    -H "X-Api-Key: dummy" \
+    -H "Anthropic-Version: 2023-06-01" \
+    -d '{"model":"qwen","max_tokens":64,"messages":[{"role":"user","content":"Hello"}]}'
+```
+
+### `POST /v1/messages/count_tokens`
+
+Anthropic-compatible token counting.
+
+```bash
+curl http://localhost:8080/v1/messages/count_tokens \
+    -H "Content-Type: application/json" \
+    -d '{"model":"qwen","messages":[{"role":"user","content":"Hello world"}]}'
+```
+
 ### `GET /v1/models`
 
 List loaded models.
@@ -207,6 +254,14 @@ Health check. Returns model name, request counts, block pool utilization.
 
 ```bash
 curl http://localhost:8080/health
+```
+
+### `GET /version`
+
+Return the ZedInfer server version.
+
+```bash
+curl http://localhost:8080/version
 ```
 
 ### `DELETE /v1/sessions/:id`
@@ -244,7 +299,7 @@ docker run --gpus all -v /path/to/models:/models \
 | `model_path` | — | Model directory (required) |
 | `--nvidia` | `false` | Use GPU |
 | `-p, --prefill-len` | `128` | Prefill token count |
-| `-d, --decode-len` | `128` | Decode token count |
+| `-d, --decode-len`, `--max-tokens` | `128` | Decode token count |
 | `-r, --rounds` | `3` | Benchmark rounds |
 | `--gpu-memory-utilization` | `0.9` | GPU memory fraction |
 
@@ -262,7 +317,7 @@ docker run --gpus all -v /path/to/models:/models \
 | `--nvidia` | `false` | Use GPU |
 | `-b, --batch-size` | `4` | Concurrent requests |
 | `-p, --prefill-len` | `128` | Prefill token count per request |
-| `-d, --decode-len` | `128` | Decode token count per request |
+| `-d, --decode-len`, `--max-tokens` | `128` | Decode token count per request |
 | `-r, --rounds` | `1` | Benchmark rounds |
 | `--gpu-memory-utilization` | `0.9` | GPU memory fraction |
 
@@ -280,7 +335,7 @@ Note: requires `-it` (interactive + tty) for terminal input.
 |----------|---------|-------------|
 | `model_path` | — | Model directory (required) |
 | `--nvidia` | `false` | Use GPU |
-| `--max-tokens` | `16384` | Max tokens per response |
+| `--max-tokens` | `0` | Max tokens per response (`0` = unlimited) |
 | `--gpu-memory-utilization` | `0.9` | GPU memory fraction |
 
 ### ping — Quick single-inference test
@@ -296,6 +351,7 @@ docker run --gpus all -v /path/to/models:/models \
 | `model_path` | — | Model directory (required) |
 | `--nvidia` | `false` | Use GPU |
 | `--prompt` | `"Who are you?"` | Prompt text |
+| `--max-new-tokens`, `--max-tokens` | `0` | Max tokens to generate (`0` = unlimited) |
 | `--gpu-memory-utilization` | `0.9` | GPU memory fraction |
 
 ---

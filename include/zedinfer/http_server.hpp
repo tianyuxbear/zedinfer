@@ -25,6 +25,24 @@ struct ServerConfig {
     int request_timeout_sec = 300;
     int max_sessions = 100;
     int session_idle_timeout = 1800;
+    // Override the model id surfaced in /v1/models, /health, and chat
+    // completion responses. Empty -> use engine.model_name() (the raw path).
+    // Useful for impersonating an OpenAI model id from existing clients.
+    std::string served_model_name;
+    // Bearer token expected in Authorization header on protected endpoints.
+    // Empty -> auth disabled (backward compatible). When set, /v1/* and
+    // /tokenize / /detokenize require "Authorization: Bearer <api_key>".
+    // /health and static files are always public.
+    std::string api_key;
+    // Default used when a chat-completions request omits the non-OpenAI
+    // enable_thinking field. Explicit request fields still take precedence.
+    bool default_enable_thinking = false;
+    // Server-wide opt-in budget for forcing </think> on reasoning models.
+    // 0 disables forced thinking closure.
+    int default_max_think_tokens = 0;
+    // Default generation cap for requests that omit max_tokens.
+    // 0 means generate until EOS or the remaining context window is exhausted.
+    int default_max_tokens = 0;
 };
 
 class HttpServer {
@@ -40,6 +58,9 @@ private:
     httplib::Server server_;
     std::atomic<uint64_t> request_counter_{0};
     std::string web_root_;
+    // Model id used in API responses; resolved once at construction from
+    // ServerConfig.served_model_name override, falling back to engine.model_name().
+    std::string display_model_name_;
 
     // Static file cache
     std::unordered_map<std::string, std::pair<std::string, std::string>> file_cache_;
@@ -49,6 +70,11 @@ private:
         std::unique_ptr<InferenceSession> session;
         std::chrono::steady_clock::time_point last_access;
         std::atomic<bool> busy{false};
+        // Set by delete_session() when a DELETE arrives while the session is
+        // busy (e.g. mid-stream). The entry is kept alive until unlock_session()
+        // observes the flag and reclaims it, so an in-flight streaming response
+        // that still holds a raw InferenceSession* is never freed underneath it.
+        bool pending_delete = false;
     };
     std::unordered_map<std::string, std::unique_ptr<SessionEntry>> sessions_;
     std::mutex sessions_mutex_;
@@ -84,17 +110,24 @@ private:
         std::string session_id_;
     };
 
-    InferenceSession* get_or_create_session(const std::string& session_id);
-    bool try_lock_session(const std::string& session_id);
+    // Atomically get/create and mark a session busy. Returns nullptr when an
+    // existing session is already serving another request.
+    InferenceSession* acquire_session(const std::string& session_id, bool enable_thinking);
     void unlock_session(const std::string& session_id);
     void delete_session(const std::string& session_id);
     void cleanup_idle_sessions();
 
     // Route handlers
     void handle_chat_completions(const httplib::Request& req, httplib::Response& res);
+    void handle_responses(const httplib::Request& req, httplib::Response& res);
+    void handle_anthropic_messages(const httplib::Request& req, httplib::Response& res);
+    void handle_anthropic_count_tokens(const httplib::Request& req, httplib::Response& res);
+    void handle_version(const httplib::Request& req, httplib::Response& res);
     void handle_models(const httplib::Request& req, httplib::Response& res);
     void handle_health(const httplib::Request& req, httplib::Response& res);
     void handle_delete_session(const httplib::Request& req, httplib::Response& res);
+    void handle_tokenize(const httplib::Request& req, httplib::Response& res);
+    void handle_detokenize(const httplib::Request& req, httplib::Response& res);
 
     // Helpers
     std::string generate_request_id();

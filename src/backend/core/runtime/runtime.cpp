@@ -43,7 +43,7 @@ std::unique_ptr<Runtime> Runtime::create(zedinferDeviceType_t device_type, int d
 
 Runtime::~Runtime() {
     if (!is_active_) {
-        LOG_ERROR_(utils::BOTH) << "Mallicious destruction of inactive runtime." << std::endl;
+        LOG_ERROR_(utils::BOTH) << "Malicious destruction of inactive runtime." << std::endl;
     }
     api_->destroy_stream(stream_);
     api_->destroy_stream(stream_transfer_);

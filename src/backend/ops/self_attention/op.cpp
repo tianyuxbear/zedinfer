@@ -88,11 +88,26 @@ static void dispatch_paged_prefill(const AttentionParams& p) {
 
     switch (c.device_type) {
 #ifdef ENABLE_NVIDIA_API
-        case ZEDINFER_DEVICE_NVIDIA:
+        case ZEDINFER_DEVICE_NVIDIA: {
+            // Spec-decode verify (n_q ∈ {2, 3, 4}) goes through a kernel tuned
+            // for the "almost-decode" shape: one CTA per head, KV cache loaded
+            // once and scored against every query. The general prefill kernel
+            // launches n_q separate blocks per head and rereads K/V each time
+            // — that's ~4.4x slower at n_q=2. The small_nq kernel returns true
+            // when it handled the call; otherwise we fall back to prefill.
+            if (p.seqlen_q >= 2 && p.seqlen_q <= 4 && std::getenv("ZEDINFER_DISABLE_SMALL_NQ") == nullptr) {
+                if (nvidia::paged_attention_small_nq(
+                        p.out->data(), p.q->data(), reinterpret_cast<const std::byte*>(p.k_pool_base),
+                        reinterpret_cast<const std::byte*>(p.v_pool_base), p.page_table, p.seqlen_q, p.past_len,
+                        c.scale, c.dtype, c.nhead, c.nkvhead, c.head_dim, c.block_size)) {
+                    return;
+                }
+            }
             return nvidia::paged_attention_prefill(
                 p.out->data(), p.q->data(), reinterpret_cast<const std::byte*>(p.k_pool_base),
                 reinterpret_cast<const std::byte*>(p.v_pool_base), p.page_table, p.seqlen_q, p.past_len, c.scale,
                 c.dtype, c.nhead, c.nkvhead, c.head_dim, c.block_size);
+        }
 #endif
         default:
             EXCEPTION_UNSUPPORTED_DEVICE;

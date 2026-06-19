@@ -1,6 +1,7 @@
 #pragma once
 
 #include "types.hpp" // IWYU pragma: keep
+#include "utils/logging.hpp"
 #include <iostream>  // IWYU pragma: keep
 #include <stdexcept> // IWYU pragma: keep
 
@@ -8,21 +9,20 @@
 
 #define EXCEPTION_UNSUPPORTED_DEVICE                                                                                   \
     do {                                                                                                               \
-        std::cerr << "[ERROR] Unsupported device" << EXCEPTION_LOCATION_MSG << std::endl;                              \
+        LOGE << "[ERROR] Unsupported device" << EXCEPTION_LOCATION_MSG;                                                \
         throw std::runtime_error("Unsupported device");                                                                \
     } while (0)
 
 #define EXCEPTION_UNSUPPORTED_DATATYPE(DT__)                                                                           \
     do {                                                                                                               \
-        std::cerr << "[ERROR] Unsupported data type: " << zedinfer::utils::dtype_to_str(DT__)                          \
-                  << EXCEPTION_LOCATION_MSG << std::endl;                                                              \
+        LOGE << "[ERROR] Unsupported data type: " << zedinfer::utils::dtype_to_str(DT__) << EXCEPTION_LOCATION_MSG;    \
         throw std::runtime_error("Unsupported device");                                                                \
     } while (0)
 
 #define CHECK_ARGUMENT(condition, message)                                                                             \
     do {                                                                                                               \
         if (!(condition)) {                                                                                            \
-            std::cerr << "[ERROR] Invalid argument: " << message << EXCEPTION_LOCATION_MSG << std::endl;               \
+            LOGE << "[ERROR] Invalid argument: " << message << EXCEPTION_LOCATION_MSG;                                 \
             throw std::invalid_argument(message);                                                                      \
         }                                                                                                              \
     } while (0)
@@ -30,15 +30,14 @@
 #define ASSERT(condition, message)                                                                                     \
     do {                                                                                                               \
         if (!(condition)) {                                                                                            \
-            std::cerr << "[ERROR] " << message << std::endl                                                            \
-                      << "Assertion failed: " << #condition << EXCEPTION_LOCATION_MSG << std::endl;                    \
+            LOGE << "[ERROR] " << message << "\nAssertion failed: " << #condition << EXCEPTION_LOCATION_MSG;           \
             throw std::runtime_error("Assertion failed");                                                              \
         }                                                                                                              \
     } while (0)
 
 #define TO_BE_IMPLEMENTED()                                                                                            \
     do {                                                                                                               \
-        std::cerr << "[ERROR] Unimplemented function" << EXCEPTION_LOCATION_MSG << std::endl;                          \
+        LOGE << "[ERROR] Unimplemented function" << EXCEPTION_LOCATION_MSG;                                            \
         throw std::runtime_error("Unimplemented function");                                                            \
     } while (0)
 
@@ -53,7 +52,7 @@
 
 #define EXCEPTION_SHAPE_MISMATCH                                                                                       \
     do {                                                                                                               \
-        std::cerr << "[ERROR] Shapes mismatch" << EXCEPTION_LOCATION_MSG << std::endl;                                 \
+        LOGE << "[ERROR] Shapes mismatch" << EXCEPTION_LOCATION_MSG;                                                   \
         throw std::invalid_argument("Shapes mismatch");                                                                \
     } while (0)
 
@@ -61,7 +60,7 @@
 
 #define EXCEPTION_DATATYPE_MISMATCH                                                                                    \
     do {                                                                                                               \
-        std::cerr << "[ERROR] Datatypes mismatch" << EXCEPTION_LOCATION_MSG << std::endl;                              \
+        LOGE << "[ERROR] Datatypes mismatch" << EXCEPTION_LOCATION_MSG;                                                \
         throw std::invalid_argument("Datatypes mismatch");                                                             \
     } while (0)
 
@@ -69,8 +68,7 @@
 
 #define EXCEPTION_DEVICE_MISMATCH                                                                                      \
     do {                                                                                                               \
-        std::cerr << "[ERROR] Input tensors must be on the same device!" << std::endl                                  \
-                  << "Device mismatch" << EXCEPTION_LOCATION_MSG << std::endl;                                         \
+        LOGE << "[ERROR] Input tensors must be on the same device!\nDevice mismatch" << EXCEPTION_LOCATION_MSG;        \
         throw std::runtime_error("device mismatch");                                                                   \
     } while (0)
 

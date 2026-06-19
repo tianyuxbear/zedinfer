@@ -1,7 +1,7 @@
 #include "backend/device/device.hpp"
-#include "utils/logging.hpp"
+#include "utils/banner.hpp"
+#include "utils/logging_cli.hpp"
 #include "utils/random.hpp"
-#include "utils/system_info.hpp"
 #include "zedinfer.h"
 #include "zedinfer/engine.hpp"
 #include "zedinfer/request.hpp"
@@ -20,9 +20,7 @@
 using namespace zedinfer;
 
 int main(int argc, char* argv[]) {
-    argparse::ArgumentParser program("ZedInfer Batch Benchmark", std::string("zedinfer ") + ZEDINFER_VERSION
-                                                                     + " (build " + ZEDINFER_GIT_HASH + ", "
-                                                                     + ZEDINFER_BUILD_DATE + ")");
+    argparse::ArgumentParser program("ZedInfer Batch Benchmark", ZEDINFER_VERSION);
 
     program.add_argument("model_path").help("Path to the model directory");
 
@@ -33,7 +31,7 @@ int main(int argc, char* argv[]) {
         .default_value(128)
         .scan<'i', int>();
 
-    program.add_argument("-d", "--decode-len")
+    program.add_argument("-d", "--decode-len", "--max-tokens")
         .help("Max tokens to generate per request")
         .default_value(128)
         .scan<'i', int>();
@@ -47,6 +45,18 @@ int main(int argc, char* argv[]) {
         .default_value(0.9f)
         .scan<'g', float>();
 
+    program.add_argument("--enable-thinking")
+        .help("Set GenerationConfig.enable_thinking on benchmark requests")
+        .default_value(false)
+        .implicit_value(true);
+
+    program.add_argument("--max-think-tokens")
+        .help("Force </think> after this many tokens inside an open <think> block (0 = disabled)")
+        .default_value(0)
+        .scan<'i', int>();
+
+    utils::addLoggingArguments(program, "logs/batch_bench.log");
+
     try {
         program.parse_args(argc, argv);
     } catch (const std::exception& err) {
@@ -55,8 +65,13 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    utils::initLoggerWithOverwrite(plog::verbose, "logs/batch_bench.log");
-    LOG_VERBOSE_(utils::BOTH) << utils::get_runtime_info();
+    try {
+        utils::initLoggerFromArguments(program);
+    } catch (const std::exception& err) {
+        std::cerr << err.what() << std::endl;
+        return 1;
+    }
+    utils::printZedInferBanner();
 
     auto model_path = program.get<std::string>("model_path");
     int batch_size = program.get<int>("--batch-size");
@@ -64,6 +79,16 @@ int main(int argc, char* argv[]) {
     int decode_len = program.get<int>("--decode-len");
     int rounds = program.get<int>("--rounds");
     bool use_nvidia = program.get<bool>("--nvidia");
+    bool enable_thinking = program.get<bool>("--enable-thinking");
+    int max_think_tokens = program.get<int>("--max-think-tokens");
+    if (decode_len <= 0) {
+        std::cerr << "--decode-len/--max-tokens must be > 0 for benchmark runs" << std::endl;
+        return 1;
+    }
+    if (max_think_tokens < 0) {
+        std::cerr << "--max-think-tokens must be >= 0" << std::endl;
+        return 1;
+    }
 
     zedinferDeviceType_t device_type = use_nvidia ? ZEDINFER_DEVICE_NVIDIA : ZEDINFER_DEVICE_CPU;
     device::Device device(device_type, 0);
@@ -90,6 +115,11 @@ int main(int argc, char* argv[]) {
     // Random token range for input
     int min_id = 100, max_id = 30000;
 
+    // Fixed seed so the random prompts (and therefore the whole batched run) are
+    // reproducible across invocations — required for before/after A/B validation
+    // and for stable throughput comparisons.
+    utils::set_seed(12345);
+
     double total_time_ms = 0.0;
     int total_generated_tokens = 0;
 
@@ -107,6 +137,8 @@ int main(int argc, char* argv[]) {
             for (auto& t : req->input_ids) { t = utils::randint(min_id, max_id); }
 
             req->config.max_new_tokens = decode_len;
+            req->config.enable_thinking = enable_thinking;
+            req->config.max_think_tokens = max_think_tokens;
             req->config.verbose = false;
             req->arrival_time = std::chrono::steady_clock::now();
 

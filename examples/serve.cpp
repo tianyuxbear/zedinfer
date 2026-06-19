@@ -1,6 +1,6 @@
 #include "backend/device/device.hpp"
-#include "utils/logging.hpp"
-#include "utils/system_info.hpp"
+#include "utils/banner.hpp"
+#include "utils/logging_cli.hpp"
 #include "zedinfer.h"
 #include "zedinfer/engine.hpp"
 #include "zedinfer/http_server.hpp"
@@ -9,7 +9,6 @@
 #include "zedinfer/version.hpp"
 #include <argparse/argparse.hpp>
 #include <csignal>
-#include <cstdio>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -32,8 +31,7 @@ static void signal_handler(int) {
 }
 
 int main(int argc, char* argv[]) {
-    argparse::ArgumentParser program("ZedInfer Server", std::string("zedinfer ") + ZEDINFER_VERSION + " (build "
-                                                            + ZEDINFER_GIT_HASH + ", " + ZEDINFER_BUILD_DATE + ")");
+    argparse::ArgumentParser program("ZedInfer Server", ZEDINFER_VERSION);
 
     program.add_argument("model_path").help("Path to the model directory");
 
@@ -52,6 +50,39 @@ int main(int argc, char* argv[]) {
         .default_value(0.9f)
         .scan<'g', float>();
 
+    program.add_argument("--mtp")
+        .help("Enable Qwen3.5 MTP speculative decoding (off by default). "
+              "Only effective when the loaded model ships an MTP head.")
+        .default_value(false)
+        .implicit_value(true);
+
+    program.add_argument("--enable-thinking")
+        .help("Default enable_thinking value for chat-completions requests that omit the field")
+        .default_value(false)
+        .implicit_value(true);
+
+    program.add_argument("--max-think-tokens")
+        .help("Force </think> after this many tokens inside an open <think> block (0 = disabled)")
+        .default_value(0)
+        .scan<'i', int>();
+
+    program.add_argument("--max-tokens")
+        .help("Default max tokens for requests that omit max_tokens (0 = unlimited)")
+        .default_value(0)
+        .scan<'i', int>();
+
+    program.add_argument("--served-model-name")
+        .help("Model id surfaced in /v1/models and chat completion responses. "
+              "Defaults to the model path. Useful for impersonating an OpenAI model id.")
+        .default_value(std::string(""));
+
+    program.add_argument("--api-key")
+        .help("Bearer token required on /v1/* and /tokenize endpoints. "
+              "Empty (default) disables auth.")
+        .default_value(std::string(""));
+
+    utils::addLoggingArguments(program, "logs/serve.log");
+
     try {
         program.parse_args(argc, argv);
     } catch (const std::exception& err) {
@@ -60,13 +91,24 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    utils::initLoggerWithOverwrite(plog::info, "logs/serve.log");
-    LOG_VERBOSE_(utils::BOTH) << utils::get_runtime_info();
+    try {
+        utils::initLoggerFromArguments(program);
+    } catch (const std::exception& err) {
+        std::cerr << err.what() << std::endl;
+        return 1;
+    }
+    utils::printZedInferBanner();
 
     auto model_path = program.get<std::string>("model_path");
     auto host = program.get<std::string>("--host");
     int port = program.get<int>("--port");
     bool use_nvidia = program.get<bool>("--nvidia");
+    int max_think_tokens = program.get<int>("--max-think-tokens");
+    int default_max_tokens = program.get<int>("--max-tokens");
+    if (max_think_tokens < 0 || default_max_tokens < 0) {
+        std::cerr << "--max-think-tokens and --max-tokens must be >= 0" << std::endl;
+        return 1;
+    }
 
     zedinferDeviceType_t device_type = use_nvidia ? ZEDINFER_DEVICE_NVIDIA : ZEDINFER_DEVICE_CPU;
     device::Device device(device_type, 0);
@@ -76,6 +118,7 @@ int main(int argc, char* argv[]) {
     sched_config.max_batch_tokens = program.get<int>("--max-batch-tokens");
     sched_config.max_batch_requests = program.get<int>("--max-batch-requests");
     sched_config.gpu_memory_utilization = program.get<float>("--gpu-memory-utilization");
+    sched_config.mtp_enabled = program.get<bool>("--mtp");
 
     // Create engine
     auto engine = InferenceEngine::create(model_path, device, sched_config);
@@ -88,6 +131,11 @@ int main(int argc, char* argv[]) {
     ServerConfig server_config;
     server_config.host = host;
     server_config.port = port;
+    server_config.served_model_name = program.get<std::string>("--served-model-name");
+    server_config.api_key = program.get<std::string>("--api-key");
+    server_config.default_enable_thinking = program.get<bool>("--enable-thinking");
+    server_config.default_max_think_tokens = max_think_tokens;
+    server_config.default_max_tokens = default_max_tokens;
 
     HttpServer server(server_config, engine);
     g_server = &server;
@@ -96,13 +144,27 @@ int main(int argc, char* argv[]) {
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
 
-    printf("\n========================================\n");
-    printf("  ZedInfer Server\n");
-    printf("  Model: %s\n", engine->model_name().c_str());
-    printf("  Listening: http://%s:%d\n", host.c_str(), port);
-    printf("  Web UI: http://%s:%d/\n", host.c_str(), port);
-    printf("  API: http://%s:%d/v1/chat/completions\n", host.c_str(), port);
-    printf("========================================\n\n");
+    LOGI << "[Server] Model: " << engine->model_name();
+    if (!server_config.served_model_name.empty()) {
+        LOGI << "[Server] Served as: " << server_config.served_model_name;
+    }
+    if (!server_config.api_key.empty()) {
+        LOGI << "[Server] Auth: Bearer (api-key required)";
+    }
+    LOGI << "[Server] Thinking default: " << (server_config.default_enable_thinking ? "enabled" : "disabled");
+    if (server_config.default_max_think_tokens > 0) {
+        LOGI << "[Server] Thinking max tokens: " << server_config.default_max_think_tokens;
+    } else {
+        LOGI << "[Server] Thinking max tokens: unlimited";
+    }
+    if (server_config.default_max_tokens > 0) {
+        LOGI << "[Server] Default max tokens: " << server_config.default_max_tokens;
+    } else {
+        LOGI << "[Server] Default max tokens: unlimited";
+    }
+    LOGI << "[Server] Listening: http://" << host << ":" << port;
+    LOGI << "[Server] Web UI: http://" << host << ":" << port << "/";
+    LOGI << "[Server] API: http://" << host << ":" << port << "/v1/chat/completions";
 
     server.start(); // blocks until stop()
 
@@ -112,6 +174,6 @@ int main(int argc, char* argv[]) {
     g_server = nullptr;
     g_engine = nullptr;
 
-    printf("Server stopped.\n");
+    LOGI << "[Server] Stopped";
     return 0;
 }

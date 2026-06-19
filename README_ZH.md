@@ -34,15 +34,19 @@
 - **HTTP API** — OpenAI 兼容的 `/v1/chat/completions` 接口，支持 SSE 流式输出和内嵌 Web 聊天界面
 - **有状态会话** — 服务端 KV 缓存跨轮次复用
 - **优化算子** — GPU 线性层使用 cuBLAS/cuBLASLt，CPU 线性层使用 oneDNN，decode 阶段预分配 scratch buffer
-- **直接模型前向** — 无图执行开销，单一共享的 `transformer_forward()` 循环
+- **直接模型前向** — 无图执行开销，单一共享前向循环
 - **零 Python 依赖** — 纯 C++ 服务路径，推理时无 Python 运行时
 - **FlashInfer 集成** — 通过 `--flashinfer=y` 启用可选的 NVIDIA 分页注意力后端
+- **Qwen3.5 / Qwen3.6 家族（hybrid-MoE-VL）** — GatedDeltaNet 线性注意力 + 全注意力 + MoE/dense FFN，每请求 SSM 状态池、SSM 快照缓存；3D mRoPE、GPTQ INT4
+- **MoE + 专家卸载** — `ExpertPool` 配合 PINNED_LRU 把专家暂存于 host（24GB GPU 上跑 35B-A3B INT4）+ GPU top-k 路由、自动 GPU-slot 选择
+- **多模态与推理** — Qwen3.5-VL 视觉塔；OpenAI 兼容的图像输入、`reasoning_content`、工具调用、每请求采样覆盖
+- **MTP 投机解码** — 可选 `--mtp` 多 token 预测 + 真正拒绝采样；在 dense 模型 + 结构化负载上净加速
 
 ### 规划中（详见 `docs/plan/`）
 
 - 🔜 **CUDA Graph** — 捕获/重放 decode 前向（Phase 1 DecodeScratch 已完成）
-- 📋 **INT8/INT4 量化** — 权重量化，2-4x 内存压缩
-- 📋 **异构推理** — CPU/GPU 混合执行，MoE 模型 expert 卸载
+- 📋 **Fused MoE GEMM** — ALL-GPU 下的 grouped int4 专家 GEMM（抬基线；不适用 offload 路径）
+- 📋 **更广的 INT4 覆盖** — 把目前 bf16 的 linear-attn / embed / lm_head 也量化，使 dense 27B 能装进 24GB
 
 ---
 
@@ -50,12 +54,15 @@
 
 | 模型 | 架构 | 参数量 | 已测试 |
 |------|------|--------|--------|
-| DeepSeek-R1-Distill-Qwen-1.5B | Qwen2 | 1.5B | ✅ |
-| DeepSeek-R1-0528-Qwen3-8B | Qwen3 | 8B | ✅ |
-| Qwen2.5-Math-1.5B-Instruct | Qwen2 | 1.5B | ✅ |
-| Qwen3-8B | Qwen3 | 8B | ✅ |
+| DeepSeek-R1-Distill-Qwen-1.5B | Qwen2（dense） | 1.5B | ✅ |
+| DeepSeek-R1-0528-Qwen3-8B | Qwen3（dense） | 8B | ✅ |
+| Qwen2.5-Math-1.5B-Instruct | Qwen2（dense） | 1.5B | ✅ |
+| Qwen3-8B | Qwen3（dense） | 8B | ✅ |
+| Qwen3.5-27B / Qwen3.6-27B | Qwen3.5 hybrid dense（线性注意力 + 全注意力，VL） | 27B | ✅ |
+| Qwen3.5-35B-A3B / Qwen3.6-35B-A3B | Qwen3.5 hybrid MoE（256 专家，~3B 激活，VL） | 35B | ✅ |
 
-新增 Qwen 系列模型只需定义 `ModelForwardConfig`（bias/Q-K norm 标志）— 无需编写任何前向逻辑。
+- Qwen2 / Qwen3（dense）：新增只需定义 `ModelForwardConfig`（bias / Q-K norm 标志），无需前向逻辑。
+- Qwen3.5 / Qwen3.6：hybrid（GatedDeltaNet + 全注意力）+ MoE/dense + 视觉；支持 GPTQ INT4；35B-A3B 借专家卸载可在 24GB 上运行。已在 B200 上通过 `ping` / `serve`（文本 + 图像）验证。
 
 ---
 
@@ -167,6 +174,10 @@ ZEDINFER_DISABLE_FLASHINFER=1 xmake run bench /path/to/model --nvidia -p 128 -d 
 ```
 
 `ZEDINFER_DISABLE_FLASHINFER=1` 会在运行时强制回退到原有 paged attention kernel。`ZEDINFER_FLASHINFER_DISABLE_FASTPATH=1` 会关闭 FlashInfer 包装层内部的单请求 decode fast path，便于调试 planner 路径。
+
+### 日志
+
+所有 CLI 工具都支持统一日志参数，包括 `--log-level`、`--log-file`、`--log-to-console`、`--log-append` 和 `--log-overwrite`。日志等级、stdout/stderr 路由、文件行为、启动字符画和开发规范见 [docs/guide/logging.md](docs/guide/logging.md)。
 
 ---
 
@@ -285,6 +296,7 @@ zedinfer/
 ├── docs/
 │   ├── architecture.md              # 当前系统架构
 │   ├── guide/flashinfer.md          # FlashInfer 后端接入说明
+│   ├── guide/logging.md             # 日志行为与开发规范
 │   ├── roadmap.md                   # 状态 + 未来规划
 │   └── plan/                        # 待实现特性的设计文档
 ├── xmake.lua                        # 构建配置

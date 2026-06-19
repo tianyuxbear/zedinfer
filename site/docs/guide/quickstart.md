@@ -62,6 +62,7 @@ The server starts on port 8080. Model weights are mounted via `-v`, not baked in
 | `--max-batch-tokens` | `2048` | Max tokens per batch |
 | `--max-batch-requests` | `64` | Max concurrent requests |
 | `--gpu-memory-utilization` | `0.9` | Fraction of GPU memory for KV cache (0.0--1.0) |
+| `--max-tokens` | `0` | Default max response tokens when API requests omit `max_tokens` (`0` = unlimited) |
 
 ## Stop the server
 

@@ -22,8 +22,19 @@ struct ChatTemplate {
     // String appended after last user message to trigger generation
     std::string generation_prompt;
 
+    // Alternate generation prompt that disables an explicit <think> block
+    // (Qwen3.5's enable_thinking=false variant). Empty for templates without
+    // a closed-think variant — callers should fall back to generation_prompt
+    // in that case.
+    std::string generation_prompt_no_think;
+
     // Display prefix prepended to model output (e.g., "<think> " for reasoning models)
     std::string output_prefix;
+
+    // Display prefix used when generation_prompt_no_think is selected.
+    // For Qwen3.5 closed-think, the prompt already contains the
+    // "<think>\n\n</think>\n\n" prefix, so this is empty.
+    std::string output_prefix_no_think;
 
     // System message formatting (empty = plain text fallback)
     std::string system_prefix;
@@ -38,8 +49,21 @@ struct ChatTemplate {
     // Built-in default for DeepSeek-R1 distillation models
     static ChatTemplate default_deepseek_r1();
 
-    // Built-in default for standard Qwen models (ChatML format)
+    // Built-in default for standard Qwen models (ChatML format).
+    // Use for non-reasoning models (Qwen2). No closed-think variant — the
+    // `<think>` token isn't part of the trained vocabulary semantics.
     static ChatTemplate default_qwen_chatml();
+
+    // Built-in default for Qwen3 / Qwen3-MoE (reasoning models that emit
+    // `<think>...</think>` blocks themselves; jinja's enable_thinking=false
+    // injects the empty closed-think block to skip reasoning). Generation
+    // prompt does NOT pre-inject `<think>` — the model emits it.
+    static ChatTemplate default_qwen3_chatml();
+
+    // Built-in default for Qwen3.5 (reasoning model: assistant turn must start
+    // with `<think>\n`, otherwise the model drifts and hallucinates a fake
+    // user message before responding).
+    static ChatTemplate default_qwen3_5_chatml();
 
     // Format an OpenAI-style messages array into a prompt string.
     // Each pair is (role, content) where role is "system", "user", or "assistant".
